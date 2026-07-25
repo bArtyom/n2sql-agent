@@ -1,0 +1,23 @@
+# 本地学习与规划文档
+docs/
+总体重建计划.md
+学习笔记.md
+重建计划.md
+
+# 环境与秘密
+.env
+.env.*
+!.env.example
+
+# 编辑器与系统文件
+.DS_Store
+.idea/
+.vscode/
+
+# 构建与运行产物
+bin/
+dist/
+tmp/
+logs/
+*.log
+coverage.out
