@@ -1,0 +1,29 @@
+CREATE TABLE administrators (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO administrators (display_name) VALUES ('本地管理员');
+
+CREATE TABLE system_settings (
+    id SMALLINT PRIMARY KEY CHECK (id = 1),
+    administrator_id BIGINT NOT NULL REFERENCES administrators (id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO system_settings (id, administrator_id) VALUES (1, 1);
+
+CREATE TABLE model_providers (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    base_url TEXT NOT NULL,
+    api_key_env_var TEXT NOT NULL DEFAULT 'OPENAI_API_KEY',
+    chat_model TEXT NOT NULL,
+    embedding_model TEXT NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
