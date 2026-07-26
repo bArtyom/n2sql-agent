@@ -10,9 +10,15 @@
 
 ```sh
 cp .env.example .env
+set -a
+. ./.env
+set +a
 docker compose up -d
+go run ./cmd/migrate
 go run ./cmd/server
 ```
+
+请在同一个终端中运行以上命令，以便后续命令使用 `.env` 中导出的配置。
 
 后端健康检查：`http://localhost:8080/health`。
 

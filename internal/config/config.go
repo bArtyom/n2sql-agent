@@ -5,7 +5,8 @@ import "os"
 const defaultAddress = ":8080"
 
 type Config struct {
-	Address string
+	Address     string
+	DatabaseURL string
 }
 
 func Load() Config {
@@ -14,5 +15,8 @@ func Load() Config {
 		address = defaultAddress
 	}
 
-	return Config{Address: address}
+	return Config{
+		Address:     address,
+		DatabaseURL: os.Getenv("DATABASE_URL"),
+	}
 }
