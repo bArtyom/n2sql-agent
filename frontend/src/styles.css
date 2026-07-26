@@ -1,0 +1,51 @@
+:root {
+  color: #17362f;
+  background: #eef3ed;
+  font-family: "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", sans-serif;
+  font-synthesis: none;
+}
+
+* { box-sizing: border-box; }
+
+body { margin: 0; min-width: 320px; }
+
+button, input { font: inherit; }
+
+.shell {
+  min-height: 100vh;
+  padding: 28px clamp(24px, 6vw, 92px) 42px;
+  background:
+    radial-gradient(circle at 88% 7%, #c3d3b4 0, transparent 22rem),
+    linear-gradient(135deg, #f9faf4 0%, #eef3ed 55%, #dfe9dc 100%);
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.brand { display: inline-flex; align-items: center; gap: 10px; color: inherit; font-size: 18px; font-weight: 700; letter-spacing: .08em; text-decoration: none; }
+.brand-mark { display: grid; width: 32px; height: 32px; place-items: center; color: #f7f8f1; background: #17362f; font-family: Georgia, "Songti SC", serif; font-size: 19px; }
+.mode { color: #577067; font-size: 13px; letter-spacing: .08em; }
+
+.intro { max-width: 1180px; margin: clamp(88px, 18vh, 180px) auto 0; }
+.eyebrow { margin: 0 0 18px; color: #627a50; font-size: 13px; font-weight: 700; letter-spacing: .16em; }
+h1 { max-width: 840px; margin: 0; font-family: Georgia, "Songti SC", serif; font-size: clamp(46px, 7vw, 91px); font-weight: 500; letter-spacing: -.07em; line-height: .98; }
+h1 em { color: #5a7548; font-style: italic; }
+.summary { max-width: 430px; margin: 32px 0; color: #496257; font-size: 17px; line-height: 1.8; }
+
+.foundation { display: grid; grid-template-columns: 150px 1fr; gap: 18px 30px; max-width: 1180px; margin: clamp(94px, 18vh, 220px) auto 0; padding-top: 20px; border-top: 1px solid #b6c6b4; }
+.foundation-label { color: #597065; font-size: 13px; font-weight: 700; letter-spacing: .1em; }
+.foundation-items { display: flex; flex-wrap: wrap; gap: 10px; }
+.foundation-items span { padding: 6px 10px; border: 1px solid #a9bba8; color: #305248; font-size: 13px; }
+.foundation p { grid-column: 2; margin: 0; color: #697d74; font-size: 14px; }
+
+@media (max-width: 600px) {
+  .shell { padding-top: 20px; }
+  .intro { margin-top: 112px; }
+  .foundation { grid-template-columns: 1fr; }
+  .foundation p { grid-column: auto; }
+}

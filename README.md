@@ -1,5 +1,27 @@
 # n2sql-agent
 
-`n2sql-agent` 是一个面向受控数据库的 NL2SQL（自然语言转 SQL）应用。用户可通过自然语言查询业务数据，系统结合数据库结构与语义信息生成可解释的查询结果。
+`n2sql-agent` 是一个本地运行的通用文档知识库问答平台。用户可以整理资料，并基于已处理的文档获得带引用来源的回答。
 
-项目首先建设稳定、可扩展的工程底座与 Schema 知识库能力，并在此基础上逐步完善 SQL 生成、校验、执行和结果展示等核心功能。
+当前阶段建设稳定、可扩展的工程底座与文档知识库最小闭环。
+
+## 本地开发
+
+准备环境：Go 1.22+、Node.js 20+、Docker Compose。
+
+```sh
+cp .env.example .env
+docker compose up -d
+go run ./cmd/server
+```
+
+后端健康检查：`http://localhost:8080/health`。
+
+另开一个终端启动前端：
+
+```sh
+cd frontend
+npm install
+npm run dev
+```
+
+前端默认运行在 `http://localhost:5173`，并将后端请求代理到 `http://localhost:8080`。

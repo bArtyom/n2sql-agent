@@ -21,3 +21,6 @@ tmp/
 logs/
 *.log
 coverage.out
+.data/
+frontend/node_modules/
+frontend/dist/
