@@ -2,6 +2,7 @@ package modelclient_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,115 @@ import (
 
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 )
+
+func TestHTTPClientEmbedsTexts(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/v1/embeddings" {
+			t.Fatalf("path = %q, want %q", r.URL.Path, "/v1/embeddings")
+		}
+		if authorization := r.Header.Get("Authorization"); authorization != "Bearer test-secret" {
+			t.Fatalf("authorization = %q, want bearer token", authorization)
+		}
+		if contentType := r.Header.Get("Content-Type"); contentType != "application/json" {
+			t.Fatalf("content type = %q, want application/json", contentType)
+		}
+
+		var request struct {
+			Model string   `json:"model"`
+			Input []string `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if request.Model != "test-embedding-model" {
+			t.Fatalf("model = %q", request.Model)
+		}
+		if len(request.Input) != 2 || request.Input[0] != "first" || request.Input[1] != "second" {
+			t.Fatalf("input = %#v", request.Input)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"index":0,"embedding":[0.1,0.2]},{"index":1,"embedding":[0.3,0.4]}]}`))
+	}))
+	defer server.Close()
+
+	client := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
+	response, err := client.Embed(context.Background(), server.URL+"/v1", "test-secret", modelclient.EmbeddingRequest{
+		Model: "test-embedding-model",
+		Input: []string{"first", "second"},
+	})
+	if err != nil {
+		t.Fatalf("Embed() error = %v", err)
+	}
+	if len(response.Data) != 2 {
+		t.Fatalf("embedding count = %d, want 2", len(response.Data))
+	}
+	if response.Data[0].Index != 0 || len(response.Data[0].Vector) != 2 {
+		t.Fatalf("first embedding = %#v", response.Data[0])
+	}
+}
+
+func TestHTTPClientRejectsEmptyEmbeddingInput(t *testing.T) {
+	client := modelclient.NewHTTPClient(http.DefaultClient, []string{"api.openai.com"})
+
+	_, err := client.Embed(context.Background(), "https://api.openai.com/v1", "test-secret", modelclient.EmbeddingRequest{Model: "text-embedding"})
+	if err == nil {
+		t.Fatal("Embed() error = nil, want validation error")
+	}
+}
+
+func TestHTTPClientReportsEmbeddingEndpointFailure(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	client := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
+	_, err := client.Embed(context.Background(), server.URL, "test-secret", modelclient.EmbeddingRequest{
+		Model: "test-embedding-model",
+		Input: []string{"text"},
+	})
+	if err == nil {
+		t.Fatal("Embed() error = nil, want HTTP status error")
+	}
+}
+
+func TestHTTPClientRejectsInvalidEmbeddingResponse(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`not-json`))
+	}))
+	defer server.Close()
+
+	client := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
+	_, err := client.Embed(context.Background(), server.URL, "test-secret", modelclient.EmbeddingRequest{
+		Model: "test-embedding-model",
+		Input: []string{"text"},
+	})
+	if err == nil {
+		t.Fatal("Embed() error = nil, want decode error")
+	}
+}
+
+func TestHTTPClientRejectsIncompleteEmbeddingResponse(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"index":0,"embedding":[0.1]}]}`))
+	}))
+	defer server.Close()
+
+	client := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
+	_, err := client.Embed(context.Background(), server.URL, "test-secret", modelclient.EmbeddingRequest{
+		Model: "test-embedding-model",
+		Input: []string{"first", "second"},
+	})
+	if err == nil {
+		t.Fatal("Embed() error = nil, want incomplete response error")
+	}
+}
 
 func TestHTTPConnectionCheckerChecksModelsEndpoint(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

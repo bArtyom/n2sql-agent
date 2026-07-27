@@ -1,7 +1,9 @@
 package modelclient
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -13,12 +15,30 @@ type ConnectionChecker interface {
 	Check(context.Context, string, string) error
 }
 
-type HTTPConnectionChecker struct {
+type Embedder interface {
+	Embed(context.Context, string, string, EmbeddingRequest) (EmbeddingResponse, error)
+}
+
+type EmbeddingRequest struct {
+	Model string   `json:"model"`
+	Input []string `json:"input"`
+}
+
+type Embedding struct {
+	Index  int
+	Vector []float32
+}
+
+type EmbeddingResponse struct {
+	Data []Embedding
+}
+
+type HTTPClient struct {
 	client       *http.Client
 	allowedHosts map[string]struct{}
 }
 
-func NewHTTPConnectionChecker(client *http.Client, allowedHosts []string) *HTTPConnectionChecker {
+func NewHTTPClient(client *http.Client, allowedHosts []string) *HTTPClient {
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -30,11 +50,18 @@ func NewHTTPConnectionChecker(client *http.Client, allowedHosts []string) *HTTPC
 	for _, host := range allowedHosts {
 		trustedHosts[strings.ToLower(host)] = struct{}{}
 	}
-	return &HTTPConnectionChecker{client: &noRedirectClient, allowedHosts: trustedHosts}
+	return &HTTPClient{client: &noRedirectClient, allowedHosts: trustedHosts}
 }
 
-func (c *HTTPConnectionChecker) Check(ctx context.Context, baseURL, apiKey string) error {
-	endpoint, err := modelsEndpoint(baseURL, c.allowedHosts)
+// HTTPConnectionChecker is retained until the outer application wiring moves to HTTPClient.
+type HTTPConnectionChecker = HTTPClient
+
+func NewHTTPConnectionChecker(client *http.Client, allowedHosts []string) *HTTPClient {
+	return NewHTTPClient(client, allowedHosts)
+}
+
+func (c *HTTPClient) Check(ctx context.Context, baseURL, apiKey string) error {
+	endpoint, err := apiEndpoint(baseURL, "models", c.allowedHosts)
 	if err != nil {
 		return err
 	}
@@ -57,7 +84,68 @@ func (c *HTTPConnectionChecker) Check(ctx context.Context, baseURL, apiKey strin
 	return nil
 }
 
-func modelsEndpoint(baseURL string, allowedHosts map[string]struct{}) (string, error) {
+func (c *HTTPClient) Embed(ctx context.Context, baseURL, apiKey string, embeddingRequest EmbeddingRequest) (EmbeddingResponse, error) {
+	if embeddingRequest.Model == "" || len(embeddingRequest.Input) == 0 {
+		return EmbeddingResponse{}, fmt.Errorf("embedding model and input are required")
+	}
+
+	endpoint, err := apiEndpoint(baseURL, "embeddings", c.allowedHosts)
+	if err != nil {
+		return EmbeddingResponse{}, err
+	}
+	body, err := json.Marshal(embeddingRequest)
+	if err != nil {
+		return EmbeddingResponse{}, fmt.Errorf("encode embedding request: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return EmbeddingResponse{}, fmt.Errorf("create embeddings request: %w", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+apiKey)
+	request.Header.Set("Content-Type", "application/json")
+
+	response, err := c.client.Do(request)
+	if err != nil {
+		return EmbeddingResponse{}, fmt.Errorf("request embeddings endpoint: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return EmbeddingResponse{}, fmt.Errorf("embeddings endpoint returned HTTP %d", response.StatusCode)
+	}
+
+	var payload struct {
+		Data []struct {
+			Index     int       `json:"index"`
+			Embedding []float32 `json:"embedding"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		return EmbeddingResponse{}, fmt.Errorf("decode embeddings response: %w", err)
+	}
+
+	if len(payload.Data) != len(embeddingRequest.Input) {
+		return EmbeddingResponse{}, fmt.Errorf("embeddings response count = %d, want %d", len(payload.Data), len(embeddingRequest.Input))
+	}
+
+	result := EmbeddingResponse{Data: make([]Embedding, len(embeddingRequest.Input))}
+	seenIndexes := make(map[int]struct{}, len(payload.Data))
+	for _, embedding := range payload.Data {
+		if embedding.Index < 0 || embedding.Index >= len(embeddingRequest.Input) {
+			return EmbeddingResponse{}, fmt.Errorf("embeddings response index %d is out of range", embedding.Index)
+		}
+		if _, seen := seenIndexes[embedding.Index]; seen {
+			return EmbeddingResponse{}, fmt.Errorf("embeddings response contains duplicate index %d", embedding.Index)
+		}
+		if len(embedding.Embedding) == 0 {
+			return EmbeddingResponse{}, fmt.Errorf("embeddings response vector at index %d is empty", embedding.Index)
+		}
+		seenIndexes[embedding.Index] = struct{}{}
+		result.Data[embedding.Index] = Embedding{Index: embedding.Index, Vector: embedding.Embedding}
+	}
+	return result, nil
+}
+
+func apiEndpoint(baseURL, resource string, allowedHosts map[string]struct{}) (string, error) {
 	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return "", fmt.Errorf("invalid model provider base URL")
@@ -69,7 +157,7 @@ func modelsEndpoint(baseURL string, allowedHosts map[string]struct{}) (string, e
 		return "", fmt.Errorf("model provider base URL host is not allowed")
 	}
 
-	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/models"
+	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/" + resource
 	parsed.RawQuery = ""
 	return parsed.String(), nil
 }
