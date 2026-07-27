@@ -8,7 +8,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 )
 
-func NewModelProvider(store modelprovider.Store) http.Handler {
+func NewModelProvider(store modelprovider.Store, apiKeyEnvVar string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -26,7 +26,7 @@ func NewModelProvider(store modelprovider.Store) http.Handler {
 			var provider modelprovider.Provider
 			decoder := json.NewDecoder(r.Body)
 			decoder.DisallowUnknownFields()
-			if err := decoder.Decode(&provider); err != nil || provider.Name == "" || provider.BaseURL == "" || provider.APIKeyEnvVar == "" || provider.ChatModel == "" || provider.EmbeddingModel == "" {
+			if err := decoder.Decode(&provider); err != nil || provider.Name == "" || provider.BaseURL == "" || provider.APIKeyEnvVar != apiKeyEnvVar || provider.ChatModel == "" || provider.EmbeddingModel == "" {
 				http.Error(w, `{"error":"invalid model provider"}`, http.StatusBadRequest)
 				return
 			}

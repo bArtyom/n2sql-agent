@@ -4,9 +4,11 @@ import (
 	"database/sql"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/app"
 	"github.com/bArtyom/n2sql-agent/internal/config"
+	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -20,8 +22,12 @@ func main() {
 	defer db.Close()
 
 	server := &http.Server{
-		Addr:    cfg.Address,
-		Handler: app.New(modelprovider.NewPostgresStore(db)),
+		Addr: cfg.Address,
+		Handler: app.New(
+			modelprovider.NewPostgresStore(db),
+			modelclient.NewHTTPConnectionChecker(&http.Client{Timeout: 10 * time.Second}, cfg.ModelProviderAllowedHosts),
+			cfg.ModelProviderAPIKeyEnvVar,
+		),
 	}
 
 	log.Printf("server listening on %s", cfg.Address)

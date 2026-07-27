@@ -27,7 +27,7 @@ func (s *modelProviderStoreStub) Save(_ context.Context, provider modelprovider.
 }
 
 func TestModelProviderReturnsNotFoundWhenUnconfigured(t *testing.T) {
-	endpoint := handler.NewModelProvider(&modelProviderStoreStub{err: modelprovider.ErrNotFound})
+	endpoint := handler.NewModelProvider(&modelProviderStoreStub{err: modelprovider.ErrNotFound}, "OPENAI_API_KEY")
 	response := httptest.NewRecorder()
 
 	endpoint.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/model-provider", nil))
@@ -39,7 +39,7 @@ func TestModelProviderReturnsNotFoundWhenUnconfigured(t *testing.T) {
 
 func TestModelProviderSavesAndReturnsConfiguration(t *testing.T) {
 	store := &modelProviderStoreStub{err: errors.New("not used")}
-	endpoint := handler.NewModelProvider(store)
+	endpoint := handler.NewModelProvider(store, "OPENAI_API_KEY")
 	body := `{"name":"OpenAI Compatible","baseUrl":"https://example.com/v1","apiKeyEnvVar":"OPENAI_API_KEY","chatModel":"chat","embeddingModel":"embedding","enabled":true}`
 
 	update := httptest.NewRecorder()
@@ -58,5 +58,17 @@ func TestModelProviderSavesAndReturnsConfiguration(t *testing.T) {
 	}
 	if strings.Contains(read.Body.String(), `"apiKey":`) {
 		t.Fatalf("response must not include an API key: %s", read.Body.String())
+	}
+}
+
+func TestModelProviderRejectsUnexpectedAPIKeyEnvironmentVariable(t *testing.T) {
+	endpoint := handler.NewModelProvider(&modelProviderStoreStub{}, "OPENAI_API_KEY")
+	body := `{"name":"OpenAI Compatible","baseUrl":"https://example.com/v1","apiKeyEnvVar":"DATABASE_URL","chatModel":"chat","embeddingModel":"embedding","enabled":true}`
+	response := httptest.NewRecorder()
+
+	endpoint.ServeHTTP(response, httptest.NewRequest(http.MethodPut, "/api/model-provider", strings.NewReader(body)))
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusBadRequest)
 	}
 }
