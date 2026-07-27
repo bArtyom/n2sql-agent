@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
@@ -121,6 +122,22 @@ func TestHTTPClientRejectsIncompleteEmbeddingResponse(t *testing.T) {
 	}
 }
 
+func TestHTTPClientRejectsOversizedEmbeddingResponse(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("x", 2<<20+1)))
+	}))
+	defer server.Close()
+
+	client := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
+	_, err := client.Embed(context.Background(), server.URL, "test-secret", modelclient.EmbeddingRequest{
+		Model: "test-embedding-model",
+		Input: []string{"text"},
+	})
+	if err == nil {
+		t.Fatal("Embed() error = nil, want response size error")
+	}
+}
+
 func TestHTTPConnectionCheckerChecksModelsEndpoint(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -136,7 +153,7 @@ func TestHTTPConnectionCheckerChecksModelsEndpoint(t *testing.T) {
 	}))
 	defer server.Close()
 
-	checker := modelclient.NewHTTPConnectionChecker(server.Client(), []string{serverHost(t, server.URL)})
+	checker := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
 	if err := checker.Check(context.Background(), server.URL+"/v1", "test-secret"); err != nil {
 		t.Fatalf("Check() error = %v, want nil", err)
 	}
@@ -148,14 +165,14 @@ func TestHTTPConnectionCheckerRejectsNonSuccessStatus(t *testing.T) {
 	}))
 	defer server.Close()
 
-	checker := modelclient.NewHTTPConnectionChecker(server.Client(), []string{serverHost(t, server.URL)})
+	checker := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
 	if err := checker.Check(context.Background(), server.URL, "test-secret"); err == nil {
 		t.Fatal("Check() error = nil, want HTTP status error")
 	}
 }
 
 func TestHTTPConnectionCheckerRejectsUntrustedHostBeforeSendingKey(t *testing.T) {
-	checker := modelclient.NewHTTPConnectionChecker(http.DefaultClient, []string{"api.openai.com"})
+	checker := modelclient.NewHTTPClient(http.DefaultClient, []string{"api.openai.com"})
 
 	if err := checker.Check(context.Background(), "https://untrusted.example/v1", "test-secret"); err == nil {
 		t.Fatal("Check() error = nil, want untrusted host error")
@@ -163,7 +180,7 @@ func TestHTTPConnectionCheckerRejectsUntrustedHostBeforeSendingKey(t *testing.T)
 }
 
 func TestHTTPConnectionCheckerRejectsHTTPURL(t *testing.T) {
-	checker := modelclient.NewHTTPConnectionChecker(http.DefaultClient, []string{"api.openai.com"})
+	checker := modelclient.NewHTTPClient(http.DefaultClient, []string{"api.openai.com"})
 
 	if err := checker.Check(context.Background(), "http://api.openai.com/v1", "test-secret"); err == nil {
 		t.Fatal("Check() error = nil, want HTTPS validation error")
@@ -171,7 +188,7 @@ func TestHTTPConnectionCheckerRejectsHTTPURL(t *testing.T) {
 }
 
 func TestHTTPConnectionCheckerReportsTransportError(t *testing.T) {
-	checker := modelclient.NewHTTPConnectionChecker(&http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+	checker := modelclient.NewHTTPClient(&http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("network unavailable")
 	})}, []string{"api.openai.com"})
 
@@ -191,7 +208,7 @@ func TestHTTPConnectionCheckerDoesNotFollowRedirects(t *testing.T) {
 	}))
 	defer source.Close()
 
-	checker := modelclient.NewHTTPConnectionChecker(source.Client(), []string{serverHost(t, source.URL)})
+	checker := modelclient.NewHTTPClient(source.Client(), []string{serverHost(t, source.URL)})
 	if err := checker.Check(context.Background(), source.URL, "test-secret"); err == nil {
 		t.Fatal("Check() error = nil, want redirect status error")
 	}

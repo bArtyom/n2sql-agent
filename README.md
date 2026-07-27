@@ -26,6 +26,14 @@ go run ./cmd/server
 
 为避免 API Key 被发送给错误的地址，`.env` 中的 `MODEL_PROVIDER_ALLOWED_HOSTS` 必须列出允许测试的模型服务主机名（逗号分隔）。测试仅接受 HTTPS `baseUrl`，且不会跟随重定向。使用其他 OpenAI 兼容服务时，同时更新该列表和 `MODEL_PROVIDER_API_KEY_ENV_VAR`，再重新导出 `.env` 后启动后端。
 
+嵌入调用测试使用 `POST http://localhost:8080/api/model-provider/embedding-test`，请求体示例：
+
+```json
+{"input":["需要转成向量的文本"]}
+```
+
+它使用已保存的 `embeddingModel` 调用 `{baseUrl}/embeddings` 并返回向量。该接口仅用于本地开发验证；调用真实模型服务可能产生费用。
+
 另开一个终端启动前端：
 
 ```sh

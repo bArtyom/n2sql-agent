@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
 )
+
+const maxEmbeddingResponseBytes = 2 << 20
 
 // ConnectionChecker verifies that an API endpoint accepts the configured key.
 type ConnectionChecker interface {
@@ -25,12 +28,12 @@ type EmbeddingRequest struct {
 }
 
 type Embedding struct {
-	Index  int
-	Vector []float32
+	Index  int       `json:"index"`
+	Vector []float32 `json:"vector"`
 }
 
 type EmbeddingResponse struct {
-	Data []Embedding
+	Data []Embedding `json:"data"`
 }
 
 type HTTPClient struct {
@@ -51,13 +54,6 @@ func NewHTTPClient(client *http.Client, allowedHosts []string) *HTTPClient {
 		trustedHosts[strings.ToLower(host)] = struct{}{}
 	}
 	return &HTTPClient{client: &noRedirectClient, allowedHosts: trustedHosts}
-}
-
-// HTTPConnectionChecker is retained until the outer application wiring moves to HTTPClient.
-type HTTPConnectionChecker = HTTPClient
-
-func NewHTTPConnectionChecker(client *http.Client, allowedHosts []string) *HTTPClient {
-	return NewHTTPClient(client, allowedHosts)
 }
 
 func (c *HTTPClient) Check(ctx context.Context, baseURL, apiKey string) error {
@@ -113,13 +109,21 @@ func (c *HTTPClient) Embed(ctx context.Context, baseURL, apiKey string, embeddin
 		return EmbeddingResponse{}, fmt.Errorf("embeddings endpoint returned HTTP %d", response.StatusCode)
 	}
 
+	body, err = io.ReadAll(io.LimitReader(response.Body, maxEmbeddingResponseBytes+1))
+	if err != nil {
+		return EmbeddingResponse{}, fmt.Errorf("read embeddings response: %w", err)
+	}
+	if len(body) > maxEmbeddingResponseBytes {
+		return EmbeddingResponse{}, fmt.Errorf("embeddings response is too large")
+	}
+
 	var payload struct {
 		Data []struct {
 			Index     int       `json:"index"`
 			Embedding []float32 `json:"embedding"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		return EmbeddingResponse{}, fmt.Errorf("decode embeddings response: %w", err)
 	}
 
