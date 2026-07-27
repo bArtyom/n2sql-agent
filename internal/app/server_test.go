@@ -11,7 +11,7 @@ import (
 func TestServerServesHealthCheck(t *testing.T) {
 	response := httptest.NewRecorder()
 
-	app.New().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health", nil))
+	app.New(nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health", nil))
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
