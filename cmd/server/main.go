@@ -26,6 +26,7 @@ func main() {
 	providerStore := modelprovider.NewPostgresStore(db)
 	modelClient := modelclient.NewHTTPClient(&http.Client{Timeout: 10 * time.Second}, cfg.ModelProviderAllowedHosts)
 	embeddingService := modelruntime.NewEmbeddingService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
+	chatService := modelruntime.NewChatService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
 
 	server := &http.Server{
 		Addr: cfg.Address,
@@ -33,6 +34,7 @@ func main() {
 			Providers:         providerStore,
 			ConnectionChecker: modelClient,
 			Embeddings:        embeddingService,
+			Chat:              chatService,
 			APIKeyEnvVar:      cfg.ModelProviderAPIKeyEnvVar,
 		}),
 	}

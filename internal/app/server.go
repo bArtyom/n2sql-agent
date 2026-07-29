@@ -13,6 +13,7 @@ type Dependencies struct {
 	Providers         modelprovider.Store
 	ConnectionChecker modelclient.ConnectionChecker
 	Embeddings        modelruntime.EmbeddingRunner
+	Chat              modelruntime.ChatRunner
 	APIKeyEnvVar      string
 }
 
@@ -26,6 +27,9 @@ func New(dependencies Dependencies) http.Handler {
 	mux.Handle("POST /api/model-provider/connection-test", handler.NewModelProviderConnectionTest(dependencies.Providers, dependencies.ConnectionChecker, dependencies.APIKeyEnvVar))
 	if dependencies.Embeddings != nil {
 		mux.Handle("POST /api/model-provider/embedding-test", handler.NewModelProviderEmbeddingTest(dependencies.Embeddings))
+	}
+	if dependencies.Chat != nil {
+		mux.Handle("POST /api/model-provider/chat-test", handler.NewModelProviderChatTest(dependencies.Chat))
 	}
 
 	return mux

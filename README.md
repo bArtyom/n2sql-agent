@@ -34,6 +34,14 @@ go run ./cmd/server
 
 它使用已保存的 `embeddingModel` 调用 `{baseUrl}/embeddings` 并返回向量。该接口仅用于本地开发验证；调用真实模型服务可能产生费用。
 
+聊天调用测试使用 `POST http://localhost:8080/api/model-provider/chat-test`，请求体示例：
+
+```json
+{"message":"请只回复 OK"}
+```
+
+它使用已保存的 `chatModel` 调用 `{baseUrl}/chat/completions`，并返回模型的第一条回答。该接口同样仅用于本地开发验证；调用真实模型服务可能产生费用。
+
 另开一个终端启动前端：
 
 ```sh

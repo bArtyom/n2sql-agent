@@ -63,6 +63,94 @@ func TestHTTPClientEmbedsTexts(t *testing.T) {
 	}
 }
 
+func TestHTTPClientCompletesChat(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %q, want %q", r.URL.Path, "/v1/chat/completions")
+		}
+		if authorization := r.Header.Get("Authorization"); authorization != "Bearer test-secret" {
+			t.Fatalf("authorization = %q, want bearer token", authorization)
+		}
+
+		var request struct {
+			Model    string `json:"model"`
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+			Stream bool `json:"stream"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if request.Model != "test-chat-model" {
+			t.Fatalf("model = %q", request.Model)
+		}
+		if len(request.Messages) != 1 || request.Messages[0].Role != "user" || request.Messages[0].Content != "reply with OK" {
+			t.Fatalf("messages = %#v", request.Messages)
+		}
+		if request.Stream {
+			t.Fatal("stream = true, want false")
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"OK"}}]}`))
+	}))
+	defer server.Close()
+
+	client := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
+	response, err := client.Chat(context.Background(), server.URL+"/v1", "test-secret", modelclient.ChatRequest{
+		Model: "test-chat-model",
+		Messages: []modelclient.ChatMessage{{
+			Role:    "user",
+			Content: "reply with OK",
+		}},
+		Stream: false,
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if response.Message != "OK" {
+		t.Fatalf("message = %q, want %q", response.Message, "OK")
+	}
+}
+
+func TestHTTPClientRejectsChatEndpointFailure(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	client := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
+	_, err := client.Chat(context.Background(), server.URL, "test-secret", modelclient.ChatRequest{
+		Model:    "test-chat-model",
+		Messages: []modelclient.ChatMessage{{Role: "user", Content: "hello"}},
+	})
+	if err == nil {
+		t.Fatal("Chat() error = nil, want HTTP status error")
+	}
+}
+
+func TestHTTPClientRejectsInvalidChatResponse(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer server.Close()
+
+	client := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
+	_, err := client.Chat(context.Background(), server.URL, "test-secret", modelclient.ChatRequest{
+		Model:    "test-chat-model",
+		Messages: []modelclient.ChatMessage{{Role: "user", Content: "hello"}},
+	})
+	if err == nil {
+		t.Fatal("Chat() error = nil, want invalid response error")
+	}
+}
+
 func TestHTTPClientRejectsEmptyEmbeddingInput(t *testing.T) {
 	client := modelclient.NewHTTPClient(http.DefaultClient, []string{"api.openai.com"})
 

@@ -11,7 +11,10 @@ import (
 	"strings"
 )
 
-const maxEmbeddingResponseBytes = 2 << 20
+const (
+	maxEmbeddingResponseBytes = 2 << 20
+	maxChatResponseBytes      = 1 << 20
+)
 
 // ConnectionChecker verifies that an API endpoint accepts the configured key.
 type ConnectionChecker interface {
@@ -20,6 +23,10 @@ type ConnectionChecker interface {
 
 type Embedder interface {
 	Embed(context.Context, string, string, EmbeddingRequest) (EmbeddingResponse, error)
+}
+
+type ChatCompleter interface {
+	Chat(context.Context, string, string, ChatRequest) (ChatResponse, error)
 }
 
 type EmbeddingRequest struct {
@@ -34,6 +41,21 @@ type Embedding struct {
 
 type EmbeddingResponse struct {
 	Data []Embedding `json:"data"`
+}
+
+type ChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type ChatRequest struct {
+	Model    string        `json:"model"`
+	Messages []ChatMessage `json:"messages"`
+	Stream   bool          `json:"stream"`
+}
+
+type ChatResponse struct {
+	Message string `json:"message"`
 }
 
 type HTTPClient struct {
@@ -147,6 +169,62 @@ func (c *HTTPClient) Embed(ctx context.Context, baseURL, apiKey string, embeddin
 		result.Data[embedding.Index] = Embedding{Index: embedding.Index, Vector: embedding.Embedding}
 	}
 	return result, nil
+}
+
+func (c *HTTPClient) Chat(ctx context.Context, baseURL, apiKey string, chatRequest ChatRequest) (ChatResponse, error) {
+	if chatRequest.Model == "" || len(chatRequest.Messages) == 0 {
+		return ChatResponse{}, fmt.Errorf("chat model and messages are required")
+	}
+	for _, message := range chatRequest.Messages {
+		if message.Role == "" || message.Content == "" {
+			return ChatResponse{}, fmt.Errorf("chat message role and content are required")
+		}
+	}
+
+	endpoint, err := apiEndpoint(baseURL, "chat/completions", c.allowedHosts)
+	if err != nil {
+		return ChatResponse{}, err
+	}
+	body, err := json.Marshal(chatRequest)
+	if err != nil {
+		return ChatResponse{}, fmt.Errorf("encode chat request: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return ChatResponse{}, fmt.Errorf("create chat request: %w", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+apiKey)
+	request.Header.Set("Content-Type", "application/json")
+
+	response, err := c.client.Do(request)
+	if err != nil {
+		return ChatResponse{}, fmt.Errorf("request chat endpoint: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return ChatResponse{}, fmt.Errorf("chat endpoint returned HTTP %d", response.StatusCode)
+	}
+
+	body, err = io.ReadAll(io.LimitReader(response.Body, maxChatResponseBytes+1))
+	if err != nil {
+		return ChatResponse{}, fmt.Errorf("read chat response: %w", err)
+	}
+	if len(body) > maxChatResponseBytes {
+		return ChatResponse{}, fmt.Errorf("chat response is too large")
+	}
+
+	var payload struct {
+		Choices []struct {
+			Message ChatMessage `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return ChatResponse{}, fmt.Errorf("decode chat response: %w", err)
+	}
+	if len(payload.Choices) == 0 || payload.Choices[0].Message.Content == "" {
+		return ChatResponse{}, fmt.Errorf("chat response does not contain a message")
+	}
+	return ChatResponse{Message: payload.Choices[0].Message.Content}, nil
 }
 
 func apiEndpoint(baseURL, resource string, allowedHosts map[string]struct{}) (string, error) {

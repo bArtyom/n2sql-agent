@@ -34,6 +34,12 @@ func (embeddingRunnerStub) Embed(context.Context, []string) (modelclient.Embeddi
 	return modelclient.EmbeddingResponse{Data: []modelclient.Embedding{{Index: 0, Vector: []float32{0.1}}}}, nil
 }
 
+type chatRunnerStub struct{}
+
+func (chatRunnerStub) Chat(context.Context, string) (modelclient.ChatResponse, error) {
+	return modelclient.ChatResponse{Message: "OK"}, nil
+}
+
 func TestServerServesHealthCheck(t *testing.T) {
 	response := httptest.NewRecorder()
 
@@ -82,6 +88,27 @@ func TestServerDoesNotRegisterEmbeddingRouteWithoutRunner(t *testing.T) {
 	response := httptest.NewRecorder()
 
 	app.New(app.Dependencies{}).ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/model-provider/embedding-test", strings.NewReader(`{"input":["document chunk"]}`)))
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
+func TestServerRoutesChatTest(t *testing.T) {
+	response := httptest.NewRecorder()
+	server := app.New(app.Dependencies{Chat: chatRunnerStub{}})
+
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/model-provider/chat-test", strings.NewReader(`{"message":"reply with OK"}`)))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
+	}
+}
+
+func TestServerDoesNotRegisterChatRouteWithoutRunner(t *testing.T) {
+	response := httptest.NewRecorder()
+
+	app.New(app.Dependencies{}).ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/model-provider/chat-test", strings.NewReader(`{"message":"hello"}`)))
 
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("status code = %d, want %d", response.Code, http.StatusNotFound)
