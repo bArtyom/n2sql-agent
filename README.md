@@ -22,6 +22,20 @@ go run ./cmd/server
 
 后端健康检查：`http://localhost:8080/health`。
 
+知识库管理接口：
+
+```sh
+curl -X POST http://localhost:8080/api/knowledge-bases \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Go 学习资料","description":"后端笔记"}'
+
+curl http://localhost:8080/api/knowledge-bases
+
+curl -X DELETE http://localhost:8080/api/knowledge-bases/1
+```
+
+删除知识库会级联删除关联的文档与处理任务记录。原始文件的上传与清理流程尚未实现。
+
 模型服务配置保存后，可调用 `POST http://localhost:8080/api/model-provider/connection-test` 检查连通性。该请求会从 `.env` 指定的环境变量（默认示例为 `OPENAI_API_KEY`）读取密钥，并向模型服务的 `{baseUrl}/models` 发起认证请求；密钥不会写入 PostgreSQL 或接口响应。
 
 为避免 API Key 被发送给错误的地址，`.env` 中的 `MODEL_PROVIDER_ALLOWED_HOSTS` 必须列出允许测试的模型服务主机名（逗号分隔）。测试仅接受 HTTPS `baseUrl`，且不会跟随重定向。使用其他 OpenAI 兼容服务时，同时更新该列表和 `MODEL_PROVIDER_API_KEY_ENV_VAR`，再重新导出 `.env` 后启动后端。

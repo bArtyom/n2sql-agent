@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/bArtyom/n2sql-agent/internal/app"
+	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 )
@@ -39,6 +40,18 @@ type chatRunnerStub struct{}
 func (chatRunnerStub) Chat(context.Context, string) (modelclient.ChatResponse, error) {
 	return modelclient.ChatResponse{Message: "OK"}, nil
 }
+
+type knowledgeBaseStoreStub struct{}
+
+func (knowledgeBaseStoreStub) Create(context.Context, knowledgebase.CreateInput) (knowledgebase.KnowledgeBase, error) {
+	return knowledgebase.KnowledgeBase{ID: 1, Name: "Go 学习资料"}, nil
+}
+
+func (knowledgeBaseStoreStub) List(context.Context) ([]knowledgebase.KnowledgeBase, error) {
+	return []knowledgebase.KnowledgeBase{}, nil
+}
+
+func (knowledgeBaseStoreStub) Delete(context.Context, int64) error { return nil }
 
 func TestServerServesHealthCheck(t *testing.T) {
 	response := httptest.NewRecorder()
@@ -112,5 +125,16 @@ func TestServerDoesNotRegisterChatRouteWithoutRunner(t *testing.T) {
 
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("status code = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
+func TestServerRoutesKnowledgeBases(t *testing.T) {
+	response := httptest.NewRecorder()
+	server := app.New(app.Dependencies{KnowledgeBases: knowledgeBaseStoreStub{}})
+
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/knowledge-bases", strings.NewReader(`{"name":"Go 学习资料"}`)))
+
+	if response.Code != http.StatusCreated {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusCreated)
 	}
 }
