@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/bArtyom/n2sql-agent/internal/app"
+	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
@@ -52,6 +53,12 @@ func (knowledgeBaseStoreStub) List(context.Context) ([]knowledgebase.KnowledgeBa
 }
 
 func (knowledgeBaseStoreStub) Delete(context.Context, int64) error { return nil }
+
+type documentUploaderStub struct{}
+
+func (documentUploaderStub) Upload(context.Context, document.UploadInput) (document.Document, error) {
+	return document.Document{ID: 1, ProcessingStatus: "pending"}, nil
+}
 
 func TestServerServesHealthCheck(t *testing.T) {
 	response := httptest.NewRecorder()
@@ -133,6 +140,20 @@ func TestServerRoutesKnowledgeBases(t *testing.T) {
 	server := app.New(app.Dependencies{KnowledgeBases: knowledgeBaseStoreStub{}})
 
 	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/knowledge-bases", strings.NewReader(`{"name":"Go 学习资料"}`)))
+
+	if response.Code != http.StatusCreated {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusCreated)
+	}
+}
+
+func TestServerRoutesDocumentUpload(t *testing.T) {
+	response := httptest.NewRecorder()
+	server := app.New(app.Dependencies{Documents: documentUploaderStub{}})
+	body := "--boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"notes.txt\"\r\nContent-Type: text/plain\r\n\r\nhello\r\n--boundary--\r\n"
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/4/documents", strings.NewReader(body))
+	request.Header.Set("Content-Type", "multipart/form-data; boundary=boundary")
+
+	server.ServeHTTP(response, request)
 
 	if response.Code != http.StatusCreated {
 		t.Fatalf("status code = %d, want %d", response.Code, http.StatusCreated)

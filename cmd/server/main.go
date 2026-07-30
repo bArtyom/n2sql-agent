@@ -9,6 +9,7 @@ import (
 
 	"github.com/bArtyom/n2sql-agent/internal/app"
 	"github.com/bArtyom/n2sql-agent/internal/config"
+	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
@@ -26,6 +27,8 @@ func main() {
 
 	providerStore := modelprovider.NewPostgresStore(db)
 	knowledgeBaseStore := knowledgebase.NewPostgresStore(db)
+	documentStore := document.NewPostgresStore(db)
+	documentService := document.NewService(documentStore, document.NewLocalFileStore(cfg.UploadDir))
 	modelClient := modelclient.NewHTTPClient(&http.Client{Timeout: 10 * time.Second}, cfg.ModelProviderAllowedHosts)
 	embeddingService := modelruntime.NewEmbeddingService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
 	chatService := modelruntime.NewChatService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
@@ -35,6 +38,7 @@ func main() {
 		Handler: app.New(app.Dependencies{
 			Providers:         providerStore,
 			KnowledgeBases:    knowledgeBaseStore,
+			Documents:         documentService,
 			ConnectionChecker: modelClient,
 			Embeddings:        embeddingService,
 			Chat:              chatService,

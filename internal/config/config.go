@@ -9,6 +9,7 @@ const (
 	defaultAddress                   = ":8080"
 	defaultModelProviderAPIKeyEnvVar = "OPENAI_API_KEY"
 	defaultModelProviderAllowedHost  = "api.openai.com"
+	defaultUploadDir                 = "./.data/uploads"
 )
 
 type Config struct {
@@ -16,6 +17,7 @@ type Config struct {
 	DatabaseURL               string
 	ModelProviderAPIKeyEnvVar string
 	ModelProviderAllowedHosts []string
+	UploadDir                 string
 }
 
 func Load() Config {
@@ -37,7 +39,15 @@ func Load() Config {
 		DatabaseURL:               os.Getenv("DATABASE_URL"),
 		ModelProviderAPIKeyEnvVar: apiKeyEnvVar,
 		ModelProviderAllowedHosts: allowedHosts,
+		UploadDir:                 uploadDir(),
 	}
+}
+
+func uploadDir() string {
+	if value := os.Getenv("UPLOAD_DIR"); value != "" {
+		return value
+	}
+	return defaultUploadDir
 }
 
 func splitHosts(value string) []string {

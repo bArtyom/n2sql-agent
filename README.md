@@ -34,7 +34,16 @@ curl http://localhost:8080/api/knowledge-bases
 curl -X DELETE http://localhost:8080/api/knowledge-bases/1
 ```
 
-删除知识库会级联删除关联的文档与处理任务记录。原始文件的上传与清理流程尚未实现。
+删除知识库会级联删除关联的文档与处理任务记录。删除知识库时的原始文件清理流程尚未实现。
+
+上传文件使用 `POST /api/knowledge-bases/{id}/documents`，提交名为 `file` 的 `multipart/form-data` 字段：
+
+```sh
+curl -X POST http://localhost:8080/api/knowledge-bases/1/documents \
+  -F 'file=@./notes.txt;type=text/plain'
+```
+
+首版只接收 Markdown、TXT 与 PDF，单个文件不超过 10MB。源文件保存在 `UPLOAD_DIR`（默认 `./.data/uploads`），并在数据库中同时创建文档与 `pending` 处理任务。
 
 模型服务配置保存后，可调用 `POST http://localhost:8080/api/model-provider/connection-test` 检查连通性。该请求会从 `.env` 指定的环境变量（默认示例为 `OPENAI_API_KEY`）读取密钥，并向模型服务的 `{baseUrl}/models` 发起认证请求；密钥不会写入 PostgreSQL 或接口响应。
 
