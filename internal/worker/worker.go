@@ -26,6 +26,17 @@ type Store interface {
 
 type Processor func(context.Context, Task) error
 
+type TextExtractor interface {
+	Extract(context.Context, string, string) (string, error)
+}
+
+func NewTextExtractionProcessor(extractor TextExtractor) Processor {
+	return func(ctx context.Context, task Task) error {
+		_, err := extractor.Extract(ctx, task.StoragePath, task.ContentType)
+		return err
+	}
+}
+
 type Runner struct {
 	store     Store
 	processor Processor
