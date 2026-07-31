@@ -30,6 +30,25 @@ type TextExtractor interface {
 	Extract(context.Context, string, string) (string, error)
 }
 
+type TextSplitter interface{ Split(string) []string }
+type ChunkStore interface {
+	Replace(context.Context, int64, []string) error
+}
+
+func NewChunkingProcessor(extractor TextExtractor, splitter TextSplitter, chunks ChunkStore) Processor {
+	return func(ctx context.Context, task Task) error {
+		text, err := extractor.Extract(ctx, task.StoragePath, task.ContentType)
+		if err != nil {
+			return err
+		}
+		parts := splitter.Split(text)
+		if len(parts) == 0 {
+			return errors.New("document contains no chunks")
+		}
+		return chunks.Replace(ctx, task.DocumentID, parts)
+	}
+}
+
 func NewTextExtractionProcessor(extractor TextExtractor) Processor {
 	return func(ctx context.Context, task Task) error {
 		_, err := extractor.Extract(ctx, task.StoragePath, task.ContentType)
