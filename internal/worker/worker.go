@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 )
 
 const maxFailureMessageBytes = 2000
@@ -87,6 +88,21 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 		return true, fmt.Errorf("mark document processing task succeeded: %w", err)
 	}
 	return true, nil
+}
+
+func (r *Runner) Run(ctx context.Context, interval time.Duration, report func(error)) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if _, err := r.RunOnce(ctx); err != nil && report != nil {
+			report(err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 type PostgresStore struct{ db *sql.DB }

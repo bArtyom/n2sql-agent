@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strings"
+	"time"
 )
 
 const (
@@ -10,6 +11,7 @@ const (
 	defaultModelProviderAPIKeyEnvVar = "OPENAI_API_KEY"
 	defaultModelProviderAllowedHost  = "api.openai.com"
 	defaultUploadDir                 = "./.data/uploads"
+	defaultWorkerPollInterval        = 2 * time.Second
 )
 
 type Config struct {
@@ -18,6 +20,7 @@ type Config struct {
 	ModelProviderAPIKeyEnvVar string
 	ModelProviderAllowedHosts []string
 	UploadDir                 string
+	WorkerPollInterval        time.Duration
 }
 
 func Load() Config {
@@ -40,7 +43,16 @@ func Load() Config {
 		ModelProviderAPIKeyEnvVar: apiKeyEnvVar,
 		ModelProviderAllowedHosts: allowedHosts,
 		UploadDir:                 uploadDir(),
+		WorkerPollInterval:        workerPollInterval(),
 	}
+}
+
+func workerPollInterval() time.Duration {
+	value, err := time.ParseDuration(os.Getenv("WORKER_POLL_INTERVAL"))
+	if err != nil || value <= 0 {
+		return defaultWorkerPollInterval
+	}
+	return value
 }
 
 func uploadDir() string {
