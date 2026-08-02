@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 )
 
 const maxFailureMessageBytes = 2000
@@ -33,7 +35,10 @@ type TextExtractor interface {
 
 type TextSplitter interface{ Split(string) []string }
 type ChunkStore interface {
-	Replace(context.Context, int64, []string) error
+	Replace(context.Context, int64, []string, [][]float32) error
+}
+type Embedder interface {
+	Embed(context.Context, []string) (modelclient.EmbeddingResponse, error)
 }
 
 func NewChunkingProcessor(extractor TextExtractor, splitter TextSplitter, chunks ChunkStore) Processor {
@@ -46,7 +51,32 @@ func NewChunkingProcessor(extractor TextExtractor, splitter TextSplitter, chunks
 		if len(parts) == 0 {
 			return errors.New("document contains no chunks")
 		}
-		return chunks.Replace(ctx, task.DocumentID, parts)
+		return chunks.Replace(ctx, task.DocumentID, parts, nil)
+	}
+}
+
+func NewEmbeddingChunkingProcessor(extractor TextExtractor, splitter TextSplitter, chunks ChunkStore, embedder Embedder) Processor {
+	return func(ctx context.Context, task Task) error {
+		text, err := extractor.Extract(ctx, task.StoragePath, task.ContentType)
+		if err != nil {
+			return err
+		}
+		parts := splitter.Split(text)
+		if len(parts) == 0 {
+			return errors.New("document contains no chunks")
+		}
+		response, err := embedder.Embed(ctx, parts)
+		if err != nil {
+			return fmt.Errorf("embed document chunks: %w", err)
+		}
+		if len(response.Data) != len(parts) {
+			return fmt.Errorf("embedding count = %d, want %d", len(response.Data), len(parts))
+		}
+		embeddings := make([][]float32, len(parts))
+		for index, embedding := range response.Data {
+			embeddings[index] = embedding.Vector
+		}
+		return chunks.Replace(ctx, task.DocumentID, parts, embeddings)
 	}
 }
 

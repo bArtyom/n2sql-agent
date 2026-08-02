@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/worker"
 )
 
@@ -15,6 +16,43 @@ type taskStoreStub struct {
 	failed    struct {
 		id      int64
 		message string
+	}
+}
+
+type extractorStub struct{}
+
+func (extractorStub) Extract(context.Context, string, string) (string, error) {
+	return "source text", nil
+}
+
+type splitterStub struct{}
+
+func (splitterStub) Split(string) []string { return []string{"first", "second"} }
+
+type chunkStoreStub struct {
+	chunks     []string
+	embeddings [][]float32
+}
+
+func (s *chunkStoreStub) Replace(_ context.Context, _ int64, chunks []string, embeddings [][]float32) error {
+	s.chunks, s.embeddings = chunks, embeddings
+	return nil
+}
+
+type embedderStub struct{}
+
+func (embedderStub) Embed(context.Context, []string) (modelclient.EmbeddingResponse, error) {
+	return modelclient.EmbeddingResponse{Data: []modelclient.Embedding{{Index: 0, Vector: []float32{1}}, {Index: 1, Vector: []float32{2}}}}, nil
+}
+
+func TestEmbeddingChunkingProcessorStoresMatchingVectors(t *testing.T) {
+	store := &chunkStoreStub{}
+	processor := worker.NewEmbeddingChunkingProcessor(extractorStub{}, splitterStub{}, store, embedderStub{})
+	if err := processor(context.Background(), worker.Task{DocumentID: 4}); err != nil {
+		t.Fatalf("processor error = %v", err)
+	}
+	if len(store.chunks) != 2 || store.chunks[1] != "second" || store.embeddings[1][0] != 2 {
+		t.Fatalf("chunks=%#v embeddings=%#v", store.chunks, store.embeddings)
 	}
 }
 

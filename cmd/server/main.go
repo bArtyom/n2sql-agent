@@ -33,11 +33,11 @@ func main() {
 	knowledgeBaseStore := knowledgebase.NewPostgresStore(db)
 	documentStore := document.NewPostgresStore(db)
 	documentService := document.NewService(documentStore, document.NewLocalFileStore(cfg.UploadDir))
-	processor := worker.NewChunkingProcessor(documentextractor.New(cfg.UploadDir), documentchunk.NewSplitter(1000, 150), documentchunk.NewPostgresStore(db))
-	runner := worker.NewRunner(worker.NewPostgresStore(db), processor)
 	modelClient := modelclient.NewHTTPClient(&http.Client{Timeout: 10 * time.Second}, cfg.ModelProviderAllowedHosts)
 	embeddingService := modelruntime.NewEmbeddingService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
 	chatService := modelruntime.NewChatService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
+	processor := worker.NewEmbeddingChunkingProcessor(documentextractor.New(cfg.UploadDir), documentchunk.NewSplitter(1000, 150), documentchunk.NewPostgresStore(db), embeddingService)
+	runner := worker.NewRunner(worker.NewPostgresStore(db), processor)
 
 	server := &http.Server{
 		Addr: cfg.Address,

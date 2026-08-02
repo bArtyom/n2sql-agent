@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -47,13 +48,16 @@ func (s *Splitter) Split(text string) []string {
 }
 
 type Store interface {
-	Replace(context.Context, int64, []string) error
+	Replace(context.Context, int64, []string, [][]float32) error
 }
 type PostgresStore struct{ db *sql.DB }
 
 func NewPostgresStore(db *sql.DB) *PostgresStore { return &PostgresStore{db: db} }
 
-func (s *PostgresStore) Replace(ctx context.Context, documentID int64, chunks []string) error {
+func (s *PostgresStore) Replace(ctx context.Context, documentID int64, chunks []string, embeddings [][]float32) error {
+	if len(embeddings) != 0 && len(embeddings) != len(chunks) {
+		return fmt.Errorf("embedding count = %d, want %d", len(embeddings), len(chunks))
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin chunk transaction: %w", err)
@@ -63,7 +67,11 @@ func (s *PostgresStore) Replace(ctx context.Context, documentID int64, chunks []
 		return fmt.Errorf("delete document chunks: %w", err)
 	}
 	for position, content := range chunks {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO document_chunks (document_id, position, content) VALUES ($1, $2, $3)`, documentID, position, content); err != nil {
+		var embedding any
+		if len(embeddings) != 0 {
+			embedding = vectorLiteral(embeddings[position])
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO document_chunks (document_id, position, content, embedding) VALUES ($1, $2, $3, $4::vector)`, documentID, position, content, embedding); err != nil {
 			return fmt.Errorf("create document chunk: %w", err)
 		}
 	}
@@ -71,4 +79,12 @@ func (s *PostgresStore) Replace(ctx context.Context, documentID int64, chunks []
 		return fmt.Errorf("commit chunk transaction: %w", err)
 	}
 	return nil
+}
+
+func vectorLiteral(vector []float32) string {
+	values := make([]string, len(vector))
+	for index, value := range vector {
+		values[index] = strconv.FormatFloat(float64(value), 'g', -1, 32)
+	}
+	return "[" + strings.Join(values, ",") + "]"
 }
