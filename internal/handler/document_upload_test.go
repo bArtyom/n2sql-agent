@@ -12,6 +12,15 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/handler"
 )
 
+type documentReaderStub struct {
+	documents []document.Document
+	err       error
+}
+
+func (s documentReaderStub) List(context.Context, int64) ([]document.Document, error) {
+	return s.documents, s.err
+}
+
 type documentUploaderStub struct {
 	input document.UploadInput
 	err   error
@@ -71,6 +80,37 @@ func TestDocumentUploadReportsMissingKnowledgeBase(t *testing.T) {
 
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("status code = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
+func TestDocumentListReturnsDocuments(t *testing.T) {
+	endpoint := handler.NewDocumentList(documentReaderStub{documents: []document.Document{
+		{ID: 12, KnowledgeBaseID: 4, OriginalFilename: "notes.txt", ProcessingStatus: "processing"},
+	}})
+	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/4/documents", nil)
+	request.SetPathValue("id", "4")
+	response := httptest.NewRecorder()
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
+	}
+	if got := response.Body.String(); !bytes.Contains([]byte(got), []byte(`"processingStatus":"processing"`)) {
+		t.Fatalf("response body = %s", got)
+	}
+}
+
+func TestDocumentListRejectsInvalidKnowledgeBaseID(t *testing.T) {
+	endpoint := handler.NewDocumentList(documentReaderStub{})
+	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/nope/documents", nil)
+	request.SetPathValue("id", "nope")
+	response := httptest.NewRecorder()
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusBadRequest)
 	}
 }
 

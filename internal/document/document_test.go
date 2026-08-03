@@ -16,15 +16,32 @@ type documentStoreStub struct {
 	ensureErr error
 	createErr error
 	input     document.CreateInput
+	documents []document.Document
 }
 
 func (s *documentStoreStub) EnsureKnowledgeBase(context.Context, int64) error { return s.ensureErr }
+func (s *documentStoreStub) List(context.Context, int64) ([]document.Document, error) {
+	return s.documents, nil
+}
 func (s *documentStoreStub) Create(_ context.Context, input document.CreateInput) (document.Document, error) {
 	s.input = input
 	if s.createErr != nil {
 		return document.Document{}, s.createErr
 	}
 	return document.Document{ID: 8, KnowledgeBaseID: input.KnowledgeBaseID, OriginalFilename: input.OriginalFilename, ContentType: input.ContentType, SizeBytes: input.SizeBytes, ProcessingStatus: "pending"}, nil
+}
+
+func TestServiceListsDocumentsForKnowledgeBase(t *testing.T) {
+	want := []document.Document{{ID: 8, KnowledgeBaseID: 4, OriginalFilename: "notes.txt", ProcessingStatus: "succeeded"}}
+	service := document.NewService(&documentStoreStub{documents: want}, document.NewLocalFileStore(t.TempDir()))
+
+	got, err := service.List(context.Background(), 4)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(got) != 1 || got[0].ProcessingStatus != "succeeded" {
+		t.Fatalf("List() = %#v, want %#v", got, want)
+	}
 }
 
 func TestServiceUploadsDocumentAndCreatesPendingTask(t *testing.T) {

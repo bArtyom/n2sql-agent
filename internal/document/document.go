@@ -52,7 +52,12 @@ type CreateInput struct {
 
 type Store interface {
 	EnsureKnowledgeBase(context.Context, int64) error
+	List(context.Context, int64) ([]Document, error)
 	Create(context.Context, CreateInput) (Document, error)
+}
+
+type Reader interface {
+	List(context.Context, int64) ([]Document, error)
 }
 
 type FileStore interface {
@@ -98,6 +103,20 @@ func (s *Service) Upload(ctx context.Context, input UploadInput) (Document, erro
 		return Document{}, err
 	}
 	return document, nil
+}
+
+func (s *Service) List(ctx context.Context, knowledgeBaseID int64) ([]Document, error) {
+	if knowledgeBaseID <= 0 {
+		return nil, ErrKnowledgeBaseNotFound
+	}
+	if err := s.store.EnsureKnowledgeBase(ctx, knowledgeBaseID); err != nil {
+		return nil, err
+	}
+	documents, err := s.store.List(ctx, knowledgeBaseID)
+	if err != nil {
+		return nil, err
+	}
+	return documents, nil
 }
 
 type LocalFileStore struct{ root string }
@@ -170,6 +189,50 @@ func (s *PostgresStore) EnsureKnowledgeBase(ctx context.Context, id int64) error
 		return ErrKnowledgeBaseNotFound
 	}
 	return nil
+}
+
+func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Document, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT d.id, d.knowledge_base_id, d.original_filename, d.content_type, d.size_bytes,
+		       COALESCE(task.status, 'pending') AS processing_status
+		FROM documents AS d
+		LEFT JOIN LATERAL (
+			SELECT status
+			FROM document_processing_tasks
+			WHERE document_id = d.id
+			ORDER BY created_at DESC, id DESC
+			LIMIT 1
+		) AS task ON TRUE
+		WHERE d.knowledge_base_id = $1
+		  AND d.knowledge_base_id IN (
+			SELECT id FROM knowledge_bases
+			WHERE administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
+		  )
+		ORDER BY d.created_at DESC, d.id DESC`, knowledgeBaseID)
+	if err != nil {
+		return nil, fmt.Errorf("list documents: %w", err)
+	}
+	defer rows.Close()
+
+	documents := make([]Document, 0)
+	for rows.Next() {
+		var document Document
+		if err := rows.Scan(
+			&document.ID,
+			&document.KnowledgeBaseID,
+			&document.OriginalFilename,
+			&document.ContentType,
+			&document.SizeBytes,
+			&document.ProcessingStatus,
+		); err != nil {
+			return nil, fmt.Errorf("scan document: %w", err)
+		}
+		documents = append(documents, document)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate documents: %w", err)
+	}
+	return documents, nil
 }
 
 func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Document, error) {
