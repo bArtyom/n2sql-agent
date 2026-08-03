@@ -181,6 +181,7 @@ async function askQuestion() {
   messages.value.push({ role: "user", content: prompt });
   const answer: ChatMessage = { role: "assistant", content: "", sources: [], status: "streaming" };
   messages.value.push(answer);
+  const answerIndex = messages.value.length - 1;
   streaming.value = true;
   try {
     const response = await fetch(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/chat/stream`, {
@@ -200,21 +201,27 @@ async function askQuestion() {
       buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
       const blocks = buffer.split(/\r?\n\r?\n/);
       buffer = blocks.pop() ?? "";
-      blocks.forEach((block) => consumeSSEBlock(block, answer));
+      blocks.forEach((block) => consumeSSEBlock(block, answerIndex));
       if (done) break;
     }
-    if (buffer.trim()) consumeSSEBlock(buffer, answer);
-    if (answer.status === "streaming") answer.status = "done";
+    if (buffer.trim()) consumeSSEBlock(buffer, answerIndex);
+    const currentAnswer = messages.value[answerIndex];
+    if (currentAnswer?.status === "streaming") currentAnswer.status = "done";
   } catch (error) {
-    answer.status = "error";
-    answer.content = error instanceof Error ? error.message : "问答失败，请稍后重试。";
+    const currentAnswer = messages.value[answerIndex];
+    if (currentAnswer) {
+      currentAnswer.status = "error";
+      currentAnswer.content = error instanceof Error ? error.message : "问答失败，请稍后重试。";
+    }
     showError(error);
   } finally {
     streaming.value = false;
   }
 }
 
-function consumeSSEBlock(block: string, answer: ChatMessage) {
+function consumeSSEBlock(block: string, answerIndex: number) {
+  const answer = messages.value[answerIndex];
+  if (!answer) return;
   let event = "message";
   const dataLines: string[] = [];
   for (const line of block.split(/\r?\n/)) {
@@ -339,12 +346,12 @@ onUnmounted(() => window.clearInterval(documentPollTimer));
             <div><span class="section-index">01</span><h2>资料架</h2></div>
             <span class="panel-meta">{{ documents.length }} FILES</span>
           </div>
-          <div class="upload-zone" :class="{ 'upload-zone--busy': uploading }" @dragover.prevent @drop.prevent="onDrop" @click="openFilePicker">
-            <input ref="fileInput" class="visually-hidden" type="file" accept=".md,.txt,.pdf" multiple @change="onFileChange" />
+          <label class="upload-zone" :class="{ 'upload-zone--busy': uploading }" for="document-upload" role="button" tabindex="0" @dragover.prevent @drop.prevent="onDrop" @keydown.enter.prevent="openFilePicker" @keydown.space.prevent="openFilePicker">
+            <input id="document-upload" ref="fileInput" class="visually-hidden" type="file" accept=".md,.txt" multiple @change="onFileChange" />
             <span class="upload-icon">↑</span>
-            <div><strong>{{ uploading ? "正在接收资料…" : "拖入文件，或点击上传" }}</strong><span>支持 Markdown、TXT、PDF · 单文件不超过 10 MB</span></div>
+            <div><strong>{{ uploading ? "正在接收资料…" : "拖入文件，或点击上传" }}</strong><span>支持 Markdown、TXT · 单文件不超过 10 MB</span></div>
             <span class="upload-shortcut">⌘ U</span>
-          </div>
+          </label>
           <div v-if="loadingDocuments" class="list-loading">正在读取资料架…</div>
           <div v-else-if="!documents.length" class="empty-documents">
             <span class="empty-glyph">∷</span><strong>这里还很安静</strong><p>上传第一份资料，Worker 会自动提取、切分并建立向量索引。</p>
