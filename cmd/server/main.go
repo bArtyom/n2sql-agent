@@ -17,6 +17,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
+	"github.com/bArtyom/n2sql-agent/internal/rag"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 	"github.com/bArtyom/n2sql-agent/internal/worker"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -41,6 +42,7 @@ func main() {
 	processor := worker.NewEmbeddingChunkingProcessor(documentextractor.New(cfg.UploadDir), documentchunk.NewSplitter(1000, 150), chunkStore, embeddingService)
 	runner := worker.NewRunner(worker.NewPostgresStore(db), processor)
 	searchService := retrieval.NewService(embeddingService, chunkStore)
+	answerService := rag.NewService(searchService, chatService)
 
 	server := &http.Server{
 		Addr: cfg.Address,
@@ -52,6 +54,7 @@ func main() {
 			Embeddings:        embeddingService,
 			Chat:              chatService,
 			Search:            searchService,
+			Answers:           answerService,
 			APIKeyEnvVar:      cfg.ModelProviderAPIKeyEnvVar,
 		}),
 	}

@@ -52,10 +52,11 @@ type Store interface {
 }
 
 type SearchResult struct {
-	DocumentID int64   `json:"documentId"`
-	Position   int     `json:"position"`
-	Content    string  `json:"content"`
-	Distance   float64 `json:"distance"`
+	DocumentID       int64   `json:"documentId"`
+	OriginalFilename string  `json:"originalFilename,omitempty"`
+	Position         int     `json:"position"`
+	Content          string  `json:"content"`
+	Distance         float64 `json:"distance"`
 }
 
 type PostgresStore struct{ db *sql.DB }
@@ -92,7 +93,7 @@ func (s *PostgresStore) Replace(ctx context.Context, documentID int64, chunks []
 func (s *PostgresStore) Search(ctx context.Context, knowledgeBaseID int64, embedding []float32, limit int) ([]SearchResult, error) {
 	queryVector := vectorLiteral(embedding)
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT chunks.document_id, chunks.position, chunks.content,
+		SELECT chunks.document_id, documents.original_filename, chunks.position, chunks.content,
 		       chunks.embedding <=> $2::vector AS distance
 		FROM document_chunks AS chunks
 		JOIN documents AS documents ON documents.id = chunks.document_id
@@ -108,7 +109,7 @@ func (s *PostgresStore) Search(ctx context.Context, knowledgeBaseID int64, embed
 	results := make([]SearchResult, 0, limit)
 	for rows.Next() {
 		var result SearchResult
-		if err := rows.Scan(&result.DocumentID, &result.Position, &result.Content, &result.Distance); err != nil {
+		if err := rows.Scan(&result.DocumentID, &result.OriginalFilename, &result.Position, &result.Content, &result.Distance); err != nil {
 			return nil, fmt.Errorf("scan similar document chunk: %w", err)
 		}
 		results = append(results, result)

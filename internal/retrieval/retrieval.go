@@ -16,7 +16,10 @@ var (
 	ErrInvalidLimit         = errors.New("invalid search result limit")
 )
 
-const MaxResults = 20
+const (
+	DefaultResults = 5
+	MaxResults     = 20
+)
 
 type Result = documentchunk.SearchResult
 

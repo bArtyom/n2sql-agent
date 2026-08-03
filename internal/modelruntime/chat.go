@@ -37,6 +37,13 @@ func NewChatService(providers modelprovider.Store, completer modelclient.ChatCom
 }
 
 func (s *ChatService) Chat(ctx context.Context, message string) (modelclient.ChatResponse, error) {
+	return s.ChatMessages(ctx, []modelclient.ChatMessage{{
+		Role:    "user",
+		Content: message,
+	}})
+}
+
+func (s *ChatService) ChatMessages(ctx context.Context, messages []modelclient.ChatMessage) (modelclient.ChatResponse, error) {
 	provider, err := s.providers.Current(ctx)
 	if err != nil {
 		return modelclient.ChatResponse{}, err
@@ -51,12 +58,9 @@ func (s *ChatService) Chat(ctx context.Context, message string) (modelclient.Cha
 	}
 
 	response, err := s.completer.Chat(ctx, provider.BaseURL, apiKey, modelclient.ChatRequest{
-		Model: provider.ChatModel,
-		Messages: []modelclient.ChatMessage{{
-			Role:    "user",
-			Content: message,
-		}},
-		Stream: false,
+		Model:    provider.ChatModel,
+		Messages: messages,
+		Stream:   false,
 	})
 	if err != nil {
 		return modelclient.ChatResponse{}, &ChatCallError{Err: fmt.Errorf("complete chat: %w", err)}

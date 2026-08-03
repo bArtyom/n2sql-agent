@@ -74,3 +74,26 @@ func TestChatServiceUsesConfiguredChatModelAndEnvironmentKey(t *testing.T) {
 		t.Fatal("stream = true, want false")
 	}
 }
+
+func TestChatServiceForwardsSystemAndUserMessages(t *testing.T) {
+	store := providerStoreStub{provider: modelprovider.Provider{
+		BaseURL:      "https://api.example.com/v1",
+		APIKeyEnvVar: "TEST_MODEL_PROVIDER_API_KEY",
+		ChatModel:    "test-chat-model",
+	}}
+	completer := &chatCompleterStub{}
+	service := modelruntime.NewChatService(store, completer, "TEST_MODEL_PROVIDER_API_KEY", func(string) (string, bool) {
+		return "test-secret", true
+	})
+	messages := []modelclient.ChatMessage{
+		{Role: "system", Content: "use sources only"},
+		{Role: "user", Content: "question"},
+	}
+
+	if _, err := service.ChatMessages(context.Background(), messages); err != nil {
+		t.Fatalf("ChatMessages() error = %v", err)
+	}
+	if len(completer.request.Messages) != 2 || completer.request.Messages[0] != messages[0] || completer.request.Messages[1] != messages[1] {
+		t.Fatalf("messages = %#v, want %#v", completer.request.Messages, messages)
+	}
+}

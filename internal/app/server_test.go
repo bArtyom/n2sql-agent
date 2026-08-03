@@ -12,6 +12,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
+	"github.com/bArtyom/n2sql-agent/internal/rag"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 )
 
@@ -47,6 +48,12 @@ type searcherStub struct{}
 
 func (searcherStub) Search(context.Context, int64, string, int) ([]retrieval.Result, error) {
 	return []retrieval.Result{{Content: "Go 后端"}}, nil
+}
+
+type answererStub struct{}
+
+func (answererStub) Answer(context.Context, int64, string, int) (rag.Response, error) {
+	return rag.Response{Answer: "OK"}, nil
 }
 
 type knowledgeBaseStoreStub struct{}
@@ -147,6 +154,17 @@ func TestServerRoutesKnowledgeBaseSearch(t *testing.T) {
 	server := app.New(app.Dependencies{Search: searcherStub{}})
 
 	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/search", strings.NewReader(`{"query":"后端"}`)))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
+	}
+}
+
+func TestServerRoutesKnowledgeBaseChat(t *testing.T) {
+	response := httptest.NewRecorder()
+	server := app.New(app.Dependencies{Answers: answererStub{}})
+
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/chat", strings.NewReader(`{"message":"问题"}`)))
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)

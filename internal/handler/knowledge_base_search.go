@@ -14,9 +14,8 @@ import (
 )
 
 const (
-	defaultSearchLimit = 5
-	maxSearchQuery     = 8000
-	maxSearchBody      = maxSearchQuery + 4096
+	maxSearchQuery = 8000
+	maxSearchBody  = maxSearchQuery + 4096
 )
 
 func NewKnowledgeBaseSearch(searcher retrieval.Searcher) http.Handler {
@@ -51,7 +50,7 @@ func NewKnowledgeBaseSearch(searcher retrieval.Searcher) http.Handler {
 			return
 		}
 		if request.Limit == 0 {
-			request.Limit = defaultSearchLimit
+			request.Limit = retrieval.DefaultResults
 		}
 		if request.Limit < 1 || request.Limit > retrieval.MaxResults {
 			http.Error(w, `{"error":"invalid search limit"}`, http.StatusBadRequest)

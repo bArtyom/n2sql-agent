@@ -67,6 +67,16 @@ curl -X POST http://localhost:8080/api/knowledge-bases/1/search \
 
 接口会将问题向量化，并在指定知识库内按 pgvector 距离返回最相似的文本块。目前它只返回检索结果，还没有生成最终回答。
 
+知识库问答使用 `POST http://localhost:8080/api/knowledge-bases/{id}/chat`，请求体示例：
+
+```sh
+curl -X POST http://localhost:8080/api/knowledge-bases/1/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"这份资料如何启动服务？","topK":5}'
+```
+
+接口会先检索相关文本块，再调用聊天模型生成回答，并在 `sources` 字段返回使用到的来源。目前使用普通 JSON 返回，还未启用 SSE 流式输出。
+
 聊天调用测试使用 `POST http://localhost:8080/api/model-provider/chat-test`，请求体示例：
 
 ```json
