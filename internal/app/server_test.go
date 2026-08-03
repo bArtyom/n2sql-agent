@@ -12,6 +12,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
+	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 )
 
 type modelProviderStoreStub struct {
@@ -40,6 +41,12 @@ type chatRunnerStub struct{}
 
 func (chatRunnerStub) Chat(context.Context, string) (modelclient.ChatResponse, error) {
 	return modelclient.ChatResponse{Message: "OK"}, nil
+}
+
+type searcherStub struct{}
+
+func (searcherStub) Search(context.Context, int64, string, int) ([]retrieval.Result, error) {
+	return []retrieval.Result{{Content: "Go 后端"}}, nil
 }
 
 type knowledgeBaseStoreStub struct{}
@@ -132,6 +139,17 @@ func TestServerDoesNotRegisterChatRouteWithoutRunner(t *testing.T) {
 
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("status code = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
+func TestServerRoutesKnowledgeBaseSearch(t *testing.T) {
+	response := httptest.NewRecorder()
+	server := app.New(app.Dependencies{Search: searcherStub{}})
+
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/search", strings.NewReader(`{"query":"后端"}`)))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
 	}
 }
 

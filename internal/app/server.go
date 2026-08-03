@@ -9,6 +9,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
+	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 )
 
 type Dependencies struct {
@@ -18,6 +19,7 @@ type Dependencies struct {
 	ConnectionChecker modelclient.ConnectionChecker
 	Embeddings        modelruntime.EmbeddingRunner
 	Chat              modelruntime.ChatRunner
+	Search            retrieval.Searcher
 	APIKeyEnvVar      string
 }
 
@@ -43,6 +45,9 @@ func New(dependencies Dependencies) http.Handler {
 	}
 	if dependencies.Chat != nil {
 		mux.Handle("POST /api/model-provider/chat-test", handler.NewModelProviderChatTest(dependencies.Chat))
+	}
+	if dependencies.Search != nil {
+		mux.Handle("POST /api/knowledge-bases/{id}/search", handler.NewKnowledgeBaseSearch(dependencies.Search))
 	}
 
 	return mux

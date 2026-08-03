@@ -50,6 +50,14 @@ func (s *Splitter) Split(text string) []string {
 type Store interface {
 	Replace(context.Context, int64, []string, [][]float32) error
 }
+
+type SearchResult struct {
+	DocumentID int64   `json:"documentId"`
+	Position   int     `json:"position"`
+	Content    string  `json:"content"`
+	Distance   float64 `json:"distance"`
+}
+
 type PostgresStore struct{ db *sql.DB }
 
 func NewPostgresStore(db *sql.DB) *PostgresStore { return &PostgresStore{db: db} }
@@ -79,6 +87,36 @@ func (s *PostgresStore) Replace(ctx context.Context, documentID int64, chunks []
 		return fmt.Errorf("commit chunk transaction: %w", err)
 	}
 	return nil
+}
+
+func (s *PostgresStore) Search(ctx context.Context, knowledgeBaseID int64, embedding []float32, limit int) ([]SearchResult, error) {
+	queryVector := vectorLiteral(embedding)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT chunks.document_id, chunks.position, chunks.content,
+		       chunks.embedding <=> $2::vector AS distance
+		FROM document_chunks AS chunks
+		JOIN documents AS documents ON documents.id = chunks.document_id
+		WHERE documents.knowledge_base_id = $1
+		  AND chunks.embedding IS NOT NULL
+		ORDER BY chunks.embedding <=> $2::vector, chunks.position
+		LIMIT $3`, knowledgeBaseID, queryVector, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query similar document chunks: %w", err)
+	}
+	defer rows.Close()
+
+	results := make([]SearchResult, 0, limit)
+	for rows.Next() {
+		var result SearchResult
+		if err := rows.Scan(&result.DocumentID, &result.Position, &result.Content, &result.Distance); err != nil {
+			return nil, fmt.Errorf("scan similar document chunk: %w", err)
+		}
+		results = append(results, result)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate similar document chunks: %w", err)
+	}
+	return results, nil
 }
 
 func vectorLiteral(vector []float32) string {

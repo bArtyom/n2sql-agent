@@ -57,6 +57,16 @@ curl -X POST http://localhost:8080/api/knowledge-bases/1/documents \
 
 它使用已保存的 `embeddingModel` 调用 `{baseUrl}/embeddings` 并返回向量。该接口仅用于本地开发验证；调用真实模型服务可能产生费用。
 
+知识库语义检索使用 `POST http://localhost:8080/api/knowledge-bases/{id}/search`，请求体示例：
+
+```sh
+curl -X POST http://localhost:8080/api/knowledge-bases/1/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"这份资料如何启动服务？","limit":5}'
+```
+
+接口会将问题向量化，并在指定知识库内按 pgvector 距离返回最相似的文本块。目前它只返回检索结果，还没有生成最终回答。
+
 聊天调用测试使用 `POST http://localhost:8080/api/model-provider/chat-test`，请求体示例：
 
 ```json

@@ -17,6 +17,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
+	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 	"github.com/bArtyom/n2sql-agent/internal/worker"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -36,8 +37,10 @@ func main() {
 	modelClient := modelclient.NewHTTPClient(&http.Client{Timeout: 10 * time.Second}, cfg.ModelProviderAllowedHosts)
 	embeddingService := modelruntime.NewEmbeddingService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
 	chatService := modelruntime.NewChatService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
-	processor := worker.NewEmbeddingChunkingProcessor(documentextractor.New(cfg.UploadDir), documentchunk.NewSplitter(1000, 150), documentchunk.NewPostgresStore(db), embeddingService)
+	chunkStore := documentchunk.NewPostgresStore(db)
+	processor := worker.NewEmbeddingChunkingProcessor(documentextractor.New(cfg.UploadDir), documentchunk.NewSplitter(1000, 150), chunkStore, embeddingService)
 	runner := worker.NewRunner(worker.NewPostgresStore(db), processor)
+	searchService := retrieval.NewService(embeddingService, chunkStore)
 
 	server := &http.Server{
 		Addr: cfg.Address,
@@ -48,6 +51,7 @@ func main() {
 			ConnectionChecker: modelClient,
 			Embeddings:        embeddingService,
 			Chat:              chatService,
+			Search:            searchService,
 			APIKeyEnvVar:      cfg.ModelProviderAPIKeyEnvVar,
 		}),
 	}
