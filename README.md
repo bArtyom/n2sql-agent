@@ -75,7 +75,9 @@ curl -X POST http://localhost:8080/api/knowledge-bases/1/chat \
   -d '{"message":"这份资料如何启动服务？","topK":5}'
 ```
 
-接口会先检索相关文本块，再调用聊天模型生成回答，并在 `sources` 字段返回使用到的来源。目前使用普通 JSON 返回，还未启用 SSE 流式输出。
+普通问答接口会先检索相关文本块，再调用聊天模型生成回答，并在 `sources` 字段返回使用到的来源；它使用 JSON 一次性返回结果。
+
+流式问答使用 `POST http://localhost:8080/api/knowledge-bases/{id}/chat/stream`。它返回 `text/event-stream`，事件顺序为 `sources`、多个 `delta`，最后是 `done`；如果流式过程中发生错误，则返回 `error` 事件。该接口适合前端使用 `fetch` 读取响应流。
 
 聊天调用测试使用 `POST http://localhost:8080/api/model-provider/chat-test`，请求体示例：
 

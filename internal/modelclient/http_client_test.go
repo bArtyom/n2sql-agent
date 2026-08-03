@@ -118,6 +118,117 @@ func TestHTTPClientCompletesChat(t *testing.T) {
 	}
 }
 
+func TestHTTPClientStreamsChatDeltas(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Stream bool `json:"stream"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if !request.Stream {
+			t.Fatal("stream = false, want true")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"，世界\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	client := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
+	var deltas []string
+	err := client.ChatStream(context.Background(), server.URL+"/v1", "test-secret", modelclient.ChatRequest{
+		Model:    "test-chat-model",
+		Messages: []modelclient.ChatMessage{{Role: "user", Content: "hello"}},
+	}, func(delta string) error {
+		deltas = append(deltas, delta)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ChatStream() error = %v", err)
+	}
+	if strings.Join(deltas, "") != "你好，世界" {
+		t.Fatalf("deltas = %#v", deltas)
+	}
+}
+
+func TestHTTPClientCombinesMultilineSSEData(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("data: {\"choices\":[\n"))
+		_, _ = w.Write([]byte("data: {\"delta\":{\"content\":\"分片\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	client := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
+	var delta string
+	err := client.ChatStream(context.Background(), server.URL, "test-secret", modelclient.ChatRequest{
+		Model:    "test-chat-model",
+		Messages: []modelclient.ChatMessage{{Role: "user", Content: "hello"}},
+	}, func(value string) error {
+		delta += value
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ChatStream() error = %v", err)
+	}
+	if delta != "分片" {
+		t.Fatalf("delta = %q, want %q", delta, "分片")
+	}
+}
+
+func TestHTTPClientRejectsChatStreamWithoutDoneEvent(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"))
+	}))
+	defer server.Close()
+
+	client := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
+	err := client.ChatStream(context.Background(), server.URL, "test-secret", modelclient.ChatRequest{
+		Model:    "test-chat-model",
+		Messages: []modelclient.ChatMessage{{Role: "user", Content: "hello"}},
+	}, func(string) error { return nil })
+	if err == nil {
+		t.Fatal("ChatStream() error = nil, want missing done error")
+	}
+}
+
+func TestHTTPClientPropagatesChatStreamCallbackFailure(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	client := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
+	err := client.ChatStream(context.Background(), server.URL, "test-secret", modelclient.ChatRequest{
+		Model:    "test-chat-model",
+		Messages: []modelclient.ChatMessage{{Role: "user", Content: "hello"}},
+	}, func(string) error { return errors.New("client disconnected") })
+	if err == nil || !strings.Contains(err.Error(), "client disconnected") {
+		t.Fatalf("ChatStream() error = %v, want callback error", err)
+	}
+}
+
+func TestHTTPClientStopsChatStreamWhenContextIsCanceled(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	client := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
+	err := client.ChatStream(ctx, server.URL, "test-secret", modelclient.ChatRequest{
+		Model:    "test-chat-model",
+		Messages: []modelclient.ChatMessage{{Role: "user", Content: "hello"}},
+	}, func(string) error { return nil })
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("ChatStream() error = %v, want context.Canceled", err)
+	}
+}
+
 func TestHTTPClientRejectsChatEndpointFailure(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

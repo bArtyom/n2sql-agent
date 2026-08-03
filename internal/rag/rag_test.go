@@ -32,6 +32,11 @@ func (s *chatStub) ChatMessages(_ context.Context, messages []modelclient.ChatMe
 	return modelclient.ChatResponse{Message: "可以执行 go run ./cmd/server。"}, nil
 }
 
+func (s *chatStub) StreamMessages(_ context.Context, messages []modelclient.ChatMessage, onDelta func(string) error) error {
+	s.messages = messages
+	return onDelta("可以执行 go run ./cmd/server。")
+}
+
 func TestServiceBuildsGroundedPromptAndReturnsSources(t *testing.T) {
 	chat := &chatStub{}
 	service := rag.NewService(searcherStub{}, chat)
@@ -126,6 +131,44 @@ func TestServiceCapsPromptContext(t *testing.T) {
 	}
 	if !strings.Contains(chat.messages[1].Content, "<reference_material>") || !strings.Contains(chat.messages[1].Content, "</reference_material>") {
 		t.Fatalf("prompt delimiters missing: %q", chat.messages[1].Content[:min(len(chat.messages[1].Content), 100)])
+	}
+}
+
+func TestServiceStreamsSourcesAndDeltas(t *testing.T) {
+	chat := &chatStub{}
+	service := rag.NewService(searcherStub{}, chat)
+	var events []rag.StreamEvent
+
+	err := service.Stream(context.Background(), 7, "如何启动服务？", 5, func(event rag.StreamEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	if len(events) != 2 || events[0].Type != "sources" || len(events[0].Sources) != 1 || events[1].Type != "delta" || events[1].Delta == "" {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestServicePropagatesStreamConsumerFailure(t *testing.T) {
+	service := rag.NewService(searcherStub{}, &chatStub{})
+	expected := errors.New("client disconnected")
+
+	err := service.Stream(context.Background(), 7, "问题", 5, func(rag.StreamEvent) error {
+		return expected
+	})
+	if !errors.Is(err, expected) {
+		t.Fatalf("Stream() error = %v, want %v", err, expected)
+	}
+}
+
+func TestServiceRejectsNilStreamEmitter(t *testing.T) {
+	service := rag.NewService(searcherStub{}, &chatStub{})
+
+	err := service.Stream(context.Background(), 7, "问题", 5, nil)
+	if !errors.Is(err, rag.ErrStreamEmitterRequired) {
+		t.Fatalf("Stream() error = %v, want ErrStreamEmitterRequired", err)
 	}
 }
 

@@ -11,6 +11,8 @@ import (
 )
 
 var ErrNoSources = errors.New("no relevant document sources found")
+var ErrStreamingUnavailable = errors.New("streaming chat is unavailable")
+var ErrStreamEmitterRequired = errors.New("stream event emitter is required")
 
 const (
 	MaxQuestionBytes = 8000
@@ -31,8 +33,22 @@ type ChatRunner interface {
 	ChatMessages(context.Context, []modelclient.ChatMessage) (modelclient.ChatResponse, error)
 }
 
+type StreamingChatRunner interface {
+	StreamMessages(context.Context, []modelclient.ChatMessage, func(string) error) error
+}
+
 type Answerer interface {
 	Answer(context.Context, int64, string, int) (Response, error)
+}
+
+type StreamEvent struct {
+	Type    string             `json:"type"`
+	Delta   string             `json:"delta,omitempty"`
+	Sources []retrieval.Result `json:"sources,omitempty"`
+}
+
+type StreamAnswerer interface {
+	Stream(context.Context, int64, string, int, func(StreamEvent) error) error
 }
 
 type Service struct {
@@ -48,18 +64,12 @@ func (s *Service) Answer(ctx context.Context, knowledgeBaseID int64, question st
 	if len(question) > MaxQuestionBytes {
 		return Response{}, errors.New("chat question is too large")
 	}
-	sources, err := s.search.Search(ctx, knowledgeBaseID, question, topK)
+	sources, err := s.retrieveSources(ctx, knowledgeBaseID, question, topK)
 	if err != nil {
-		return Response{}, fmt.Errorf("retrieve answer sources: %w", err)
-	}
-	if len(sources) == 0 {
-		return Response{}, ErrNoSources
+		return Response{}, err
 	}
 
-	response, err := s.chat.ChatMessages(ctx, []modelclient.ChatMessage{
-		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: buildPrompt(question, sources)},
-	})
+	response, err := s.chat.ChatMessages(ctx, groundedMessages(question, sources))
 	if err != nil {
 		return Response{}, fmt.Errorf("generate grounded answer: %w", err)
 	}
@@ -67,6 +77,50 @@ func (s *Service) Answer(ctx context.Context, knowledgeBaseID int64, question st
 		return Response{}, errors.New("chat response does not contain an answer")
 	}
 	return Response{Answer: response.Message, Sources: sources}, nil
+}
+
+func (s *Service) Stream(ctx context.Context, knowledgeBaseID int64, question string, topK int, emit func(StreamEvent) error) error {
+	if len(question) > MaxQuestionBytes {
+		return errors.New("chat question is too large")
+	}
+	if emit == nil {
+		return ErrStreamEmitterRequired
+	}
+	streamer, ok := s.chat.(StreamingChatRunner)
+	if !ok {
+		return ErrStreamingUnavailable
+	}
+	sources, err := s.retrieveSources(ctx, knowledgeBaseID, question, topK)
+	if err != nil {
+		return err
+	}
+	if err := emit(StreamEvent{Type: "sources", Sources: sources}); err != nil {
+		return fmt.Errorf("emit answer sources: %w", err)
+	}
+	if err := streamer.StreamMessages(ctx, groundedMessages(question, sources), func(delta string) error {
+		return emit(StreamEvent{Type: "delta", Delta: delta})
+	}); err != nil {
+		return fmt.Errorf("stream grounded answer: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) retrieveSources(ctx context.Context, knowledgeBaseID int64, question string, topK int) ([]retrieval.Result, error) {
+	sources, err := s.search.Search(ctx, knowledgeBaseID, question, topK)
+	if err != nil {
+		return nil, fmt.Errorf("retrieve answer sources: %w", err)
+	}
+	if len(sources) == 0 {
+		return nil, ErrNoSources
+	}
+	return sources, nil
+}
+
+func groundedMessages(question string, sources []retrieval.Result) []modelclient.ChatMessage {
+	return []modelclient.ChatMessage{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: buildPrompt(question, sources)},
+	}
 }
 
 func buildPrompt(question string, sources []retrieval.Result) string {

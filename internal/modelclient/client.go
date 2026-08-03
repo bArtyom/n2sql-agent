@@ -1,6 +1,7 @@
 package modelclient
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 const (
 	maxEmbeddingResponseBytes = 2 << 20
 	maxChatResponseBytes      = 1 << 20
+	maxChatStreamBytes        = 8 << 20
 )
 
 // ConnectionChecker verifies that an API endpoint accepts the configured key.
@@ -27,6 +29,10 @@ type Embedder interface {
 
 type ChatCompleter interface {
 	Chat(context.Context, string, string, ChatRequest) (ChatResponse, error)
+}
+
+type ChatStreamer interface {
+	ChatStream(context.Context, string, string, ChatRequest, func(string) error) error
 }
 
 type EmbeddingRequest struct {
@@ -172,13 +178,8 @@ func (c *HTTPClient) Embed(ctx context.Context, baseURL, apiKey string, embeddin
 }
 
 func (c *HTTPClient) Chat(ctx context.Context, baseURL, apiKey string, chatRequest ChatRequest) (ChatResponse, error) {
-	if chatRequest.Model == "" || len(chatRequest.Messages) == 0 {
-		return ChatResponse{}, fmt.Errorf("chat model and messages are required")
-	}
-	for _, message := range chatRequest.Messages {
-		if message.Role == "" || message.Content == "" {
-			return ChatResponse{}, fmt.Errorf("chat message role and content are required")
-		}
+	if err := validateChatRequest(chatRequest); err != nil {
+		return ChatResponse{}, err
 	}
 
 	endpoint, err := apiEndpoint(baseURL, "chat/completions", c.allowedHosts)
@@ -225,6 +226,123 @@ func (c *HTTPClient) Chat(ctx context.Context, baseURL, apiKey string, chatReque
 		return ChatResponse{}, fmt.Errorf("chat response does not contain a message")
 	}
 	return ChatResponse{Message: payload.Choices[0].Message.Content}, nil
+}
+
+func (c *HTTPClient) ChatStream(ctx context.Context, baseURL, apiKey string, chatRequest ChatRequest, onDelta func(string) error) error {
+	if err := validateChatRequest(chatRequest); err != nil {
+		return err
+	}
+	if onDelta == nil {
+		return fmt.Errorf("chat stream delta callback is required")
+	}
+	chatRequest.Stream = true
+	endpoint, err := apiEndpoint(baseURL, "chat/completions", c.allowedHosts)
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(chatRequest)
+	if err != nil {
+		return fmt.Errorf("encode chat stream request: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create chat stream request: %w", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+apiKey)
+	request.Header.Set("Content-Type", "application/json")
+
+	response, err := c.client.Do(request)
+	if err != nil {
+		return fmt.Errorf("request chat stream endpoint: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("chat stream endpoint returned HTTP %d", response.StatusCode)
+	}
+
+	scanner := bufio.NewScanner(response.Body)
+	scanner.Buffer(make([]byte, 4096), maxChatStreamBytes)
+	readBytes := 0
+	done := false
+	dataLines := make([]string, 0, 1)
+	processEvent := func() (bool, error) {
+		if len(dataLines) == 0 {
+			return false, nil
+		}
+		data := strings.TrimSpace(strings.Join(dataLines, "\n"))
+		dataLines = dataLines[:0]
+		if data == "[DONE]" {
+			return true, nil
+		}
+		var payload struct {
+			Choices []struct {
+				Delta ChatMessage `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(data), &payload); err != nil {
+			return false, fmt.Errorf("decode chat stream event: %w", err)
+		}
+		if len(payload.Choices) == 0 || payload.Choices[0].Delta.Content == "" {
+			return false, nil
+		}
+		if err := onDelta(payload.Choices[0].Delta.Content); err != nil {
+			return false, fmt.Errorf("handle chat stream delta: %w", err)
+		}
+		return false, nil
+	}
+	for scanner.Scan() {
+		rawLine := scanner.Text()
+		readBytes += len(rawLine)
+		if readBytes > maxChatStreamBytes {
+			return fmt.Errorf("chat stream response is too large")
+		}
+		line := strings.TrimSuffix(rawLine, "\r")
+		if line == "" {
+			var err error
+			done, err = processEvent()
+			if err != nil {
+				return err
+			}
+			if done {
+				break
+			}
+			continue
+		}
+		if strings.HasPrefix(line, ":") || !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data:")
+		if strings.HasPrefix(data, " ") {
+			data = data[1:]
+		}
+		dataLines = append(dataLines, data)
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("read chat stream: %w", err)
+	}
+	if !done {
+		var err error
+		done, err = processEvent()
+		if err != nil {
+			return err
+		}
+	}
+	if !done {
+		return fmt.Errorf("chat stream ended before done event")
+	}
+	return nil
+}
+
+func validateChatRequest(chatRequest ChatRequest) error {
+	if chatRequest.Model == "" || len(chatRequest.Messages) == 0 {
+		return fmt.Errorf("chat model and messages are required")
+	}
+	for _, message := range chatRequest.Messages {
+		if message.Role == "" || message.Content == "" {
+			return fmt.Errorf("chat message role and content are required")
+		}
+	}
+	return nil
 }
 
 func apiEndpoint(baseURL, resource string, allowedHosts map[string]struct{}) (string, error) {

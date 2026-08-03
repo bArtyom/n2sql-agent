@@ -55,6 +55,7 @@ func main() {
 			Chat:              chatService,
 			Search:            searchService,
 			Answers:           answerService,
+			StreamingAnswers:  answerService,
 			APIKeyEnvVar:      cfg.ModelProviderAPIKeyEnvVar,
 		}),
 	}

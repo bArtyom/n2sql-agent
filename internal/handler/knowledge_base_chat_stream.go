@@ -1,0 +1,63 @@
+package handler
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+
+	"github.com/bArtyom/n2sql-agent/internal/rag"
+)
+
+func NewKnowledgeBaseChatStream(answerer rag.StreamAnswerer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		knowledgeBaseID, request, ok := decodeKnowledgeBaseChatRequest(w, r)
+		if !ok {
+			return
+		}
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, `{"error":"streaming is not supported"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+
+		emit := func(event rag.StreamEvent) error {
+			return writeSSEEvent(w, flusher, event.Type, event)
+		}
+		if err := answerer.Stream(r.Context(), knowledgeBaseID, request.Message, request.TopK, emit); err != nil {
+			if r.Context().Err() != nil {
+				return
+			}
+			message, _ := knowledgeBaseChatError(err)
+			_ = writeSSEEvent(w, flusher, "error", struct {
+				Error string `json:"error"`
+			}{Error: message})
+			return
+		}
+		_ = writeSSEEvent(w, flusher, "done", struct{}{})
+	})
+}
+
+func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, event string, value any) error {
+	switch event {
+	case "sources", "delta", "done", "error":
+	default:
+		return fmt.Errorf("invalid SSE event type")
+	}
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("encode SSE event: %w", err)
+	}
+	if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, payload); err != nil {
+		return fmt.Errorf("write SSE event: %w", err)
+	}
+	flusher.Flush()
+	return nil
+}

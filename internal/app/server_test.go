@@ -56,6 +56,10 @@ func (answererStub) Answer(context.Context, int64, string, int) (rag.Response, e
 	return rag.Response{Answer: "OK"}, nil
 }
 
+func (answererStub) Stream(_ context.Context, _ int64, _ string, _ int, emit func(rag.StreamEvent) error) error {
+	return emit(rag.StreamEvent{Type: "delta", Delta: "OK"})
+}
+
 type knowledgeBaseStoreStub struct{}
 
 func (knowledgeBaseStoreStub) Create(context.Context, knowledgebase.CreateInput) (knowledgebase.KnowledgeBase, error) {
@@ -165,6 +169,17 @@ func TestServerRoutesKnowledgeBaseChat(t *testing.T) {
 	server := app.New(app.Dependencies{Answers: answererStub{}})
 
 	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/chat", strings.NewReader(`{"message":"问题"}`)))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
+	}
+}
+
+func TestServerRoutesKnowledgeBaseChatStream(t *testing.T) {
+	response := httptest.NewRecorder()
+	server := app.New(app.Dependencies{StreamingAnswers: answererStub{}})
+
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/chat/stream", strings.NewReader(`{"message":"问题"}`)))
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)

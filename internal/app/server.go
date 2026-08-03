@@ -22,6 +22,7 @@ type Dependencies struct {
 	Chat              modelruntime.ChatRunner
 	Search            retrieval.Searcher
 	Answers           rag.Answerer
+	StreamingAnswers  rag.StreamAnswerer
 	APIKeyEnvVar      string
 }
 
@@ -53,6 +54,9 @@ func New(dependencies Dependencies) http.Handler {
 	}
 	if dependencies.Answers != nil {
 		mux.Handle("POST /api/knowledge-bases/{id}/chat", handler.NewKnowledgeBaseChat(dependencies.Answers))
+	}
+	if dependencies.StreamingAnswers != nil {
+		mux.Handle("POST /api/knowledge-bases/{id}/chat/stream", handler.NewKnowledgeBaseChatStream(dependencies.StreamingAnswers))
 	}
 
 	return mux
