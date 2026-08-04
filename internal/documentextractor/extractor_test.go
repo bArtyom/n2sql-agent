@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
@@ -91,6 +92,25 @@ func TestExtractorReadsPDFTextArray(t *testing.T) {
 	}
 }
 
+func TestExtractorReadsPDFHexText(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "documents")
+	if err := os.Mkdir(directory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "hex.pdf"), []byte(minimalPDFContent("<FEFF00480069> Tj")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	text, err := documentextractor.New(root).Extract(context.Background(), "documents/hex.pdf", "application/pdf")
+	if err != nil {
+		t.Fatalf("Extract PDF hex text = %v", err)
+	}
+	if text != "Hi" {
+		t.Fatalf("Extract PDF hex text = %q, want %q", text, "Hi")
+	}
+}
+
 func TestExtractorRejectsPDFWithoutText(t *testing.T) {
 	root := t.TempDir()
 	directory := filepath.Join(root, "documents")
@@ -104,6 +124,22 @@ func TestExtractorRejectsPDFWithoutText(t *testing.T) {
 	_, err := documentextractor.New(root).Extract(context.Background(), "documents/empty.pdf", "application/pdf")
 	if !errors.Is(err, documentextractor.ErrEmptyText) {
 		t.Fatalf("empty PDF error = %v", err)
+	}
+}
+
+func TestExtractorLimitsInflatedPDFStream(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "documents")
+	if err := os.Mkdir(directory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "large.pdf"), compressedPDF(strings.Repeat("A", 10<<20+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := documentextractor.New(root).Extract(context.Background(), "documents/large.pdf", "application/pdf")
+	if err == nil || !strings.Contains(err.Error(), "decoded PDF stream is too large") {
+		t.Fatalf("large PDF error = %v", err)
 	}
 }
 
@@ -139,11 +175,11 @@ func minimalPDF(text string) string {
 }
 
 func minimalPDFContent(content string) string {
+	stream := "BT /F1 18 Tf 72 720 Td " + content + " ET\n"
 	return "%PDF-1.4\n" +
 		"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n" +
 		"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n" + "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj\n" +
-		"4 0 obj << /Length 46 >> stream\n" +
-		"BT /F1 18 Tf 72 720 Td " + content + " ET\n" +
+		fmt.Sprintf("4 0 obj << /Length %d >> stream\n%s", len(stream), stream) +
 		"endstream endobj\n" +
 		"5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n" +
 		"trailer << /Root 1 0 R >>\n%%EOF\n"

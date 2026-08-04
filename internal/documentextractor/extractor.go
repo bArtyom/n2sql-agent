@@ -51,7 +51,7 @@ func (e *Extractor) Extract(ctx context.Context, storagePath, contentType string
 	}
 	text := string(content)
 	if contentType == "application/pdf" {
-		text, err = extractPDFText(content)
+		text, err = extractPDFText(ctx, content)
 		if err != nil {
 			return "", err
 		}
@@ -62,15 +62,20 @@ func (e *Extractor) Extract(ctx context.Context, storagePath, contentType string
 	return text, nil
 }
 
-func extractPDFText(content []byte) (string, error) {
+func extractPDFText(ctx context.Context, content []byte) (string, error) {
 	if !bytes.HasPrefix(content, []byte("%PDF-")) || !bytes.Contains(content, []byte("%%EOF")) {
 		return "", ErrInvalidPDF
 	}
 
 	var fragments []string
 	streamCount := 0
+	var processedStreamBytes int64
+	var extractedTextBytes int64
 	searchFrom := 0
 	for searchFrom < len(content) {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		streamIndex := bytes.Index(content[searchFrom:], []byte("stream"))
 		if streamIndex < 0 {
 			break
@@ -84,20 +89,33 @@ func extractPDFText(content []byte) (string, error) {
 		if dataStart < len(content) && content[dataStart] == '\n' {
 			dataStart++
 		}
-		endStream := bytes.Index(content[dataStart:], []byte("endstream"))
-		if endStream < 0 {
+		streamLength, ok := pdfStreamLength(content, streamIndex)
+		if !ok || streamLength < 0 || dataStart+streamLength > len(content) {
 			return "", ErrInvalidPDF
 		}
-		endStream += dataStart
-		streamData := content[dataStart:endStream]
-		if bytes.Contains(content[max(0, streamIndex-512):streamIndex], []byte("/FlateDecode")) {
-			decoded, err := inflatePDFStream(streamData)
+		streamData := content[dataStart : dataStart+streamLength]
+		if processedStreamBytes+int64(len(streamData)) > maxExtractedTextBytes {
+			return "", fmt.Errorf("PDF streams are too large")
+		}
+		if pdfStreamUsesFlate(content, streamIndex) {
+			decoded, err := inflatePDFStream(streamData, maxExtractedTextBytes-processedStreamBytes)
 			if err != nil {
 				return "", fmt.Errorf("decode PDF stream: %w", err)
 			}
 			streamData = decoded
 		}
-		fragments = append(fragments, extractPDFTextOperators(streamData)...)
+		processedStreamBytes += int64(len(streamData))
+		for _, fragment := range extractPDFTextOperators(streamData) {
+			extractedTextBytes += int64(len(fragment))
+			if extractedTextBytes > maxExtractedTextBytes {
+				return "", fmt.Errorf("extracted text is too large")
+			}
+			fragments = append(fragments, fragment)
+		}
+		endStream := skipPDFWhitespace(content, dataStart+streamLength)
+		if !bytes.HasPrefix(content[endStream:], []byte("endstream")) {
+			return "", ErrInvalidPDF
+		}
 		searchFrom = endStream + len("endstream")
 	}
 	if streamCount == 0 {
@@ -113,12 +131,12 @@ func extractPDFText(content []byte) (string, error) {
 	return text, nil
 }
 
-func inflatePDFStream(data []byte) ([]byte, error) {
+func inflatePDFStream(data []byte, limit int64) ([]byte, error) {
 	reader, err := zlib.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
-	decompressed, readErr := io.ReadAll(io.LimitReader(reader, maxExtractedTextBytes+1))
+	decompressed, readErr := io.ReadAll(io.LimitReader(reader, limit+1))
 	closeErr := reader.Close()
 	if readErr != nil {
 		return nil, readErr
@@ -126,19 +144,68 @@ func inflatePDFStream(data []byte) ([]byte, error) {
 	if closeErr != nil {
 		return nil, closeErr
 	}
-	if int64(len(decompressed)) > maxExtractedTextBytes {
+	if int64(len(decompressed)) > limit {
 		return nil, fmt.Errorf("decoded PDF stream is too large")
 	}
 	return decompressed, nil
 }
 
+func pdfStreamLength(content []byte, streamIndex int) (int, bool) {
+	dictionaryStart := bytes.LastIndex(content[:streamIndex], []byte("<<"))
+	if dictionaryStart < 0 {
+		return 0, false
+	}
+	dictionary := content[dictionaryStart:streamIndex]
+	searchFrom := 0
+	for searchFrom < len(dictionary) {
+		lengthIndex := bytes.Index(dictionary[searchFrom:], []byte("/Length"))
+		if lengthIndex < 0 {
+			return 0, false
+		}
+		lengthIndex += searchFrom + len("/Length")
+		if lengthIndex >= len(dictionary) || !isPDFWhitespace(dictionary[lengthIndex]) {
+			searchFrom = lengthIndex
+			continue
+		}
+		lengthIndex = skipPDFWhitespace(dictionary, lengthIndex)
+		start := lengthIndex
+		for lengthIndex < len(dictionary) && dictionary[lengthIndex] >= '0' && dictionary[lengthIndex] <= '9' {
+			lengthIndex++
+		}
+		if start == lengthIndex {
+			return 0, false
+		}
+		length := 0
+		for _, digit := range dictionary[start:lengthIndex] {
+			length = length*10 + int(digit-'0')
+			if length > int(maxExtractedTextBytes) {
+				return 0, false
+			}
+		}
+		return length, true
+	}
+	return 0, false
+}
+
+func pdfStreamUsesFlate(content []byte, streamIndex int) bool {
+	dictionaryStart := bytes.LastIndex(content[:streamIndex], []byte("<<"))
+	return dictionaryStart >= 0 && bytes.Contains(content[dictionaryStart:streamIndex], []byte("/FlateDecode"))
+}
+
 func extractPDFTextOperators(data []byte) []string {
 	var fragments []string
 	for index := 0; index < len(data); index++ {
-		if data[index] != '(' {
+		var value []byte
+		var end int
+		var ok bool
+		switch {
+		case data[index] == '(':
+			value, end, ok = parsePDFLiteral(data, index)
+		case data[index] == '<' && (index+1 >= len(data) || data[index+1] != '<'):
+			value, end, ok = parsePDFHexLiteral(data, index)
+		default:
 			continue
 		}
-		value, end, ok := parsePDFLiteral(data, index)
 		if !ok {
 			continue
 		}
@@ -154,6 +221,49 @@ func extractPDFTextOperators(data []byte) []string {
 		index = end - 1
 	}
 	return fragments
+}
+
+func parsePDFHexLiteral(data []byte, start int) ([]byte, int, bool) {
+	if start >= len(data) || data[start] != '<' || start+1 < len(data) && data[start+1] == '<' {
+		return nil, 0, false
+	}
+	value := make([]byte, 0, 16)
+	nibble := -1
+	for index := start + 1; index < len(data); index++ {
+		switch data[index] {
+		case '>':
+			if nibble >= 0 {
+				value = append(value, byte(nibble<<4))
+			}
+			return value, index + 1, true
+		case ' ', '\t', '\r', '\n':
+			continue
+		}
+		digit, ok := pdfHexDigit(data[index])
+		if !ok {
+			return nil, 0, false
+		}
+		if nibble < 0 {
+			nibble = digit
+		} else {
+			value = append(value, byte(nibble<<4|digit))
+			nibble = -1
+		}
+	}
+	return nil, 0, false
+}
+
+func pdfHexDigit(value byte) (int, bool) {
+	switch {
+	case value >= '0' && value <= '9':
+		return int(value - '0'), true
+	case value >= 'a' && value <= 'f':
+		return int(value-'a') + 10, true
+	case value >= 'A' && value <= 'F':
+		return int(value-'A') + 10, true
+	default:
+		return 0, false
+	}
 }
 
 func isPDFTJString(data []byte, start, end int) bool {
@@ -234,6 +344,10 @@ func skipPDFWhitespace(data []byte, index int) int {
 	return index
 }
 
+func isPDFWhitespace(value byte) bool {
+	return value == ' ' || value == '\t' || value == '\r' || value == '\n'
+}
+
 func decodePDFText(data []byte) string {
 	if len(data) < 2 || data[0] != 0xfe || data[1] != 0xff {
 		return string(data)
@@ -244,11 +358,4 @@ func decodePDFText(data []byte) string {
 		codeUnits = append(codeUnits, binary.BigEndian.Uint16(data[index:index+2]))
 	}
 	return string(utf16.Decode(codeUnits))
-}
-
-func max(first, second int) int {
-	if first > second {
-		return first
-	}
-	return second
 }
