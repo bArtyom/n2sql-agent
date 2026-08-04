@@ -3,8 +3,13 @@ package worker_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
+	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/worker"
 )
@@ -45,6 +50,16 @@ func (embedderStub) Embed(context.Context, []string) (modelclient.EmbeddingRespo
 	return modelclient.EmbeddingResponse{Data: []modelclient.Embedding{{Index: 0, Vector: []float32{1}}, {Index: 1, Vector: []float32{2}}}}, nil
 }
 
+type matchingEmbedderStub struct{}
+
+func (matchingEmbedderStub) Embed(_ context.Context, texts []string) (modelclient.EmbeddingResponse, error) {
+	data := make([]modelclient.Embedding, len(texts))
+	for index := range texts {
+		data[index] = modelclient.Embedding{Index: index, Vector: []float32{float32(index + 1)}}
+	}
+	return modelclient.EmbeddingResponse{Data: data}, nil
+}
+
 func TestEmbeddingChunkingProcessorStoresMatchingVectors(t *testing.T) {
 	store := &chunkStoreStub{}
 	processor := worker.NewEmbeddingChunkingProcessor(extractorStub{}, splitterStub{}, store, embedderStub{})
@@ -53,6 +68,44 @@ func TestEmbeddingChunkingProcessorStoresMatchingVectors(t *testing.T) {
 	}
 	if len(store.chunks) != 2 || store.chunks[1] != "second" || store.embeddings[1][0] != 2 {
 		t.Fatalf("chunks=%#v embeddings=%#v", store.chunks, store.embeddings)
+	}
+}
+
+func TestRunnerProcessesPDFIntoChunks(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "documents"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "documents", "guide.pdf"), workerPDF("PDF worker text"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store := &taskStoreStub{task: worker.Task{
+		ID:          12,
+		DocumentID:  8,
+		StoragePath: "documents/guide.pdf",
+		ContentType: "application/pdf",
+	}}
+	chunks := &chunkStoreStub{}
+	processor := worker.NewEmbeddingChunkingProcessor(
+		documentextractor.New(root),
+		documentchunk.NewSplitter(200, 0),
+		chunks,
+		matchingEmbedderStub{},
+	)
+
+	processed, err := worker.NewRunner(store, processor).RunOnce(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("processed=%v err=%v", processed, err)
+	}
+	if store.succeeded != 12 || store.failed.id != 0 {
+		t.Fatalf("task result succeeded=%d failed=%#v", store.succeeded, store.failed)
+	}
+	if len(chunks.chunks) != 1 || chunks.chunks[0] != "PDF worker text" {
+		t.Fatalf("chunks=%#v", chunks.chunks)
+	}
+	if len(chunks.embeddings) != 1 || chunks.embeddings[0][0] != 1 {
+		t.Fatalf("embeddings=%#v", chunks.embeddings)
 	}
 }
 
@@ -97,4 +150,9 @@ func TestRunnerDoesNothingWhenQueueIsEmpty(t *testing.T) {
 	if err != nil || processed {
 		t.Fatalf("processed=%v err=%v", processed, err)
 	}
+}
+
+func workerPDF(text string) []byte {
+	stream := "BT /F1 18 Tf 72 720 Td (" + text + ") Tj ET\n"
+	return []byte(fmt.Sprintf("%%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\n2 0 obj << /Length %d >> stream\n%sendstream\n%%%%EOF\n", len(stream), stream))
 }
