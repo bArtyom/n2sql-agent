@@ -458,9 +458,9 @@ onUnmounted(() => window.clearInterval(documentPollTimer));
             <span class="panel-meta">{{ documents.length }} FILES</span>
           </div>
           <label class="upload-zone" :class="{ 'upload-zone--busy': uploading }" for="document-upload" role="button" tabindex="0" @dragover.prevent @drop.prevent="onDrop" @keydown.enter.prevent="openFilePicker" @keydown.space.prevent="openFilePicker">
-            <input id="document-upload" ref="fileInput" class="visually-hidden" type="file" accept=".md,.txt" multiple @change="onFileChange" />
+            <input id="document-upload" ref="fileInput" class="visually-hidden" type="file" accept=".md,.txt,.pdf" multiple @change="onFileChange" />
             <span class="upload-icon">↑</span>
-            <div><strong>{{ uploading ? "正在接收资料…" : "拖入文件，或点击上传" }}</strong><span>支持 Markdown、TXT · 单文件不超过 10 MB</span></div>
+            <div><strong>{{ uploading ? "正在接收资料…" : "拖入文件，或点击上传" }}</strong><span>支持 Markdown、TXT、PDF · 单文件不超过 10 MB</span></div>
             <span class="upload-shortcut">⌘ U</span>
           </label>
           <div v-if="loadingDocuments" class="list-loading">正在读取资料架…</div>
