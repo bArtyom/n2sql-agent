@@ -27,13 +27,16 @@ func (s *modelProviderStoreStub) Save(_ context.Context, provider modelprovider.
 }
 
 func TestModelProviderReturnsNotFoundWhenUnconfigured(t *testing.T) {
-	endpoint := handler.NewModelProvider(&modelProviderStoreStub{err: modelprovider.ErrNotFound}, "OPENAI_API_KEY")
+	endpoint := handler.NewModelProvider(&modelProviderStoreStub{err: modelprovider.ErrNotFound}, "CUSTOM_MODEL_KEY")
 	response := httptest.NewRecorder()
 
 	endpoint.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/model-provider", nil))
 
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("status code = %d, want %d", response.Code, http.StatusNotFound)
+	}
+	if !strings.Contains(response.Body.String(), `"apiKeyEnvVar":"CUSTOM_MODEL_KEY"`) {
+		t.Fatalf("response should expose the configured environment variable name: %s", response.Body.String())
 	}
 }
 

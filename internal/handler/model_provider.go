@@ -14,7 +14,12 @@ func NewModelProvider(store modelprovider.Store, apiKeyEnvVar string) http.Handl
 		case http.MethodGet:
 			provider, err := store.Current(r.Context())
 			if errors.Is(err, modelprovider.ErrNotFound) {
-				http.Error(w, `{"error":"model provider not configured"}`, http.StatusNotFound)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"error":        "model provider not configured",
+					"apiKeyEnvVar": apiKeyEnvVar,
+				})
 				return
 			}
 			if err != nil {

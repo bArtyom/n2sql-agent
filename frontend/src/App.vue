@@ -33,7 +33,7 @@ type ModelProvider = {
 };
 
 class APIError extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(readonly status: number, message: string, readonly payload: unknown = null) {
     super(message);
     this.name = "APIError";
   }
@@ -77,7 +77,7 @@ async function requestJSON<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, options);
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new APIError(response.status, payload?.error || `请求失败（${response.status}）`);
+    throw new APIError(response.status, payload?.error || `请求失败（${response.status}）`, payload);
   }
   return payload as T;
 }
@@ -102,7 +102,11 @@ async function openProviderSettings() {
     providerForm.value = await requestJSON<ModelProvider>("/api/model-provider");
   } catch (error) {
     if (error instanceof APIError && error.status === 404) {
-      providerForm.value = emptyModelProvider();
+      const payload = error.payload;
+      const apiKeyEnvVar = payload && typeof payload === "object" && "apiKeyEnvVar" in payload && typeof payload.apiKeyEnvVar === "string"
+        ? payload.apiKeyEnvVar
+        : emptyModelProvider().apiKeyEnvVar;
+      providerForm.value = { ...emptyModelProvider(), apiKeyEnvVar };
     } else {
       providerMessageKind.value = "error";
       providerMessage.value = error instanceof Error ? error.message : "无法读取模型配置。";
@@ -130,7 +134,7 @@ async function saveProvider() {
     providerForm.value = await requestJSON<ModelProvider>("/api/model-provider", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...form, apiKeyEnvVar: "OPENAI_API_KEY" }),
+      body: JSON.stringify({ ...form, apiKeyEnvVar: form.apiKeyEnvVar }),
     });
     providerMessageKind.value = "success";
     providerMessage.value = "模型配置已保存。";
