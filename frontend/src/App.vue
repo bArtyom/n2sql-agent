@@ -23,6 +23,21 @@ type ChatMessage = {
   sources?: Source[];
   status?: "streaming" | "done" | "error";
 };
+type ModelProvider = {
+  name: string;
+  baseUrl: string;
+  apiKeyEnvVar: string;
+  chatModel: string;
+  embeddingModel: string;
+  enabled: boolean;
+};
+
+class APIError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = "APIError";
+  }
+}
 
 const knowledgeBases = ref<KnowledgeBase[]>([]);
 const selectedKnowledgeBaseId = ref<number | null>(null);
@@ -39,6 +54,13 @@ const streaming = ref(false);
 const errorMessage = ref("");
 const mobileRailOpen = ref(false);
 const fileInput = ref<HTMLInputElement | null>(null);
+const providerSettingsOpen = ref(false);
+const providerLoading = ref(false);
+const providerSaving = ref(false);
+const providerTesting = ref(false);
+const providerMessage = ref("");
+const providerMessageKind = ref<"idle" | "success" | "error">("idle");
+const providerForm = ref<ModelProvider>(emptyModelProvider());
 let documentPollTimer: number | undefined;
 
 const selectedKnowledgeBase = computed(() =>
@@ -55,9 +77,89 @@ async function requestJSON<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, options);
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new Error(payload?.error || `请求失败（${response.status}）`);
+    throw new APIError(response.status, payload?.error || `请求失败（${response.status}）`);
   }
   return payload as T;
+}
+
+function emptyModelProvider(): ModelProvider {
+  return {
+    name: "",
+    baseUrl: "https://api.openai.com/v1",
+    apiKeyEnvVar: "OPENAI_API_KEY",
+    chatModel: "",
+    embeddingModel: "",
+    enabled: true,
+  };
+}
+
+async function openProviderSettings() {
+  providerSettingsOpen.value = true;
+  providerLoading.value = true;
+  providerMessage.value = "";
+  providerMessageKind.value = "idle";
+  try {
+    providerForm.value = await requestJSON<ModelProvider>("/api/model-provider");
+  } catch (error) {
+    if (error instanceof APIError && error.status === 404) {
+      providerForm.value = emptyModelProvider();
+    } else {
+      providerMessageKind.value = "error";
+      providerMessage.value = error instanceof Error ? error.message : "无法读取模型配置。";
+    }
+  } finally {
+    providerLoading.value = false;
+  }
+}
+
+function closeProviderSettings() {
+  if (providerSaving.value || providerTesting.value) return;
+  providerSettingsOpen.value = false;
+}
+
+async function saveProvider() {
+  const form = providerForm.value;
+  if (!form.name.trim() || !form.baseUrl.trim() || !form.chatModel.trim() || !form.embeddingModel.trim()) {
+    providerMessageKind.value = "error";
+    providerMessage.value = "名称、Base URL、聊天模型和嵌入模型都需要填写。";
+    return;
+  }
+  providerSaving.value = true;
+  providerMessage.value = "";
+  try {
+    providerForm.value = await requestJSON<ModelProvider>("/api/model-provider", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...form, apiKeyEnvVar: "OPENAI_API_KEY" }),
+    });
+    providerMessageKind.value = "success";
+    providerMessage.value = "模型配置已保存。";
+  } catch (error) {
+    providerMessageKind.value = "error";
+    providerMessage.value = error instanceof Error ? error.message : "模型配置保存失败。";
+  } finally {
+    providerSaving.value = false;
+  }
+}
+
+async function testProviderConnection() {
+  providerTesting.value = true;
+  providerMessage.value = "正在检查模型服务…";
+  providerMessageKind.value = "idle";
+  try {
+    await requestJSON<{ status: string }>("/api/model-provider/connection-test", { method: "POST" });
+    providerMessageKind.value = "success";
+    providerMessage.value = "连接成功，模型服务可以正常响应。";
+  } catch (error) {
+    providerMessageKind.value = "error";
+    if (error instanceof APIError && error.status === 400) {
+      providerMessage.value = "没有读取到 .env 中的 API Key，请先填写 OPENAI_API_KEY。";
+    } else {
+      providerMessage.value = error instanceof Error ? error.message : "模型服务连接失败。";
+    }
+  } finally {
+    providerTesting.value = false;
+  }
 }
 
 async function loadKnowledgeBases() {
@@ -306,6 +408,11 @@ onUnmounted(() => window.clearInterval(documentPollTimer));
         <span>本地 API 在线</span>
         <span class="footer-version">v0.1</span>
       </div>
+      <button class="provider-link" type="button" @click="openProviderSettings">
+        <span class="provider-link-icon">⌁</span>
+        <span>模型服务设置</span>
+        <span class="provider-link-arrow">↗</span>
+      </button>
     </aside>
 
     <main class="workspace">
@@ -399,5 +506,30 @@ onUnmounted(() => window.clearInterval(documentPollTimer));
         <div class="empty-workspace-mark">文</div><p class="eyebrow">FIRST STEP</p><h1>先建立一间资料室。</h1><p>知识库是文档、处理任务和后续问答的边界。创建后，就可以把第一份资料放进来。</p>
       </section>
     </main>
+
+    <div v-if="providerSettingsOpen" class="settings-backdrop" @click.self="closeProviderSettings">
+      <section class="settings-panel" role="dialog" aria-modal="true" aria-labelledby="provider-settings-title">
+        <header class="settings-header">
+          <div>
+            <p class="eyebrow">MODEL CONTROL ROOM</p>
+            <h2 id="provider-settings-title">模型服务设置</h2>
+          </div>
+          <button class="settings-close" type="button" aria-label="关闭模型服务设置" @click="closeProviderSettings">×</button>
+        </header>
+        <div v-if="providerLoading" class="settings-loading">正在读取当前配置…</div>
+        <form v-else class="settings-form" @submit.prevent="saveProvider">
+          <p class="settings-intro">告诉文库该去哪里寻找聊天和嵌入能力。密钥始终留在后端环境变量里。</p>
+          <label>服务名称<input v-model="providerForm.name" type="text" placeholder="例如：OpenAI" maxlength="120" required /></label>
+          <label>Base URL<input v-model="providerForm.baseUrl" type="url" placeholder="https://api.openai.com/v1" required /></label>
+          <div class="settings-two-column">
+            <label>聊天模型<input v-model="providerForm.chatModel" type="text" placeholder="例如：gpt-4o-mini" required /></label>
+            <label>嵌入模型<input v-model="providerForm.embeddingModel" type="text" placeholder="例如：text-embedding-3-small" required /></label>
+          </div>
+          <div class="secret-note"><span class="secret-note-mark">⌘</span><div><strong>API Key 不在这里输入</strong><p>后端只读取 `.env` 中的 <code>{{ providerForm.apiKeyEnvVar }}</code>，页面不会显示或保存密钥。</p></div></div>
+          <p v-if="providerMessage" class="provider-message" :class="`provider-message--${providerMessageKind}`" role="status">{{ providerMessage }}</p>
+          <div class="settings-actions"><button class="settings-secondary" type="button" :disabled="providerTesting || providerSaving" @click="testProviderConnection">{{ providerTesting ? "测试中…" : "测试连接" }}</button><button class="settings-primary" type="submit" :disabled="providerSaving || providerTesting">{{ providerSaving ? "保存中…" : "保存配置" }}</button></div>
+        </form>
+      </section>
+    </div>
   </div>
 </template>
