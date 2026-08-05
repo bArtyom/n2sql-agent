@@ -80,6 +80,25 @@ type OCRResponse struct {
 	Text string
 }
 
+type visionContent struct {
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	ImageURL *struct {
+		URL string `json:"url"`
+	} `json:"image_url,omitempty"`
+}
+
+type visionMessage struct {
+	Role    string          `json:"role"`
+	Content []visionContent `json:"content"`
+}
+
+type ocrChatRequest struct {
+	Model    string          `json:"model"`
+	Messages []visionMessage `json:"messages"`
+	Stream   bool            `json:"stream"`
+}
+
 type HTTPClient struct {
 	client       *http.Client
 	allowedHosts map[string]struct{}
@@ -255,40 +274,12 @@ func (c *HTTPClient) OCR(ctx context.Context, baseURL, apiKey string, ocrRequest
 	if err != nil {
 		return OCRResponse{}, err
 	}
-	payload := struct {
-		Model    string `json:"model"`
-		Messages []struct {
-			Role    string `json:"role"`
-			Content []struct {
-				Type     string `json:"type"`
-				Text     string `json:"text,omitempty"`
-				ImageURL *struct {
-					URL string `json:"url"`
-				} `json:"image_url,omitempty"`
-			} `json:"content"`
-		} `json:"messages"`
-		Stream bool `json:"stream"`
-	}{
+	payload := ocrChatRequest{
 		Model: ocrRequest.Model,
-		Messages: []struct {
-			Role    string `json:"role"`
-			Content []struct {
-				Type     string `json:"type"`
-				Text     string `json:"text,omitempty"`
-				ImageURL *struct {
-					URL string `json:"url"`
-				} `json:"image_url,omitempty"`
-			} `json:"content"`
-		}{
+		Messages: []visionMessage{
 			{
 				Role: "user",
-				Content: []struct {
-					Type     string `json:"type"`
-					Text     string `json:"text,omitempty"`
-					ImageURL *struct {
-						URL string `json:"url"`
-					} `json:"image_url,omitempty"`
-				}{
+				Content: []visionContent{
 					{Type: "text", Text: ocrRequest.Prompt},
 					{Type: "image_url", ImageURL: &struct {
 						URL string `json:"url"`
