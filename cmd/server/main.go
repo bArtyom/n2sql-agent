@@ -13,6 +13,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
+	"github.com/bArtyom/n2sql-agent/internal/documentocr"
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
@@ -39,7 +40,15 @@ func main() {
 	embeddingService := modelruntime.NewEmbeddingService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
 	chatService := modelruntime.NewChatService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
 	chunkStore := documentchunk.NewPostgresStore(db)
-	processor := worker.NewEmbeddingChunkingProcessor(documentextractor.New(cfg.UploadDir), documentchunk.NewSplitter(1000, 150), chunkStore, embeddingService)
+	extractor := documentextractor.New(cfg.UploadDir)
+	if cfg.OCRModel != "" {
+		ocrService := modelruntime.NewOCRService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv, cfg.OCRModel, cfg.OCRPrompt)
+		pageRenderer := documentocr.NewPDFToImageRenderer(cfg.OCRRendererBinary, cfg.OCRRenderDPI, cfg.OCRMaxPages)
+		scannedPDF := documentocr.NewService(pageRenderer, ocrService, cfg.OCRMaxPages, cfg.OCRConcurrency)
+		extractor = documentextractor.NewWithOCR(cfg.UploadDir, scannedPDF)
+		log.Printf("scanned PDF OCR enabled: model=%s renderer=%s max_pages=%d concurrency=%d", cfg.OCRModel, cfg.OCRRendererBinary, cfg.OCRMaxPages, cfg.OCRConcurrency)
+	}
+	processor := worker.NewEmbeddingChunkingProcessor(extractor, documentchunk.NewSplitter(1000, 150), chunkStore, embeddingService)
 	runner := worker.NewRunner(worker.NewPostgresStore(db), processor)
 	searchService := retrieval.NewService(embeddingService, chunkStore)
 	answerService := rag.NewService(searchService, chatService)

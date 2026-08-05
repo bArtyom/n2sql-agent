@@ -2,6 +2,7 @@ package modelclient_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,6 +13,60 @@ import (
 
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 )
+
+func TestHTTPClientRecognizesImage(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("request = %s %s, want POST /v1/chat/completions", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer test-secret" {
+			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		var request struct {
+			Model    string `json:"model"`
+			Messages []struct {
+				Role    string `json:"role"`
+				Content []struct {
+					Type     string `json:"type"`
+					Text     string `json:"text"`
+					ImageURL struct {
+						URL string `json:"url"`
+					} `json:"image_url"`
+				} `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if request.Model != "vision-model" || len(request.Messages) != 1 || len(request.Messages[0].Content) != 2 {
+			t.Fatalf("request = %#v", request)
+		}
+		if request.Messages[0].Content[0].Type != "text" || request.Messages[0].Content[0].Text != "extract text" {
+			t.Fatalf("prompt content = %#v", request.Messages[0].Content[0])
+		}
+		imageURL := request.Messages[0].Content[1].ImageURL.URL
+		wantURL := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString([]byte{0xff, 0xd8, 0xff})
+		if request.Messages[0].Content[1].Type != "image_url" || imageURL != wantURL {
+			t.Fatalf("image content = %#v, want URL %q", request.Messages[0].Content[1], wantURL)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"识别结果"}}]}`))
+	}))
+	defer server.Close()
+
+	client := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
+	response, err := client.OCR(context.Background(), server.URL+"/v1", "test-secret", modelclient.OCRRequest{
+		Model:  "vision-model",
+		Prompt: "extract text",
+		Image:  []byte{0xff, 0xd8, 0xff},
+	})
+	if err != nil {
+		t.Fatalf("OCR() error = %v", err)
+	}
+	if response.Text != "识别结果" {
+		t.Fatalf("OCR() text = %q, want %q", response.Text, "识别结果")
+	}
+}
 
 func TestHTTPClientEmbedsTexts(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

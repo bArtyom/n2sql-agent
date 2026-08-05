@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ const (
 	maxEmbeddingResponseBytes = 2 << 20
 	maxChatResponseBytes      = 1 << 20
 	maxChatStreamBytes        = 8 << 20
+	maxOCRResponseBytes       = 4 << 20
 )
 
 // ConnectionChecker verifies that an API endpoint accepts the configured key.
@@ -33,6 +35,10 @@ type ChatCompleter interface {
 
 type ChatStreamer interface {
 	ChatStream(context.Context, string, string, ChatRequest, func(string) error) error
+}
+
+type OCRer interface {
+	OCR(context.Context, string, string, OCRRequest) (OCRResponse, error)
 }
 
 type EmbeddingRequest struct {
@@ -62,6 +68,16 @@ type ChatRequest struct {
 
 type ChatResponse struct {
 	Message string `json:"message"`
+}
+
+type OCRRequest struct {
+	Model  string
+	Prompt string
+	Image  []byte
+}
+
+type OCRResponse struct {
+	Text string
 }
 
 type HTTPClient struct {
@@ -226,6 +242,130 @@ func (c *HTTPClient) Chat(ctx context.Context, baseURL, apiKey string, chatReque
 		return ChatResponse{}, fmt.Errorf("chat response does not contain a message")
 	}
 	return ChatResponse{Message: payload.Choices[0].Message.Content}, nil
+}
+
+// OCR sends one JPEG page to an OpenAI-compatible vision chat endpoint and
+// asks the model to return only the text visible in the image.
+func (c *HTTPClient) OCR(ctx context.Context, baseURL, apiKey string, ocrRequest OCRRequest) (OCRResponse, error) {
+	if ocrRequest.Model == "" || len(ocrRequest.Image) == 0 || strings.TrimSpace(ocrRequest.Prompt) == "" {
+		return OCRResponse{}, fmt.Errorf("OCR model, prompt, and image are required")
+	}
+
+	endpoint, err := apiEndpoint(baseURL, "chat/completions", c.allowedHosts)
+	if err != nil {
+		return OCRResponse{}, err
+	}
+	payload := struct {
+		Model    string `json:"model"`
+		Messages []struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type     string `json:"type"`
+				Text     string `json:"text,omitempty"`
+				ImageURL *struct {
+					URL string `json:"url"`
+				} `json:"image_url,omitempty"`
+			} `json:"content"`
+		} `json:"messages"`
+		Stream bool `json:"stream"`
+	}{
+		Model: ocrRequest.Model,
+		Messages: []struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type     string `json:"type"`
+				Text     string `json:"text,omitempty"`
+				ImageURL *struct {
+					URL string `json:"url"`
+				} `json:"image_url,omitempty"`
+			} `json:"content"`
+		}{
+			{
+				Role: "user",
+				Content: []struct {
+					Type     string `json:"type"`
+					Text     string `json:"text,omitempty"`
+					ImageURL *struct {
+						URL string `json:"url"`
+					} `json:"image_url,omitempty"`
+				}{
+					{Type: "text", Text: ocrRequest.Prompt},
+					{Type: "image_url", ImageURL: &struct {
+						URL string `json:"url"`
+					}{URL: "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(ocrRequest.Image)}},
+				},
+			},
+		},
+		Stream: false,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return OCRResponse{}, fmt.Errorf("encode OCR request: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return OCRResponse{}, fmt.Errorf("create OCR request: %w", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+apiKey)
+	request.Header.Set("Content-Type", "application/json")
+
+	response, err := c.client.Do(request)
+	if err != nil {
+		return OCRResponse{}, fmt.Errorf("request OCR endpoint: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return OCRResponse{}, fmt.Errorf("OCR endpoint returned HTTP %d", response.StatusCode)
+	}
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxOCRResponseBytes+1))
+	if err != nil {
+		return OCRResponse{}, fmt.Errorf("read OCR response: %w", err)
+	}
+	if len(responseBody) > maxOCRResponseBytes {
+		return OCRResponse{}, fmt.Errorf("OCR response is too large")
+	}
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(responseBody, &result); err != nil {
+		return OCRResponse{}, fmt.Errorf("decode OCR response: %w", err)
+	}
+	if len(result.Choices) == 0 {
+		return OCRResponse{}, fmt.Errorf("OCR response does not contain a choice")
+	}
+	text, err := decodeOCRContent(result.Choices[0].Message.Content)
+	if err != nil {
+		return OCRResponse{}, err
+	}
+	if strings.TrimSpace(text) == "" {
+		return OCRResponse{}, fmt.Errorf("OCR response does not contain text")
+	}
+	return OCRResponse{Text: text}, nil
+}
+
+func decodeOCRContent(raw json.RawMessage) (string, error) {
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text, nil
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return "", fmt.Errorf("decode OCR message content: %w", err)
+	}
+	var values []string
+	for _, part := range parts {
+		if strings.TrimSpace(part.Text) != "" {
+			values = append(values, part.Text)
+		}
+	}
+	return strings.Join(values, ""), nil
 }
 
 func (c *HTTPClient) ChatStream(ctx context.Context, baseURL, apiKey string, chatRequest ChatRequest, onDelta func(string) error) error {

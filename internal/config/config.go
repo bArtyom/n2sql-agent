@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -12,6 +13,11 @@ const (
 	defaultModelProviderAllowedHost  = "api.openai.com"
 	defaultUploadDir                 = "./.data/uploads"
 	defaultWorkerPollInterval        = 2 * time.Second
+	defaultOCRPrompt                 = "请只转写图片中清晰可见的文字，保留原有段落和表格结构，不要解释或补充内容。"
+	defaultOCRRendererBinary         = "pdftoppm"
+	defaultOCRRenderDPI              = 150
+	defaultOCRMaxPages               = 20
+	defaultOCRConcurrency            = 1
 )
 
 type Config struct {
@@ -21,6 +27,12 @@ type Config struct {
 	ModelProviderAllowedHosts []string
 	UploadDir                 string
 	WorkerPollInterval        time.Duration
+	OCRModel                  string
+	OCRPrompt                 string
+	OCRRendererBinary         string
+	OCRRenderDPI              int
+	OCRMaxPages               int
+	OCRConcurrency            int
 }
 
 func Load() Config {
@@ -44,6 +56,12 @@ func Load() Config {
 		ModelProviderAllowedHosts: allowedHosts,
 		UploadDir:                 uploadDir(),
 		WorkerPollInterval:        workerPollInterval(),
+		OCRModel:                  strings.TrimSpace(os.Getenv("OCR_MODEL")),
+		OCRPrompt:                 valueOrDefault("OCR_PROMPT", defaultOCRPrompt),
+		OCRRendererBinary:         valueOrDefault("OCR_RENDERER_BIN", defaultOCRRendererBinary),
+		OCRRenderDPI:              positiveIntEnv("OCR_RENDER_DPI", defaultOCRRenderDPI),
+		OCRMaxPages:               positiveIntEnv("OCR_MAX_PAGES", defaultOCRMaxPages),
+		OCRConcurrency:            positiveIntEnv("OCR_CONCURRENCY", defaultOCRConcurrency),
 	}
 }
 
@@ -71,4 +89,19 @@ func splitHosts(value string) []string {
 		}
 	}
 	return hosts
+}
+
+func valueOrDefault(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func positiveIntEnv(name string, fallback int) int {
+	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv(name)))
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
 }

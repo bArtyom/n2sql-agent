@@ -23,9 +23,20 @@ var (
 	ErrEmptyText          = errors.New("document contains no text")
 )
 
-type Extractor struct{ root string }
+type ScannedPDFProcessor interface {
+	Extract(context.Context, []byte) (string, error)
+}
+
+type Extractor struct {
+	root       string
+	scannedPDF ScannedPDFProcessor
+}
 
 func New(root string) *Extractor { return &Extractor{root: root} }
+
+func NewWithOCR(root string, scannedPDF ScannedPDFProcessor) *Extractor {
+	return &Extractor{root: root, scannedPDF: scannedPDF}
+}
 
 func (e *Extractor) Extract(ctx context.Context, storagePath, contentType string) (string, error) {
 	if err := ctx.Err(); err != nil {
@@ -52,6 +63,15 @@ func (e *Extractor) Extract(ctx context.Context, storagePath, contentType string
 	text := string(content)
 	if contentType == "application/pdf" {
 		text, err = extractPDFText(ctx, content)
+		if err == nil && strings.TrimSpace(text) == "" {
+			err = ErrEmptyText
+		}
+		if errors.Is(err, ErrEmptyText) && e.scannedPDF != nil {
+			text, err = e.scannedPDF.Extract(ctx, content)
+			if err != nil {
+				return "", fmt.Errorf("OCR scanned PDF: %w", err)
+			}
+		}
 		if err != nil {
 			return "", err
 		}

@@ -14,6 +14,12 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 )
 
+type scannedPDFProcessorStub struct{}
+
+func (scannedPDFProcessorStub) Extract(context.Context, []byte) (string, error) {
+	return "OCR scanned page", nil
+}
+
 func TestExtractorReadsTextAndMarkdown(t *testing.T) {
 	root := t.TempDir()
 	directory := filepath.Join(root, "documents")
@@ -124,6 +130,25 @@ func TestExtractorRejectsPDFWithoutText(t *testing.T) {
 	_, err := documentextractor.New(root).Extract(context.Background(), "documents/empty.pdf", "application/pdf")
 	if !errors.Is(err, documentextractor.ErrEmptyText) {
 		t.Fatalf("empty PDF error = %v", err)
+	}
+}
+
+func TestExtractorUsesOCRForPDFWithoutTextLayer(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "documents")
+	if err := os.Mkdir(directory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "scan.pdf"), []byte(minimalPDF("")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	text, err := documentextractor.NewWithOCR(root, scannedPDFProcessorStub{}).Extract(context.Background(), "documents/scan.pdf", "application/pdf")
+	if err != nil {
+		t.Fatalf("Extract scanned PDF = %v", err)
+	}
+	if text != "OCR scanned page" {
+		t.Fatalf("Extract scanned PDF text = %q, want OCR output", text)
 	}
 }
 
