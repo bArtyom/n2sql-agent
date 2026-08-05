@@ -10,7 +10,10 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 )
 
-const maxFailureMessageBytes = 2000
+const (
+	maxFailureMessageBytes = 2000
+	embeddingBatchSize     = 10
+)
 
 var ErrNoTask = errors.New("no pending document processing task")
 
@@ -65,19 +68,34 @@ func NewEmbeddingChunkingProcessor(extractor TextExtractor, splitter TextSplitte
 		if len(parts) == 0 {
 			return errors.New("document contains no chunks")
 		}
-		response, err := embedder.Embed(ctx, parts)
+		embeddings, err := embedChunks(ctx, embedder, parts)
 		if err != nil {
 			return fmt.Errorf("embed document chunks: %w", err)
 		}
-		if len(response.Data) != len(parts) {
-			return fmt.Errorf("embedding count = %d, want %d", len(response.Data), len(parts))
-		}
-		embeddings := make([][]float32, len(parts))
-		for index, embedding := range response.Data {
-			embeddings[index] = embedding.Vector
-		}
 		return chunks.Replace(ctx, task.DocumentID, parts, embeddings)
 	}
+}
+
+func embedChunks(ctx context.Context, embedder Embedder, parts []string) ([][]float32, error) {
+	embeddings := make([][]float32, 0, len(parts))
+	for start := 0; start < len(parts); start += embeddingBatchSize {
+		end := start + embeddingBatchSize
+		if end > len(parts) {
+			end = len(parts)
+		}
+		batch := parts[start:end]
+		response, err := embedder.Embed(ctx, batch)
+		if err != nil {
+			return nil, fmt.Errorf("embed batch %d-%d: %w", start, end-1, err)
+		}
+		if len(response.Data) != len(batch) {
+			return nil, fmt.Errorf("embedding count for batch %d-%d = %d, want %d", start, end-1, len(response.Data), len(batch))
+		}
+		for _, embedding := range response.Data {
+			embeddings = append(embeddings, embedding.Vector)
+		}
+	}
+	return embeddings, nil
 }
 
 func NewTextExtractionProcessor(extractor TextExtractor) Processor {

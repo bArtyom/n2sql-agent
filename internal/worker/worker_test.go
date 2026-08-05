@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
@@ -34,6 +35,10 @@ type splitterStub struct{}
 
 func (splitterStub) Split(string) []string { return []string{"first", "second"} }
 
+type fixedSplitter struct{ chunks []string }
+
+func (s fixedSplitter) Split(string) []string { return s.chunks }
+
 type chunkStoreStub struct {
 	chunks     []string
 	embeddings [][]float32
@@ -60,6 +65,37 @@ func (matchingEmbedderStub) Embed(_ context.Context, texts []string) (modelclien
 	return modelclient.EmbeddingResponse{Data: data}, nil
 }
 
+type recordingEmbedderStub struct {
+	batches [][]string
+}
+
+func (s *recordingEmbedderStub) Embed(_ context.Context, texts []string) (modelclient.EmbeddingResponse, error) {
+	batchIndex := len(s.batches)
+	s.batches = append(s.batches, append([]string(nil), texts...))
+	data := make([]modelclient.Embedding, len(texts))
+	for index := range texts {
+		data[index] = modelclient.Embedding{Index: index, Vector: []float32{float32(batchIndex*10 + index)}}
+	}
+	return modelclient.EmbeddingResponse{Data: data}, nil
+}
+
+type failingBatchEmbedderStub struct {
+	failAt int
+	calls  int
+}
+
+func (s *failingBatchEmbedderStub) Embed(_ context.Context, texts []string) (modelclient.EmbeddingResponse, error) {
+	if s.calls == s.failAt {
+		return modelclient.EmbeddingResponse{}, errors.New("embedding service unavailable")
+	}
+	s.calls++
+	data := make([]modelclient.Embedding, len(texts))
+	for index := range texts {
+		data[index] = modelclient.Embedding{Index: index, Vector: []float32{1}}
+	}
+	return modelclient.EmbeddingResponse{Data: data}, nil
+}
+
 func TestEmbeddingChunkingProcessorStoresMatchingVectors(t *testing.T) {
 	store := &chunkStoreStub{}
 	processor := worker.NewEmbeddingChunkingProcessor(extractorStub{}, splitterStub{}, store, embedderStub{})
@@ -68,6 +104,47 @@ func TestEmbeddingChunkingProcessorStoresMatchingVectors(t *testing.T) {
 	}
 	if len(store.chunks) != 2 || store.chunks[1] != "second" || store.embeddings[1][0] != 2 {
 		t.Fatalf("chunks=%#v embeddings=%#v", store.chunks, store.embeddings)
+	}
+}
+
+func TestEmbeddingChunkingProcessorBatchesEmbeddingRequests(t *testing.T) {
+	parts := make([]string, 11)
+	for index := range parts {
+		parts[index] = fmt.Sprintf("chunk-%d", index)
+	}
+	store := &chunkStoreStub{}
+	embedder := &recordingEmbedderStub{}
+	processor := worker.NewEmbeddingChunkingProcessor(extractorStub{}, fixedSplitter{chunks: parts}, store, embedder)
+
+	if err := processor(context.Background(), worker.Task{DocumentID: 4}); err != nil {
+		t.Fatalf("processor error = %v", err)
+	}
+	if len(embedder.batches) != 2 || len(embedder.batches[0]) != 10 || len(embedder.batches[1]) != 1 {
+		t.Fatalf("embedding batches = %#v, want sizes [10 1]", embedder.batches)
+	}
+	if len(store.chunks) != len(parts) || store.chunks[10] != "chunk-10" {
+		t.Fatalf("chunks = %#v", store.chunks)
+	}
+	if len(store.embeddings) != len(parts) || store.embeddings[0][0] != 0 || store.embeddings[10][0] != 10 {
+		t.Fatalf("embeddings = %#v", store.embeddings)
+	}
+}
+
+func TestEmbeddingChunkingProcessorDoesNotStoreWhenBatchFails(t *testing.T) {
+	parts := make([]string, 11)
+	for index := range parts {
+		parts[index] = fmt.Sprintf("chunk-%d", index)
+	}
+	store := &chunkStoreStub{}
+	embedder := &failingBatchEmbedderStub{failAt: 1}
+	processor := worker.NewEmbeddingChunkingProcessor(extractorStub{}, fixedSplitter{chunks: parts}, store, embedder)
+
+	err := processor(context.Background(), worker.Task{DocumentID: 4})
+	if err == nil || !strings.Contains(err.Error(), "embed batch 10-10") {
+		t.Fatalf("processor error = %v, want second batch context", err)
+	}
+	if store.chunks != nil || store.embeddings != nil {
+		t.Fatalf("store received partial data: chunks=%#v embeddings=%#v", store.chunks, store.embeddings)
 	}
 }
 
