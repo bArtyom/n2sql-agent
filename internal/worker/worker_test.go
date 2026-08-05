@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
@@ -20,6 +21,7 @@ import (
 type taskStoreStub struct {
 	task      worker.Task
 	claimErr  error
+	claims    int
 	succeeded int64
 	failed    struct {
 		id      int64
@@ -188,7 +190,10 @@ func TestRunnerProcessesPDFIntoChunks(t *testing.T) {
 	}
 }
 
-func (s *taskStoreStub) ClaimNext(context.Context) (worker.Task, error) { return s.task, s.claimErr }
+func (s *taskStoreStub) ClaimNext(context.Context) (worker.Task, error) {
+	s.claims++
+	return s.task, s.claimErr
+}
 func (s *taskStoreStub) MarkSucceeded(_ context.Context, id int64) error {
 	s.succeeded = id
 	return nil
@@ -247,6 +252,37 @@ func TestRunnerDoesNothingWhenQueueIsEmpty(t *testing.T) {
 	processed, err := runner.RunOnce(context.Background())
 	if err != nil || processed {
 		t.Fatalf("processed=%v err=%v", processed, err)
+	}
+}
+
+func TestRunnerDoesNotClaimAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	store := &taskStoreStub{task: worker.Task{ID: 1}}
+
+	worker.NewRunner(store, func(context.Context, worker.Task) error {
+		t.Fatal("processor should not run")
+		return nil
+	}).Run(ctx, time.Millisecond, nil)
+
+	if store.claims != 0 {
+		t.Fatalf("claim count = %d, want 0", store.claims)
+	}
+}
+
+func TestRunnerLeavesCanceledTaskProcessingForRecovery(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	store := &taskStoreStub{task: worker.Task{ID: 10, DocumentID: 5}}
+
+	processed, err := worker.NewRunner(store, func(context.Context, worker.Task) error {
+		return context.Canceled
+	}).RunOnce(ctx)
+	if err != nil || !processed {
+		t.Fatalf("processed=%v err=%v, want handled cancellation", processed, err)
+	}
+	if store.failed.id != 0 || store.succeeded != 0 {
+		t.Fatalf("canceled task state = failed=%#v succeeded=%d, want unchanged", store.failed, store.succeeded)
 	}
 }
 

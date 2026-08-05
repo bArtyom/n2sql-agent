@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/app"
@@ -68,10 +70,19 @@ func main() {
 			APIKeyEnvVar:      cfg.ModelProviderAPIKeyEnvVar,
 		}),
 	}
-	go runner.Run(context.Background(), cfg.WorkerPollInterval, func(err error) { log.Printf("document worker: %v", err) })
+	runContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		runner.Run(runContext, cfg.WorkerPollInterval, func(err error) { log.Printf("document worker: %v", err) })
+	}()
 
 	log.Printf("server listening on %s", cfg.Address)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
+	serveErr := app.RunServer(runContext, server, 0)
+	stop()
+	<-workerDone
+	if serveErr != nil {
+		log.Fatal(serveErr)
 	}
 }

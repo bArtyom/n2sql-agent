@@ -123,7 +123,12 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("claim document processing task: %w", err)
 	}
+	log.Printf("document processing started: task_id=%d document_id=%d", task.ID, task.DocumentID)
 	if err := r.processor(ctx, task); err != nil {
+		if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+			log.Printf("document processing canceled: task_id=%d document_id=%d", task.ID, task.DocumentID)
+			return true, nil
+		}
 		message := err.Error()
 		if len(message) > maxFailureMessageBytes {
 			message = message[:maxFailureMessageBytes]
@@ -134,6 +139,7 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 		}
 		return true, nil
 	}
+	log.Printf("document processing succeeded: task_id=%d document_id=%d", task.ID, task.DocumentID)
 	if err := r.store.MarkSucceeded(context.WithoutCancel(ctx), task.ID); err != nil {
 		return true, fmt.Errorf("mark document processing task succeeded: %w", err)
 	}
@@ -144,6 +150,11 @@ func (r *Runner) Run(ctx context.Context, interval time.Duration, report func(er
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 		if _, err := r.RunOnce(ctx); err != nil && report != nil {
 			report(err)
 		}
