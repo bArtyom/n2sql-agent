@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
@@ -127,6 +128,7 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 		if len(message) > maxFailureMessageBytes {
 			message = message[:maxFailureMessageBytes]
 		}
+		log.Printf("document processing failed: task_id=%d document_id=%d error=%s", task.ID, task.DocumentID, message)
 		if markErr := r.store.MarkFailed(context.WithoutCancel(ctx), task.ID, message); markErr != nil {
 			return true, fmt.Errorf("mark document processing task failed: %w", markErr)
 		}

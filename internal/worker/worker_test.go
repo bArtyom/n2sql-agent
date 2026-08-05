@@ -1,9 +1,11 @@
 package worker_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -218,6 +220,25 @@ func TestRunnerMarksFailedTask(t *testing.T) {
 	processed, err := runner.RunOnce(context.Background())
 	if err != nil || !processed || store.failed.id != 9 || store.failed.message != "invalid PDF" {
 		t.Fatalf("processed=%v err=%v failed=%#v", processed, err, store.failed)
+	}
+}
+
+func TestRunnerLogsFailedTask(t *testing.T) {
+	var output bytes.Buffer
+	previousWriter := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(previousWriter)
+
+	store := &taskStoreStub{task: worker.Task{ID: 9, DocumentID: 4}}
+	runner := worker.NewRunner(store, func(context.Context, worker.Task) error {
+		return errors.New("embedding service unavailable")
+	})
+
+	if _, err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+	if !strings.Contains(output.String(), "document processing failed: task_id=9 document_id=4 error=embedding service unavailable") {
+		t.Fatalf("log output = %q", output.String())
 	}
 }
 
