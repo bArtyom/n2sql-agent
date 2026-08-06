@@ -293,6 +293,30 @@ func TestHTTPClientRejectsStreamingToolCallsUntilSupported(t *testing.T) {
 	}
 }
 
+func TestChatMessageMarshalsToolCallContentAsNull(t *testing.T) {
+	body, err := json.Marshal(modelclient.ChatMessage{
+		Role: "assistant",
+		ToolCalls: []modelclient.ToolCall{{
+			ID:   "call-1",
+			Type: "function",
+			Function: modelclient.ToolCallFunction{
+				Name:      "knowledge_search",
+				Arguments: `{}`,
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var message map[string]json.RawMessage
+	if err := json.Unmarshal(body, &message); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if string(message["content"]) != "null" {
+		t.Fatalf("content = %s, want null", message["content"])
+	}
+}
+
 func TestHTTPClientStreamsChatDeltas(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {

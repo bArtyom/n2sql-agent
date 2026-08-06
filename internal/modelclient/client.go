@@ -62,6 +62,24 @@ type ChatMessage struct {
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 }
 
+func (m ChatMessage) MarshalJSON() ([]byte, error) {
+	content := any(m.Content)
+	if m.Content == "" && len(m.ToolCalls) > 0 {
+		content = nil
+	}
+	return json.Marshal(struct {
+		Role       string     `json:"role"`
+		Content    any        `json:"content"`
+		ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+		ToolCallID string     `json:"tool_call_id,omitempty"`
+	}{
+		Role:       m.Role,
+		Content:    content,
+		ToolCalls:  m.ToolCalls,
+		ToolCallID: m.ToolCallID,
+	})
+}
+
 type ChatRequest struct {
 	Model    string           `json:"model"`
 	Messages []ChatMessage    `json:"messages"`
