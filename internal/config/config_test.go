@@ -46,3 +46,12 @@ func TestLoadReadsOCRSettings(t *testing.T) {
 		t.Fatalf("OCR settings = %#v", cfg)
 	}
 }
+
+func TestLoadReadsAgentSettings(t *testing.T) {
+	t.Setenv("AGENT_MAX_STEPS", "7")
+
+	cfg := config.Load()
+	if cfg.AgentMaxSteps != 7 {
+		t.Fatalf("agent max steps = %d, want 7", cfg.AgentMaxSteps)
+	}
+}

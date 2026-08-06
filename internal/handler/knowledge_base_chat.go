@@ -72,9 +72,8 @@ func knowledgeBaseChatError(err error) (string, int) {
 }
 
 func decodeKnowledgeBaseChatRequest(w http.ResponseWriter, r *http.Request) (int64, knowledgeBaseChatRequest, bool) {
-	knowledgeBaseID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil || knowledgeBaseID <= 0 {
-		http.Error(w, `{"error":"invalid knowledge base ID"}`, http.StatusBadRequest)
+	knowledgeBaseID, ok := decodeKnowledgeBaseID(w, r)
+	if !ok {
 		return 0, knowledgeBaseChatRequest{}, false
 	}
 
@@ -102,6 +101,15 @@ func decodeKnowledgeBaseChatRequest(w http.ResponseWriter, r *http.Request) (int
 		return 0, knowledgeBaseChatRequest{}, false
 	}
 	return knowledgeBaseID, request, true
+}
+
+func decodeKnowledgeBaseID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	knowledgeBaseID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || knowledgeBaseID <= 0 {
+		http.Error(w, `{"error":"invalid knowledge base ID"}`, http.StatusBadRequest)
+		return 0, false
+	}
+	return knowledgeBaseID, true
 }
 
 func writeKnowledgeBaseChatDecodeError(w http.ResponseWriter, err error) {

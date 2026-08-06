@@ -85,6 +85,52 @@ func TestNewKnowledgeSearchRegistryRegistersSearchTool(t *testing.T) {
 	}
 }
 
+func TestNewKnowledgeSearchRegistryForKnowledgeBaseScopesTool(t *testing.T) {
+	searcher := &searcherStub{}
+	registry, err := agent.NewKnowledgeSearchRegistryForKnowledgeBase(searcher, 7)
+	if err != nil {
+		t.Fatalf("NewKnowledgeSearchRegistryForKnowledgeBase() error = %v", err)
+	}
+	tool, err := registry.Find("knowledge_search")
+	if err != nil {
+		t.Fatalf("Find() error = %v", err)
+	}
+	var parameters map[string]any
+	if err := json.Unmarshal(tool.Parameters(), &parameters); err != nil {
+		t.Fatalf("Parameters() is not valid JSON: %v", err)
+	}
+	properties := parameters["properties"].(map[string]any)
+	if _, hasKnowledgeBaseID := properties["knowledge_base_id"]; hasKnowledgeBaseID {
+		t.Fatal("scoped tool must not expose knowledge_base_id to the model")
+	}
+
+	if _, err := tool.Call(context.Background(), json.RawMessage(`{"query":"年假"}`)); err != nil {
+		t.Fatalf("Call() error = %v", err)
+	}
+	if searcher.knowledgeBaseID != 7 {
+		t.Fatalf("knowledge base ID = %d, want 7", searcher.knowledgeBaseID)
+	}
+}
+
+func TestScopedKnowledgeSearchToolRejectsKnowledgeBaseOverride(t *testing.T) {
+	tool, err := agent.NewKnowledgeSearchToolForKnowledgeBase(&searcherStub{}, 7)
+	if err != nil {
+		t.Fatalf("NewKnowledgeSearchToolForKnowledgeBase() error = %v", err)
+	}
+
+	_, err = tool.Call(context.Background(), json.RawMessage(`{"knowledge_base_id":999,"query":"年假"}`))
+	if !errors.Is(err, agent.ErrInvalidKnowledgeSearchInput) {
+		t.Fatalf("Call() error = %v, want %v", err, agent.ErrInvalidKnowledgeSearchInput)
+	}
+}
+
+func TestNewKnowledgeSearchRegistryForKnowledgeBaseRejectsInvalidScope(t *testing.T) {
+	_, err := agent.NewKnowledgeSearchRegistryForKnowledgeBase(&searcherStub{}, 0)
+	if !errors.Is(err, agent.ErrInvalidKnowledgeBaseScope) {
+		t.Fatalf("error = %v, want %v", err, agent.ErrInvalidKnowledgeBaseScope)
+	}
+}
+
 func TestKnowledgeSearchToolRejectsInvalidInput(t *testing.T) {
 	cases := []struct {
 		name string

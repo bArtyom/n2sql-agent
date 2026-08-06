@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/app"
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
@@ -58,6 +59,12 @@ func (answererStub) Answer(context.Context, int64, string, int) (rag.Response, e
 
 func (answererStub) Stream(_ context.Context, _ int64, _ string, _ int, emit func(rag.StreamEvent) error) error {
 	return emit(rag.StreamEvent{Type: "delta", Delta: "OK"})
+}
+
+type agentAnswererStub struct{}
+
+func (agentAnswererStub) Answer(context.Context, int64, string) (agentservice.Response, error) {
+	return agentservice.Response{Answer: "OK"}, nil
 }
 
 type knowledgeBaseStoreStub struct{}
@@ -180,6 +187,17 @@ func TestServerRoutesKnowledgeBaseChatStream(t *testing.T) {
 	server := app.New(app.Dependencies{StreamingAnswers: answererStub{}})
 
 	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/chat/stream", strings.NewReader(`{"message":"问题"}`)))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
+	}
+}
+
+func TestServerRoutesKnowledgeBaseAgentChat(t *testing.T) {
+	response := httptest.NewRecorder()
+	server := app.New(app.Dependencies{AgentAnswers: agentAnswererStub{}})
+
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat", strings.NewReader(`{"message":"问题"}`)))
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)

@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/app"
 	"github.com/bArtyom/n2sql-agent/internal/config"
 	"github.com/bArtyom/n2sql-agent/internal/document"
@@ -54,6 +55,10 @@ func main() {
 	runner := worker.NewRunner(worker.NewPostgresStore(db), processor)
 	searchService := retrieval.NewService(embeddingService, chunkStore)
 	answerService := rag.NewService(searchService, chatService)
+	agentAnswerService, err := agentservice.NewService(chatService, searchService, cfg.AgentMaxSteps)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	server := &http.Server{
 		Addr: cfg.Address,
@@ -67,6 +72,7 @@ func main() {
 			Search:            searchService,
 			Answers:           answerService,
 			StreamingAnswers:  answerService,
+			AgentAnswers:      agentAnswerService,
 			APIKeyEnvVar:      cfg.ModelProviderAPIKeyEnvVar,
 		}),
 	}

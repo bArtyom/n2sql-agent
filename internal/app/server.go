@@ -3,6 +3,7 @@ package app
 import (
 	"net/http"
 
+	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/handler"
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
@@ -23,6 +24,7 @@ type Dependencies struct {
 	Search            retrieval.Searcher
 	Answers           rag.Answerer
 	StreamingAnswers  rag.StreamAnswerer
+	AgentAnswers      agentservice.Answerer
 	APIKeyEnvVar      string
 }
 
@@ -60,6 +62,9 @@ func New(dependencies Dependencies) http.Handler {
 	}
 	if dependencies.StreamingAnswers != nil {
 		mux.Handle("POST /api/knowledge-bases/{id}/chat/stream", handler.NewKnowledgeBaseChatStream(dependencies.StreamingAnswers))
+	}
+	if dependencies.AgentAnswers != nil {
+		mux.Handle("POST /api/knowledge-bases/{id}/agent-chat", handler.NewKnowledgeBaseAgentChat(dependencies.AgentAnswers))
 	}
 
 	return mux

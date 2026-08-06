@@ -18,6 +18,7 @@ const (
 	defaultOCRRenderDPI              = 150
 	defaultOCRMaxPages               = 20
 	defaultOCRConcurrency            = 1
+	defaultAgentMaxSteps             = 4
 )
 
 type Config struct {
@@ -33,6 +34,7 @@ type Config struct {
 	OCRRenderDPI              int
 	OCRMaxPages               int
 	OCRConcurrency            int
+	AgentMaxSteps             int
 }
 
 func Load() Config {
@@ -62,6 +64,7 @@ func Load() Config {
 		OCRRenderDPI:              positiveIntEnv("OCR_RENDER_DPI", defaultOCRRenderDPI),
 		OCRMaxPages:               positiveIntEnv("OCR_MAX_PAGES", defaultOCRMaxPages),
 		OCRConcurrency:            positiveIntEnv("OCR_CONCURRENCY", defaultOCRConcurrency),
+		AgentMaxSteps:             positiveIntEnv("AGENT_MAX_STEPS", defaultAgentMaxSteps),
 	}
 }
 
