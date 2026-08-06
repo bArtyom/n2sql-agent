@@ -21,6 +21,31 @@ type KnowledgeSearchInput struct {
 	Limit           int    `json:"limit,omitempty"`
 }
 
+var knowledgeSearchParameters = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "knowledge_base_id": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "要搜索的知识库 ID"
+    },
+    "query": {
+      "type": "string",
+      "minLength": 1,
+      "description": "要搜索的自然语言问题"
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 20,
+      "default": 5,
+      "description": "最多返回的文档片段数量；传 0 使用默认值 5"
+    }
+  },
+  "required": ["knowledge_base_id", "query"],
+  "additionalProperties": false
+}`)
+
 // KnowledgeSearchTool adapts the existing retrieval service to the Agent Tool interface.
 type KnowledgeSearchTool struct {
 	searcher retrieval.Searcher
@@ -38,6 +63,10 @@ func (t *KnowledgeSearchTool) Name() string {
 
 func (t *KnowledgeSearchTool) Description() string {
 	return "搜索指定知识库中与问题最相关的文档片段"
+}
+
+func (t *KnowledgeSearchTool) Parameters() json.RawMessage {
+	return append(json.RawMessage(nil), knowledgeSearchParameters...)
 }
 
 func (t *KnowledgeSearchTool) Call(ctx context.Context, raw json.RawMessage) (ToolResult, error) {
@@ -69,4 +98,15 @@ func (t *KnowledgeSearchTool) Call(ctx context.Context, raw json.RawMessage) (To
 		return ToolResult{}, fmt.Errorf("encode knowledge search results: %w", err)
 	}
 	return ToolResult{Content: string(content)}, nil
+}
+
+func NewKnowledgeSearchRegistry(searcher retrieval.Searcher) (*ToolRegistry, error) {
+	if searcher == nil {
+		return nil, ErrKnowledgeSearcherUnavailable
+	}
+	registry := NewToolRegistry()
+	if err := registry.Register(NewKnowledgeSearchTool(searcher)); err != nil {
+		return nil, fmt.Errorf("register knowledge search tool: %w", err)
+	}
+	return registry, nil
 }

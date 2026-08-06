@@ -41,6 +41,13 @@ func TestKnowledgeSearchToolCallsSearcherAndReturnsJSON(t *testing.T) {
 	if tool.Description() == "" {
 		t.Fatal("Description() is empty")
 	}
+	var parameters map[string]any
+	if err := json.Unmarshal(tool.Parameters(), &parameters); err != nil {
+		t.Fatalf("Parameters() is not valid JSON: %v", err)
+	}
+	if parameters["type"] != "object" {
+		t.Fatalf("Parameters() type = %#v, want object", parameters["type"])
+	}
 
 	result, err := tool.Call(context.Background(), json.RawMessage(`{
 		"knowledge_base_id": 7,
@@ -60,6 +67,21 @@ func TestKnowledgeSearchToolCallsSearcherAndReturnsJSON(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].Content != "工作满一年可享受五天年假。" {
 		t.Fatalf("tool results = %#v", results)
+	}
+}
+
+func TestNewKnowledgeSearchRegistryRegistersSearchTool(t *testing.T) {
+	registry, err := agent.NewKnowledgeSearchRegistry(&searcherStub{})
+	if err != nil {
+		t.Fatalf("NewKnowledgeSearchRegistry() error = %v", err)
+	}
+
+	tool, err := registry.Find("knowledge_search")
+	if err != nil {
+		t.Fatalf("Find() error = %v", err)
+	}
+	if tool.Name() != "knowledge_search" {
+		t.Fatalf("registered tool name = %q, want knowledge_search", tool.Name())
 	}
 }
 

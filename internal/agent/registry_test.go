@@ -13,12 +13,25 @@ type stubTool struct {
 	name string
 }
 
+type invalidDefinitionTool struct {
+	stubTool
+	parameters json.RawMessage
+}
+
+func (t invalidDefinitionTool) Parameters() json.RawMessage {
+	return t.parameters
+}
+
 func (t stubTool) Name() string {
 	return t.name
 }
 
 func (t stubTool) Description() string {
 	return "测试工具"
+}
+
+func (t stubTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{"type":"object"}`)
 }
 
 func (t stubTool) Call(context.Context, json.RawMessage) (agent.ToolResult, error) {
@@ -103,5 +116,52 @@ func TestToolRegistryListsToolsInNameOrder(t *testing.T) {
 	}
 	if tools[0].Name() != "document_list" || tools[1].Name() != "knowledge_search" {
 		t.Fatalf("List() names = %q, %q, want document_list, knowledge_search", tools[0].Name(), tools[1].Name())
+	}
+}
+
+func TestToolRegistryListsFunctionDefinitionsInNameOrder(t *testing.T) {
+	registry := agent.NewToolRegistry()
+	for _, tool := range []stubTool{
+		{name: "knowledge_search"},
+		{name: "document_list"},
+	} {
+		if err := registry.Register(tool); err != nil {
+			t.Fatalf("Register(%q) error = %v", tool.Name(), err)
+		}
+	}
+
+	definitions := registry.FunctionDefinitions()
+	if len(definitions) != 2 {
+		t.Fatalf("FunctionDefinitions() length = %d, want 2", len(definitions))
+	}
+	if definitions[0].Name != "document_list" || definitions[1].Name != "knowledge_search" {
+		t.Fatalf("definition names = %q, %q, want document_list, knowledge_search", definitions[0].Name, definitions[1].Name)
+	}
+	if string(definitions[0].Parameters) != `{"type":"object"}` {
+		t.Fatalf("first definition parameters = %s", definitions[0].Parameters)
+	}
+}
+
+func TestToolRegistryRejectsInvalidFunctionDefinition(t *testing.T) {
+	cases := []struct {
+		name       string
+		parameters json.RawMessage
+	}{
+		{name: "empty schema", parameters: nil},
+		{name: "malformed schema", parameters: json.RawMessage(`{"type":`)},
+		{name: "non object schema", parameters: json.RawMessage(`[]`)},
+	}
+
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			registry := agent.NewToolRegistry()
+			err := registry.Register(invalidDefinitionTool{
+				stubTool:   stubTool{name: "invalid_tool"},
+				parameters: test.parameters,
+			})
+			if !errors.Is(err, agent.ErrInvalidToolParameters) {
+				t.Fatalf("Register() error = %v, want %v", err, agent.ErrInvalidToolParameters)
+			}
+		})
 	}
 }
