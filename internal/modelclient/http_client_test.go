@@ -173,6 +173,126 @@ func TestHTTPClientCompletesChat(t *testing.T) {
 	}
 }
 
+func TestHTTPClientCarriesToolDefinitionsAndParsesToolCalls(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Tools []struct {
+				Type     string `json:"type"`
+				Function struct {
+					Name        string          `json:"name"`
+					Description string          `json:"description"`
+					Parameters  json.RawMessage `json:"parameters"`
+				} `json:"function"`
+			} `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(request.Tools) != 1 {
+			t.Fatalf("tools = %#v, want one tool", request.Tools)
+		}
+		tool := request.Tools[0]
+		if tool.Type != "function" || tool.Function.Name != "knowledge_search" || tool.Function.Description != "search the knowledge base" {
+			t.Fatalf("tool = %#v", tool)
+		}
+		if string(tool.Function.Parameters) != `{"type":"object","properties":{"query":{"type":"string"}}}` {
+			t.Fatalf("tool parameters = %s", tool.Function.Parameters)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"knowledge_search","arguments":"{\"knowledge_base_id\":7,\"query\":\"年假\"}"}}]}}]}`))
+	}))
+	defer server.Close()
+
+	client := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
+	response, err := client.Chat(context.Background(), server.URL+"/v1", "test-secret", modelclient.ChatRequest{
+		Model: "test-chat-model",
+		Messages: []modelclient.ChatMessage{{
+			Role:    "user",
+			Content: "查年假",
+		}},
+		Tools: []modelclient.ToolDefinition{{
+			Type: "function",
+			Function: modelclient.FunctionDefinition{
+				Name:        "knowledge_search",
+				Description: "search the knowledge base",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}}}`),
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if response.Message != "" {
+		t.Fatalf("message = %q, want empty tool-call message", response.Message)
+	}
+	if len(response.ToolCalls) != 1 {
+		t.Fatalf("tool calls = %#v, want one call", response.ToolCalls)
+	}
+	call := response.ToolCalls[0]
+	if call.ID != "call-1" || call.Type != "function" || call.Function.Name != "knowledge_search" || call.Function.Arguments != `{"knowledge_base_id":7,"query":"年假"}` {
+		t.Fatalf("tool call = %#v", call)
+	}
+}
+
+func TestHTTPClientRejectsInvalidToolDefinitionParameters(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("invalid tool definition reached the HTTP endpoint")
+	}))
+	defer server.Close()
+
+	client := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
+	_, err := client.Chat(context.Background(), server.URL+"/v1", "test-secret", modelclient.ChatRequest{
+		Model:    "test-chat-model",
+		Messages: []modelclient.ChatMessage{{Role: "user", Content: "hello"}},
+		Tools: []modelclient.ToolDefinition{{
+			Type: "function",
+			Function: modelclient.FunctionDefinition{
+				Name:       "knowledge_search",
+				Parameters: json.RawMessage(`[]`),
+			},
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "parameters") {
+		t.Fatal("Chat() error = nil, want invalid tool parameters error")
+	}
+}
+
+func TestHTTPClientRejectsMalformedToolCall(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"","type":"function","function":{"name":"knowledge_search","arguments":"{}"}}]}}]}`))
+	}))
+	defer server.Close()
+
+	client := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
+	_, err := client.Chat(context.Background(), server.URL+"/v1", "test-secret", modelclient.ChatRequest{
+		Model:    "test-chat-model",
+		Messages: []modelclient.ChatMessage{{Role: "user", Content: "hello"}},
+	})
+	if err == nil {
+		t.Fatal("Chat() error = nil, want malformed tool call error")
+	}
+}
+
+func TestHTTPClientRejectsStreamingToolCallsUntilSupported(t *testing.T) {
+	client := modelclient.NewHTTPClient(http.DefaultClient, []string{"api.openai.com"})
+	err := client.ChatStream(context.Background(), "https://api.openai.com/v1", "test-secret", modelclient.ChatRequest{
+		Model:    "test-chat-model",
+		Messages: []modelclient.ChatMessage{{Role: "user", Content: "hello"}},
+		Tools: []modelclient.ToolDefinition{{
+			Type: "function",
+			Function: modelclient.FunctionDefinition{
+				Name:       "knowledge_search",
+				Parameters: json.RawMessage(`{"type":"object"}`),
+			},
+		}},
+	}, func(string) error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("ChatStream() error = %v, want unsupported tool-call error", err)
+	}
+}
+
 func TestHTTPClientStreamsChatDeltas(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {

@@ -56,18 +56,46 @@ type EmbeddingResponse struct {
 }
 
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
 }
 
 type ChatRequest struct {
-	Model    string        `json:"model"`
-	Messages []ChatMessage `json:"messages"`
-	Stream   bool          `json:"stream"`
+	Model    string           `json:"model"`
+	Messages []ChatMessage    `json:"messages"`
+	Stream   bool             `json:"stream"`
+	Tools    []ToolDefinition `json:"tools,omitempty"`
 }
 
 type ChatResponse struct {
-	Message string `json:"message"`
+	Message   string     `json:"message"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+}
+
+// ToolDefinition is the OpenAI-compatible function tool shape sent with a
+// chat request. Function contains the JSON Schema the model uses for args.
+type ToolDefinition struct {
+	Type     string             `json:"type"`
+	Function FunctionDefinition `json:"function"`
+}
+
+type FunctionDefinition struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
+type ToolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type"`
+	Function ToolCallFunction `json:"function"`
+}
+
+type ToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 type OCRRequest struct {
@@ -257,10 +285,19 @@ func (c *HTTPClient) Chat(ctx context.Context, baseURL, apiKey string, chatReque
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return ChatResponse{}, fmt.Errorf("decode chat response: %w", err)
 	}
-	if len(payload.Choices) == 0 || payload.Choices[0].Message.Content == "" {
+	if len(payload.Choices) == 0 {
 		return ChatResponse{}, fmt.Errorf("chat response does not contain a message")
 	}
-	return ChatResponse{Message: payload.Choices[0].Message.Content}, nil
+	message := payload.Choices[0].Message
+	if message.Content == "" && len(message.ToolCalls) == 0 {
+		return ChatResponse{}, fmt.Errorf("chat response does not contain a message")
+	}
+	for _, toolCall := range message.ToolCalls {
+		if err := validateToolCall(toolCall); err != nil {
+			return ChatResponse{}, fmt.Errorf("chat response contains invalid tool call: %w", err)
+		}
+	}
+	return ChatResponse{Message: message.Content, ToolCalls: message.ToolCalls}, nil
 }
 
 // OCR sends one JPEG page to an OpenAI-compatible vision chat endpoint and
@@ -366,6 +403,9 @@ func (c *HTTPClient) ChatStream(ctx context.Context, baseURL, apiKey string, cha
 	if onDelta == nil {
 		return fmt.Errorf("chat stream delta callback is required")
 	}
+	if len(chatRequest.Tools) > 0 {
+		return fmt.Errorf("chat stream tool calls are not supported")
+	}
 	chatRequest.Stream = true
 	endpoint, err := apiEndpoint(baseURL, "chat/completions", c.allowedHosts)
 	if err != nil {
@@ -469,11 +509,76 @@ func validateChatRequest(chatRequest ChatRequest) error {
 		return fmt.Errorf("chat model and messages are required")
 	}
 	for _, message := range chatRequest.Messages {
-		if message.Role == "" || message.Content == "" {
-			return fmt.Errorf("chat message role and content are required")
+		if strings.TrimSpace(message.Role) == "" {
+			return fmt.Errorf("chat message role is required")
+		}
+		if message.Content == "" && len(message.ToolCalls) == 0 {
+			return fmt.Errorf("chat message content is required unless it contains tool calls")
+		}
+		for _, toolCall := range message.ToolCalls {
+			if err := validateToolCall(toolCall); err != nil {
+				return fmt.Errorf("chat message contains invalid tool call: %w", err)
+			}
+		}
+	}
+	for _, tool := range chatRequest.Tools {
+		if tool.Type != "function" {
+			return fmt.Errorf("chat tool type must be function")
+		}
+		if strings.TrimSpace(tool.Function.Name) == "" {
+			return fmt.Errorf("chat tool function name is required")
+		}
+		if !validToolSchema(tool.Function.Parameters) {
+			return fmt.Errorf("chat tool function parameters must be an object JSON Schema")
 		}
 	}
 	return nil
+}
+
+func validateToolCall(toolCall ToolCall) error {
+	if strings.TrimSpace(toolCall.ID) == "" {
+		return fmt.Errorf("tool call ID is required")
+	}
+	if toolCall.Type != "function" {
+		return fmt.Errorf("tool call type must be function")
+	}
+	if strings.TrimSpace(toolCall.Function.Name) == "" {
+		return fmt.Errorf("tool call function name is required")
+	}
+	if !validToolArguments(json.RawMessage(toolCall.Function.Arguments)) {
+		return fmt.Errorf("tool call arguments must be an object JSON value")
+	}
+	return nil
+}
+
+func validToolSchema(raw json.RawMessage) bool {
+	if len(raw) == 0 || !json.Valid(raw) {
+		return false
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil || object == nil {
+		return false
+	}
+	schemaType, ok := object["type"]
+	if !ok {
+		return false
+	}
+	var value string
+	if err := json.Unmarshal(schemaType, &value); err != nil || value != "object" {
+		return false
+	}
+	return true
+}
+
+func validToolArguments(raw json.RawMessage) bool {
+	if len(raw) == 0 || !json.Valid(raw) {
+		return false
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil || object == nil {
+		return false
+	}
+	return true
 }
 
 func apiEndpoint(baseURL, resource string, allowedHosts map[string]struct{}) (string, error) {

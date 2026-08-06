@@ -2,9 +2,12 @@ package modelruntime_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 
+	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
@@ -14,6 +17,7 @@ type chatCompleterStub struct {
 	baseURL string
 	apiKey  string
 	request modelclient.ChatRequest
+	err     error
 }
 
 func TestChatServiceRejectsMissingAPIKey(t *testing.T) {
@@ -34,6 +38,9 @@ func (s *chatCompleterStub) Chat(_ context.Context, baseURL, apiKey string, requ
 	s.baseURL = baseURL
 	s.apiKey = apiKey
 	s.request = request
+	if s.err != nil {
+		return modelclient.ChatResponse{}, s.err
+	}
 	return modelclient.ChatResponse{Message: "OK"}, nil
 }
 
@@ -100,8 +107,60 @@ func TestChatServiceForwardsSystemAndUserMessages(t *testing.T) {
 	if _, err := service.ChatMessages(context.Background(), messages); err != nil {
 		t.Fatalf("ChatMessages() error = %v", err)
 	}
-	if len(completer.request.Messages) != 2 || completer.request.Messages[0] != messages[0] || completer.request.Messages[1] != messages[1] {
+	if !reflect.DeepEqual(completer.request.Messages, messages) {
 		t.Fatalf("messages = %#v, want %#v", completer.request.Messages, messages)
+	}
+}
+
+func TestChatServiceForwardsToolDefinitions(t *testing.T) {
+	store := providerStoreStub{provider: modelprovider.Provider{
+		BaseURL:      "https://api.example.com/v1",
+		APIKeyEnvVar: "TEST_MODEL_PROVIDER_API_KEY",
+		ChatModel:    "test-chat-model",
+	}}
+	completer := &chatCompleterStub{}
+	service := modelruntime.NewChatService(store, completer, "TEST_MODEL_PROVIDER_API_KEY", func(string) (string, bool) {
+		return "test-secret", true
+	})
+	definitions := []agent.FunctionDefinition{{
+		Name:        "knowledge_search",
+		Description: "search the knowledge base",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}}}`),
+	}}
+
+	response, err := service.ChatMessagesWithTools(context.Background(), []modelclient.ChatMessage{{Role: "user", Content: "查年假"}}, definitions)
+	if err != nil {
+		t.Fatalf("ChatMessagesWithTools() error = %v", err)
+	}
+	if response.Message != "OK" {
+		t.Fatalf("message = %q, want OK", response.Message)
+	}
+	if len(completer.request.Tools) != 1 {
+		t.Fatalf("tools = %#v, want one tool", completer.request.Tools)
+	}
+	tool := completer.request.Tools[0]
+	if tool.Type != "function" || tool.Function.Name != definitions[0].Name || tool.Function.Description != definitions[0].Description {
+		t.Fatalf("tool = %#v", tool)
+	}
+	if string(tool.Function.Parameters) != string(definitions[0].Parameters) {
+		t.Fatalf("parameters = %s, want %s", tool.Function.Parameters, definitions[0].Parameters)
+	}
+}
+
+func TestChatServiceWrapsToolCompletionFailure(t *testing.T) {
+	store := providerStoreStub{provider: modelprovider.Provider{
+		BaseURL:      "https://api.example.com/v1",
+		APIKeyEnvVar: "TEST_MODEL_PROVIDER_API_KEY",
+		ChatModel:    "test-chat-model",
+	}}
+	wantErr := errors.New("upstream unavailable")
+	service := modelruntime.NewChatService(store, &chatCompleterStub{err: wantErr}, "TEST_MODEL_PROVIDER_API_KEY", func(string) (string, bool) {
+		return "test-secret", true
+	})
+
+	_, err := service.ChatMessagesWithTools(context.Background(), []modelclient.ChatMessage{{Role: "user", Content: "查年假"}}, nil)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("ChatMessagesWithTools() error = %v, want wrapped upstream error", err)
 	}
 }
 

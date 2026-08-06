@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 )
@@ -21,6 +22,10 @@ func (e *ChatCallError) Unwrap() error { return e.Err }
 
 type ChatRunner interface {
 	Chat(context.Context, string) (modelclient.ChatResponse, error)
+}
+
+type ToolChatRunner interface {
+	ChatMessagesWithTools(context.Context, []modelclient.ChatMessage, []agent.FunctionDefinition) (modelclient.ChatResponse, error)
 }
 
 type ChatService struct {
@@ -62,6 +67,41 @@ func (s *ChatService) ChatMessages(ctx context.Context, messages []modelclient.C
 		return modelclient.ChatResponse{}, &ChatCallError{Err: fmt.Errorf("complete chat: %w", err)}
 	}
 	return response, nil
+}
+
+func (s *ChatService) ChatMessagesWithTools(ctx context.Context, messages []modelclient.ChatMessage, definitions []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+	provider, apiKey, err := s.credentials(ctx)
+	if err != nil {
+		return modelclient.ChatResponse{}, err
+	}
+	response, err := s.completer.Chat(ctx, provider.BaseURL, apiKey, modelclient.ChatRequest{
+		Model:    provider.ChatModel,
+		Messages: messages,
+		Tools:    modelToolDefinitions(definitions),
+		Stream:   false,
+	})
+	if err != nil {
+		return modelclient.ChatResponse{}, &ChatCallError{Err: fmt.Errorf("complete chat with tools: %w", err)}
+	}
+	return response, nil
+}
+
+func modelToolDefinitions(definitions []agent.FunctionDefinition) []modelclient.ToolDefinition {
+	if len(definitions) == 0 {
+		return nil
+	}
+	tools := make([]modelclient.ToolDefinition, 0, len(definitions))
+	for _, definition := range definitions {
+		tools = append(tools, modelclient.ToolDefinition{
+			Type: "function",
+			Function: modelclient.FunctionDefinition{
+				Name:        definition.Name,
+				Description: definition.Description,
+				Parameters:  definition.Parameters,
+			},
+		})
+	}
+	return tools
 }
 
 func (s *ChatService) StreamMessages(ctx context.Context, messages []modelclient.ChatMessage, onDelta func(string) error) error {
