@@ -29,6 +29,10 @@ type Answerer interface {
 	Answer(context.Context, int64, string) (Response, error)
 }
 
+type EventAnswerer interface {
+	AnswerWithEvents(context.Context, int64, string, agentruntime.EventSink) (Response, error)
+}
+
 type Response struct {
 	Answer string          `json:"answer"`
 	RunID  string          `json:"run_id"`
@@ -54,6 +58,14 @@ func NewService(chat modelruntime.ToolChatRunner, searcher retrieval.Searcher, m
 }
 
 func (s *Service) Answer(ctx context.Context, knowledgeBaseID int64, question string) (Response, error) {
+	return s.answer(ctx, knowledgeBaseID, question, nil)
+}
+
+func (s *Service) AnswerWithEvents(ctx context.Context, knowledgeBaseID int64, question string, sink agentruntime.EventSink) (Response, error) {
+	return s.answer(ctx, knowledgeBaseID, question, sink)
+}
+
+func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, question string, sink agentruntime.EventSink) (Response, error) {
 	question = strings.TrimSpace(question)
 	if knowledgeBaseID <= 0 || question == "" || len(question) > maxQuestionBytes {
 		return Response{}, ErrInvalidRequest
@@ -68,10 +80,17 @@ func (s *Service) Answer(ctx context.Context, knowledgeBaseID int64, question st
 		return Response{}, fmt.Errorf("create agent engine: %w", err)
 	}
 
-	result, err := engine.Run(ctx, s.nextRunID(), []modelclient.ChatMessage{
+	runID := s.nextRunID()
+	messages := []modelclient.ChatMessage{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: question},
-	})
+	}
+	var result agentruntime.Result
+	if sink == nil {
+		result, err = engine.Run(ctx, runID, messages)
+	} else {
+		result, err = engine.RunWithEvents(ctx, runID, messages, sink)
+	}
 	response := responseFromRun(result)
 	if err != nil {
 		return response, fmt.Errorf("run agent answer: %w", err)

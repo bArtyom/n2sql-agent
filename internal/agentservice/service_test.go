@@ -97,6 +97,53 @@ func TestServiceAnswersUsingScopedKnowledgeSearchTool(t *testing.T) {
 	}
 }
 
+func TestServiceAnswersWithEvents(t *testing.T) {
+	service, err := agentservice.NewService(chatStub{call: func(_ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		return modelclient.ChatResponse{Message: "事件版答案"}, nil
+	}}, &searcherStub{}, 3)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	var events []agent.Event
+	response, err := service.AnswerWithEvents(context.Background(), 7, "问题", func(event agent.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("AnswerWithEvents() error = %v", err)
+	}
+	if response.Answer != "事件版答案" || response.Status != agent.RunSucceeded || response.RunID == "" {
+		t.Fatalf("response = %#v", response)
+	}
+	assertEventTypes(t, events, agent.EventRunStarted, agent.EventMessageDelta, agent.EventRunFinished)
+}
+
+func TestServiceAnswersWithEventsPropagatesCancellation(t *testing.T) {
+	service, err := agentservice.NewService(chatStub{call: func(_ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		t.Fatal("model must not be called after cancellation")
+		return modelclient.ChatResponse{}, nil
+	}}, &searcherStub{}, 3)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var events []agent.Event
+	response, err := service.AnswerWithEvents(ctx, 7, "问题", func(event agent.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("AnswerWithEvents() error = %v, want context.Canceled", err)
+	}
+	if response.Status != agent.RunCanceled {
+		t.Fatalf("response status = %s, want canceled", response.Status)
+	}
+	assertEventTypes(t, events, agent.EventRunStarted, agent.EventRunCanceled)
+}
+
 func TestServiceRejectsInvalidQuestion(t *testing.T) {
 	service, err := agentservice.NewService(chatStub{call: func([]modelclient.ChatMessage, []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 		t.Fatal("model must not be called")
@@ -121,5 +168,17 @@ func TestNewServiceRejectsInvalidDependencies(t *testing.T) {
 	}
 	if _, err := agentservice.NewService(chatStub{}, &searcherStub{}, 0); !errors.Is(err, agentservice.ErrInvalidMaxSteps) {
 		t.Fatalf("invalid max steps error = %v, want ErrInvalidMaxSteps", err)
+	}
+}
+
+func assertEventTypes(t *testing.T, events []agent.Event, want ...agent.EventType) {
+	t.Helper()
+	if len(events) != len(want) {
+		t.Fatalf("event count = %d, want %d (%#v)", len(events), len(want), events)
+	}
+	for index, eventType := range want {
+		if events[index].Type != eventType {
+			t.Fatalf("event[%d] type = %s, want %s", index, events[index].Type, eventType)
+		}
 	}
 }
