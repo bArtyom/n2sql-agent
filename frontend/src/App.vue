@@ -114,6 +114,15 @@ function parseSources(value: unknown): Source[] {
   });
 }
 
+function mergeSources(existing: Source[], incoming: Source[]): Source[] {
+  const merged = new Map(existing.map((source) => [`${source.documentId}-${source.position}`, source]));
+  for (const source of incoming) {
+    const key = `${source.documentId}-${source.position}`;
+    if (!merged.has(key)) merged.set(key, source);
+  }
+  return [...merged.values()];
+}
+
 async function openProviderSettings() {
   providerSettingsOpen.value = true;
   providerLoading.value = true;
@@ -367,7 +376,7 @@ function consumeSSEBlock(block: string, answerIndex: number) {
 
     switch (event) {
       case "sources":
-        answer.sources = parseSources(payload.sources);
+        answer.sources = mergeSources(answer.sources ?? [], parseSources(payload.sources));
         break;
       case "delta":
         answer.content += payload.delta ?? "";
@@ -380,7 +389,7 @@ function consumeSSEBlock(block: string, answerIndex: number) {
         break;
       case "tool_finished":
         if (Object.prototype.hasOwnProperty.call(eventData, "sources")) {
-          answer.sources = parseSources(eventData.sources);
+          answer.sources = mergeSources(answer.sources ?? [], parseSources(eventData.sources));
         }
         answer.activity = "资料查找完成，正在组织答案…";
         break;

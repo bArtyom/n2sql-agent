@@ -172,11 +172,8 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				"tool_call_id": toolCall.ID,
 				"tool_name":    toolCall.Function.Name,
 			}
-			for key, value := range toolResult.Metadata {
-				if key == "tool_call_id" || key == "tool_name" {
-					continue
-				}
-				toolFinishedData[key] = value
+			if sources, ok := toolResult.Metadata["sources"]; ok {
+				toolFinishedData["sources"] = sources
 			}
 			if err := emitter.emit(agent.EventToolFinished, len(run.Steps()), toolFinishedData); err != nil {
 				return finishError(result, err)
