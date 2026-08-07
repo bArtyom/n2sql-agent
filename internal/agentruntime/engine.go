@@ -30,6 +30,16 @@ type Engine struct {
 	maxSteps int
 }
 
+// EventSink receives lifecycle events emitted while an Agent run executes.
+// A nil sink disables event emission and preserves the non-streaming Run path.
+type EventSink func(agent.Event) error
+
+type eventEmitter struct {
+	runID  string
+	sink   EventSink
+	nextID int
+}
+
 type Result struct {
 	Run      *agent.AgentRun
 	Response modelclient.ChatResponse
@@ -46,6 +56,16 @@ func NewEngine(chat modelruntime.ToolChatRunner, registry *agent.ToolRegistry, m
 }
 
 func (e *Engine) Run(ctx context.Context, runID string, messages []modelclient.ChatMessage) (Result, error) {
+	return e.run(ctx, runID, messages, nil)
+}
+
+// RunWithEvents executes the Agent loop and reports lifecycle events to sink.
+// Events are emitted in execution order; a sink error stops the run.
+func (e *Engine) RunWithEvents(ctx context.Context, runID string, messages []modelclient.ChatMessage, sink EventSink) (Result, error) {
+	return e.run(ctx, runID, messages, sink)
+}
+
+func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.ChatMessage, sink EventSink) (Result, error) {
 	if e == nil || e.chat == nil || e.registry == nil {
 		return Result{}, ErrInvalidEngine
 	}
@@ -65,36 +85,52 @@ func (e *Engine) Run(ctx context.Context, runID string, messages []modelclient.C
 	}
 
 	result := Result{Run: run}
+	emitter := newEventEmitter(runID, sink)
+	if err := emitter.emit(agent.EventRunStarted, 0, map[string]any{
+		"status": string(agent.RunRunning),
+	}); err != nil {
+		return finishError(result, err)
+	}
 	conversation := append([]modelclient.ChatMessage(nil), messages...)
 	definitions := e.registry.FunctionDefinitions()
 
 	for step := 0; step < e.maxSteps; step++ {
 		if err := ctx.Err(); err != nil {
-			return cancelResult(result, err)
+			return finishErrorWithEvents(result, err, emitter)
 		}
 
 		response, err := e.chat.ChatMessagesWithTools(ctx, conversation, definitions)
 		if err != nil {
 			if stepErr := run.AddStep(agent.Step{Kind: agent.StepModelDecision, Status: agent.StepFailed}); stepErr != nil {
-				return failResult(result, stepErr)
+				return finishErrorWithEvents(result, stepErr, emitter)
 			}
-			return finishError(result, err)
+			return finishErrorWithEvents(result, err, emitter)
 		}
 		if err := run.AddStep(agent.Step{Kind: agent.StepModelDecision, Status: agent.StepSucceeded}); err != nil {
-			return failResult(result, err)
+			return finishErrorWithEvents(result, err, emitter)
 		}
 
 		if len(response.ToolCalls) == 0 {
 			if strings.TrimSpace(response.Message) == "" {
-				return failResult(result, ErrEmptyFinalAnswer)
+				return finishErrorWithEvents(result, ErrEmptyFinalAnswer, emitter)
 			}
 			if err := run.AddStep(agent.Step{Kind: agent.StepFinalAnswer, Status: agent.StepSucceeded}); err != nil {
-				return failResult(result, err)
+				return finishErrorWithEvents(result, err, emitter)
+			}
+			if err := emitter.emit(agent.EventMessageDelta, len(run.Steps()), map[string]any{
+				"content": response.Message,
+			}); err != nil {
+				return finishError(result, err)
 			}
 			if err := run.Complete(response.Message); err != nil {
-				return failResult(result, err)
+				return finishErrorWithEvents(result, err, emitter)
 			}
 			result.Response = response
+			if err := emitter.emit(agent.EventRunFinished, len(run.Steps()), map[string]any{
+				"answer": response.Message,
+			}); err != nil {
+				return result, err
+			}
 			return result, nil
 		}
 
@@ -104,27 +140,39 @@ func (e *Engine) Run(ctx context.Context, runID string, messages []modelclient.C
 			ToolCalls: response.ToolCalls,
 		})
 		for _, toolCall := range response.ToolCalls {
+			if err := emitter.emit(agent.EventToolCalled, len(run.Steps())+1, map[string]any{
+				"tool_call_id": toolCall.ID,
+				"tool_name":    toolCall.Function.Name,
+			}); err != nil {
+				return finishError(result, err)
+			}
 			if err := validateToolCall(toolCall); err != nil {
-				return addToolFailure(result, toolCall.Function.Name, err)
+				return addToolFailureWithEvents(result, toolCall.Function.Name, err, emitter)
 			}
 
 			tool, err := e.registry.Find(toolCall.Function.Name)
 			if err != nil {
-				return addToolFailure(result, toolCall.Function.Name, err)
+				return addToolFailureWithEvents(result, toolCall.Function.Name, err, emitter)
 			}
 			toolResult, err := tool.Call(ctx, json.RawMessage(toolCall.Function.Arguments))
 			if err != nil {
-				return addToolFailure(result, toolCall.Function.Name, fmt.Errorf("execute tool: %w", err))
+				return addToolFailureWithEvents(result, toolCall.Function.Name, fmt.Errorf("execute tool: %w", err), emitter)
 			}
 			if strings.TrimSpace(toolResult.Content) == "" {
-				return addToolFailure(result, toolCall.Function.Name, ErrInvalidToolResult)
+				return addToolFailureWithEvents(result, toolCall.Function.Name, ErrInvalidToolResult, emitter)
 			}
 			if err := result.Run.AddStep(agent.Step{
 				Kind:     agent.StepToolCall,
 				Status:   agent.StepSucceeded,
 				ToolName: toolCall.Function.Name,
 			}); err != nil {
-				return failResult(result, err)
+				return finishErrorWithEvents(result, err, emitter)
+			}
+			if err := emitter.emit(agent.EventToolFinished, len(run.Steps()), map[string]any{
+				"tool_call_id": toolCall.ID,
+				"tool_name":    toolCall.Function.Name,
+			}); err != nil {
+				return finishError(result, err)
 			}
 			conversation = append(conversation, modelclient.ChatMessage{
 				Role:       "tool",
@@ -134,7 +182,27 @@ func (e *Engine) Run(ctx context.Context, runID string, messages []modelclient.C
 		}
 	}
 
-	return failResult(result, ErrMaxStepsExceeded)
+	return finishErrorWithEvents(result, ErrMaxStepsExceeded, emitter)
+}
+
+func newEventEmitter(runID string, sink EventSink) *eventEmitter {
+	return &eventEmitter{runID: runID, sink: sink}
+}
+
+func (e *eventEmitter) emit(eventType agent.EventType, stepNumber int, data any) error {
+	if e == nil || e.sink == nil {
+		return nil
+	}
+	e.nextID++
+	event, err := agent.NewEvent(fmt.Sprintf("%s-event-%d", e.runID, e.nextID), e.runID, eventType, data)
+	if err != nil {
+		return fmt.Errorf("create agent event: %w", err)
+	}
+	event.StepNumber = stepNumber
+	if err := e.sink(event); err != nil {
+		return fmt.Errorf("deliver agent event: %w", err)
+	}
+	return nil
 }
 
 func validateToolCall(toolCall modelclient.ToolCall) error {
@@ -151,11 +219,11 @@ func validateToolCall(toolCall modelclient.ToolCall) error {
 	return nil
 }
 
-func addToolFailure(result Result, toolName string, err error) (Result, error) {
+func addToolFailureWithEvents(result Result, toolName string, err error, emitter *eventEmitter) (Result, error) {
 	if stepErr := result.Run.AddStep(agent.Step{Kind: agent.StepToolCall, Status: agent.StepFailed, ToolName: toolName}); stepErr != nil {
-		return failResult(result, stepErr)
+		return finishErrorWithEvents(result, stepErr, emitter)
 	}
-	return finishError(result, fmt.Errorf("tool %q: %w", toolName, err))
+	return finishErrorWithEvents(result, fmt.Errorf("tool %q: %w", toolName, err), emitter)
 }
 
 func cancelResult(result Result, err error) (Result, error) {
@@ -165,8 +233,24 @@ func cancelResult(result Result, err error) (Result, error) {
 	return result, err
 }
 
-func failResult(result Result, err error) (Result, error) {
-	return finishError(result, err)
+func finishErrorWithEvents(result Result, err error, emitter *eventEmitter) (Result, error) {
+	result, finishErr := finishError(result, err)
+	if finishErr != nil && result.Run.Status() != agent.RunFailed && result.Run.Status() != agent.RunCanceled {
+		return result, finishErr
+	}
+	if emitter == nil {
+		return result, finishErr
+	}
+	eventType := agent.EventRunFailed
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		eventType = agent.EventRunCanceled
+	}
+	if emitErr := emitter.emit(eventType, len(result.Run.Steps()), map[string]any{
+		"error": err.Error(),
+	}); emitErr != nil {
+		return result, errors.Join(finishErr, emitErr)
+	}
+	return result, finishErr
 }
 
 func finishError(result Result, err error) (Result, error) {
