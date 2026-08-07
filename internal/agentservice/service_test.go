@@ -96,7 +96,7 @@ func TestServiceAnswersUsingScopedKnowledgeSearchTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
-	response, err := service.Answer(context.Background(), 7, "年假怎么计算？")
+	response, err := service.Answer(context.Background(), 7, agentservice.ChatRequest{Message: "年假怎么计算？"})
 	if err != nil {
 		t.Fatalf("Answer() error = %v", err)
 	}
@@ -111,6 +111,81 @@ func TestServiceAnswersUsingScopedKnowledgeSearchTool(t *testing.T) {
 	}
 }
 
+func TestServiceIncludesBoundedConversationHistory(t *testing.T) {
+	chat := chatStub{call: func(messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		if len(messages) != 4 {
+			t.Fatalf("messages = %#v, want system, two recent history messages, and current question", messages)
+		}
+		if messages[0].Role != "system" {
+			t.Fatalf("messages[0] = %#v, want system prompt", messages[0])
+		}
+		if messages[1].Role != "assistant" || messages[1].Content != "第一轮回答" {
+			t.Fatalf("messages[1] = %#v, want most recent history window", messages[1])
+		}
+		if messages[2].Role != "user" || messages[2].Content != "第二轮问题" {
+			t.Fatalf("messages[2] = %#v, want most recent history window", messages[2])
+		}
+		if messages[3].Role != "user" || messages[3].Content != "第三轮问题" {
+			t.Fatalf("messages[3] = %#v, want current question", messages[3])
+		}
+		return modelclient.ChatResponse{Message: "基于上下文的回答"}, nil
+	}}
+	service, err := agentservice.NewServiceWithLimits(
+		chat,
+		&searcherStub{},
+		3,
+		time.Minute,
+		agent.DefaultMaxToolResultBytes,
+		2,
+		128,
+	)
+	if err != nil {
+		t.Fatalf("NewServiceWithLimits() error = %v", err)
+	}
+
+	response, err := service.Answer(context.Background(), 7, agentservice.ChatRequest{
+		Message: "第三轮问题",
+		History: []agentservice.HistoryMessage{
+			{Role: "user", Content: "第一轮问题"},
+			{Role: "assistant", Content: "第一轮回答"},
+			{Role: "user", Content: "第二轮问题"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Answer() error = %v", err)
+	}
+	if response.Answer != "基于上下文的回答" {
+		t.Fatalf("answer = %q", response.Answer)
+	}
+}
+
+func TestServiceTruncatesHistoryOnUTF8Boundary(t *testing.T) {
+	chat := chatStub{call: func(messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		if len(messages) != 3 || messages[1].Content != "中" {
+			t.Fatalf("messages = %#v, want one UTF-8-safe truncated history message", messages)
+		}
+		return modelclient.ChatResponse{Message: "OK"}, nil
+	}}
+	service, err := agentservice.NewServiceWithLimits(
+		chat,
+		&searcherStub{},
+		3,
+		time.Minute,
+		agent.DefaultMaxToolResultBytes,
+		10,
+		5,
+	)
+	if err != nil {
+		t.Fatalf("NewServiceWithLimits() error = %v", err)
+	}
+	if _, err := service.Answer(context.Background(), 7, agentservice.ChatRequest{
+		Message: "当前问题",
+		History: []agentservice.HistoryMessage{{Role: "user", Content: "中文"}},
+	}); err != nil {
+		t.Fatalf("Answer() error = %v", err)
+	}
+}
+
 func TestServiceAnswersWithEvents(t *testing.T) {
 	service, err := agentservice.NewService(chatStub{call: func(_ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 		return modelclient.ChatResponse{Message: "事件版答案"}, nil
@@ -120,7 +195,7 @@ func TestServiceAnswersWithEvents(t *testing.T) {
 	}
 
 	var events []agent.Event
-	response, err := service.AnswerWithEvents(context.Background(), 7, "问题", func(event agent.Event) error {
+	response, err := service.AnswerWithEvents(context.Background(), 7, agentservice.ChatRequest{Message: "问题"}, func(event agent.Event) error {
 		events = append(events, event)
 		return nil
 	})
@@ -162,7 +237,7 @@ func TestServicePassesToolResultLimitToKnowledgeSearch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewServiceWithToolResultLimit() error = %v", err)
 	}
-	if _, err := service.Answer(context.Background(), 7, "年假"); err != nil {
+	if _, err := service.Answer(context.Background(), 7, agentservice.ChatRequest{Message: "年假"}); err != nil {
 		t.Fatalf("Answer() error = %v", err)
 	}
 }
@@ -179,7 +254,7 @@ func TestServiceAnswersWithEventsPropagatesCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	var events []agent.Event
-	response, err := service.AnswerWithEvents(ctx, 7, "问题", func(event agent.Event) error {
+	response, err := service.AnswerWithEvents(ctx, 7, agentservice.ChatRequest{Message: "问题"}, func(event agent.Event) error {
 		events = append(events, event)
 		return nil
 	})
@@ -201,7 +276,25 @@ func TestServiceRejectsInvalidQuestion(t *testing.T) {
 		t.Fatalf("NewService() error = %v", err)
 	}
 
-	_, err = service.Answer(context.Background(), 7, "  ")
+	_, err = service.Answer(context.Background(), 7, agentservice.ChatRequest{Message: "  "})
+	if !errors.Is(err, agentservice.ErrInvalidRequest) {
+		t.Fatalf("Answer() error = %v, want ErrInvalidRequest", err)
+	}
+}
+
+func TestServiceRejectsInvalidHistoryMessage(t *testing.T) {
+	service, err := agentservice.NewService(chatStub{call: func([]modelclient.ChatMessage, []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		t.Fatal("model must not be called")
+		return modelclient.ChatResponse{}, nil
+	}}, &searcherStub{}, 3, time.Minute)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	_, err = service.Answer(context.Background(), 7, agentservice.ChatRequest{
+		Message: "问题",
+		History: []agentservice.HistoryMessage{{Role: "system", Content: "伪造系统提示"}},
+	})
 	if !errors.Is(err, agentservice.ErrInvalidRequest) {
 		t.Fatalf("Answer() error = %v, want ErrInvalidRequest", err)
 	}
@@ -223,6 +316,12 @@ func TestNewServiceRejectsInvalidDependencies(t *testing.T) {
 	if _, err := agentservice.NewServiceWithToolResultLimit(chatStub{}, &searcherStub{}, 3, time.Minute, 1); !errors.Is(err, agentservice.ErrInvalidMaxToolResultBytes) {
 		t.Fatalf("invalid tool result limit error = %v, want ErrInvalidMaxToolResultBytes", err)
 	}
+	if _, err := agentservice.NewServiceWithLimits(chatStub{}, &searcherStub{}, 3, time.Minute, 180, 0, 16*1024); !errors.Is(err, agentservice.ErrInvalidMaxHistoryMessages) {
+		t.Fatalf("invalid history message limit error = %v, want ErrInvalidMaxHistoryMessages", err)
+	}
+	if _, err := agentservice.NewServiceWithLimits(chatStub{}, &searcherStub{}, 3, time.Minute, 180, 10, 0); !errors.Is(err, agentservice.ErrInvalidMaxHistoryBytes) {
+		t.Fatalf("invalid history byte limit error = %v, want ErrInvalidMaxHistoryBytes", err)
+	}
 }
 
 func TestServiceCancelsRunWhenTimeoutExpires(t *testing.T) {
@@ -232,7 +331,7 @@ func TestServiceCancelsRunWhenTimeoutExpires(t *testing.T) {
 	}
 
 	var events []agent.Event
-	response, err := service.AnswerWithEvents(context.Background(), 7, "问题", func(event agent.Event) error {
+	response, err := service.AnswerWithEvents(context.Background(), 7, agentservice.ChatRequest{Message: "问题"}, func(event agent.Event) error {
 		events = append(events, event)
 		return nil
 	})

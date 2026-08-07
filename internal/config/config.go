@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/bArtyom/n2sql-agent/internal/agent"
 )
 
 const (
@@ -39,6 +41,8 @@ type Config struct {
 	AgentMaxSteps             int
 	AgentTimeout              time.Duration
 	AgentMaxToolResultBytes   int
+	AgentMaxHistoryMessages   int
+	AgentMaxHistoryBytes      int
 }
 
 func Load() Config {
@@ -71,6 +75,8 @@ func Load() Config {
 		AgentMaxSteps:             positiveIntEnv("AGENT_MAX_STEPS", defaultAgentMaxSteps),
 		AgentTimeout:              time.Duration(positiveIntEnv("AGENT_TIMEOUT_MS", int(defaultAgentTimeout/time.Millisecond))) * time.Millisecond,
 		AgentMaxToolResultBytes:   agentMaxToolResultBytes(),
+		AgentMaxHistoryMessages:   positiveIntEnv("AGENT_MAX_HISTORY_MESSAGES", agent.DefaultMaxHistoryMessages),
+		AgentMaxHistoryBytes:      positiveIntEnv("AGENT_MAX_HISTORY_BYTES", agent.DefaultMaxHistoryBytes),
 	}
 }
 

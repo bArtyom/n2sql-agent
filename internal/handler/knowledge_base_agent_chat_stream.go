@@ -10,12 +10,19 @@ import (
 )
 
 func NewKnowledgeBaseAgentChatStream(answerer agentservice.EventAnswerer) http.Handler {
+	return NewKnowledgeBaseAgentChatStreamWithLimits(answerer, agent.DefaultMaxHistoryBytes)
+}
+
+func NewKnowledgeBaseAgentChatStreamWithLimits(answerer agentservice.EventAnswerer, maxHistoryBytes int) http.Handler {
+	if maxHistoryBytes <= 0 {
+		maxHistoryBytes = agent.DefaultMaxHistoryBytes
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		knowledgeBaseID, question, ok := decodeKnowledgeBaseAgentChatRequest(w, r)
+		knowledgeBaseID, request, ok := decodeKnowledgeBaseAgentChatRequest(w, r, maxHistoryBytes)
 		if !ok {
 			return
 		}
@@ -33,7 +40,7 @@ func NewKnowledgeBaseAgentChatStream(answerer agentservice.EventAnswerer) http.H
 		emit := func(event agent.Event) error {
 			return writeAgentSSEEvent(w, flusher, string(event.Type), event)
 		}
-		if _, err := answerer.AnswerWithEvents(r.Context(), knowledgeBaseID, question, emit); err != nil {
+		if _, err := answerer.AnswerWithEvents(r.Context(), knowledgeBaseID, request, emit); err != nil {
 			if r.Context().Err() != nil {
 				return
 			}

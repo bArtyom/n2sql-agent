@@ -55,7 +55,15 @@ func main() {
 	runner := worker.NewRunner(worker.NewPostgresStore(db), processor)
 	searchService := retrieval.NewService(embeddingService, chunkStore)
 	answerService := rag.NewService(searchService, chatService)
-	agentAnswerService, err := agentservice.NewServiceWithToolResultLimit(chatService, searchService, cfg.AgentMaxSteps, cfg.AgentTimeout, cfg.AgentMaxToolResultBytes)
+	agentAnswerService, err := agentservice.NewServiceWithLimits(
+		chatService,
+		searchService,
+		cfg.AgentMaxSteps,
+		cfg.AgentTimeout,
+		cfg.AgentMaxToolResultBytes,
+		cfg.AgentMaxHistoryMessages,
+		cfg.AgentMaxHistoryBytes,
+	)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -74,6 +82,7 @@ func main() {
 			StreamingAnswers:      answerService,
 			AgentAnswers:          agentAnswerService,
 			AgentStreamingAnswers: agentAnswerService,
+			AgentMaxHistoryBytes:  cfg.AgentMaxHistoryBytes,
 			APIKeyEnvVar:          cfg.ModelProviderAPIKeyEnvVar,
 		}),
 	}

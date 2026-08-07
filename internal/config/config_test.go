@@ -52,6 +52,8 @@ func TestLoadReadsAgentSettings(t *testing.T) {
 	t.Setenv("AGENT_MAX_STEPS", "7")
 	t.Setenv("AGENT_TIMEOUT_MS", "1250")
 	t.Setenv("AGENT_MAX_TOOL_RESULT_BYTES", "4096")
+	t.Setenv("AGENT_MAX_HISTORY_MESSAGES", "6")
+	t.Setenv("AGENT_MAX_HISTORY_BYTES", "8192")
 
 	cfg := config.Load()
 	if cfg.AgentMaxSteps != 7 {
@@ -62,6 +64,9 @@ func TestLoadReadsAgentSettings(t *testing.T) {
 	}
 	if cfg.AgentMaxToolResultBytes != 4096 {
 		t.Fatalf("agent max tool result bytes = %d, want 4096", cfg.AgentMaxToolResultBytes)
+	}
+	if cfg.AgentMaxHistoryMessages != 6 || cfg.AgentMaxHistoryBytes != 8192 {
+		t.Fatalf("agent history settings = %d/%d, want 6/8192", cfg.AgentMaxHistoryMessages, cfg.AgentMaxHistoryBytes)
 	}
 }
 
@@ -80,5 +85,15 @@ func TestLoadUsesDefaultAgentToolResultBytesForInvalidValue(t *testing.T) {
 	cfg := config.Load()
 	if cfg.AgentMaxToolResultBytes != 32*1024 {
 		t.Fatalf("agent max tool result bytes = %d, want 32768 default", cfg.AgentMaxToolResultBytes)
+	}
+}
+
+func TestLoadUsesDefaultAgentHistoryLimitsForInvalidValues(t *testing.T) {
+	t.Setenv("AGENT_MAX_HISTORY_MESSAGES", "0")
+	t.Setenv("AGENT_MAX_HISTORY_BYTES", "not-a-number")
+
+	cfg := config.Load()
+	if cfg.AgentMaxHistoryMessages != 10 || cfg.AgentMaxHistoryBytes != 16*1024 {
+		t.Fatalf("agent history settings = %d/%d, want 10/16384 defaults", cfg.AgentMaxHistoryMessages, cfg.AgentMaxHistoryBytes)
 	}
 }

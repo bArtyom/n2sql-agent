@@ -26,6 +26,7 @@ type Dependencies struct {
 	StreamingAnswers      rag.StreamAnswerer
 	AgentAnswers          agentservice.Answerer
 	AgentStreamingAnswers agentservice.EventAnswerer
+	AgentMaxHistoryBytes  int
 	APIKeyEnvVar          string
 }
 
@@ -65,10 +66,10 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("POST /api/knowledge-bases/{id}/chat/stream", handler.NewKnowledgeBaseChatStream(dependencies.StreamingAnswers))
 	}
 	if dependencies.AgentAnswers != nil {
-		mux.Handle("POST /api/knowledge-bases/{id}/agent-chat", handler.NewKnowledgeBaseAgentChat(dependencies.AgentAnswers))
+		mux.Handle("POST /api/knowledge-bases/{id}/agent-chat", handler.NewKnowledgeBaseAgentChatWithLimits(dependencies.AgentAnswers, dependencies.AgentMaxHistoryBytes))
 	}
 	if dependencies.AgentStreamingAnswers != nil {
-		mux.Handle("POST /api/knowledge-bases/{id}/agent-chat/stream", handler.NewKnowledgeBaseAgentChatStream(dependencies.AgentStreamingAnswers))
+		mux.Handle("POST /api/knowledge-bases/{id}/agent-chat/stream", handler.NewKnowledgeBaseAgentChatStreamWithLimits(dependencies.AgentStreamingAnswers, dependencies.AgentMaxHistoryBytes))
 	}
 
 	return mux

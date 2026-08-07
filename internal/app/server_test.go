@@ -64,11 +64,11 @@ func (answererStub) Stream(_ context.Context, _ int64, _ string, _ int, emit fun
 
 type agentAnswererStub struct{}
 
-func (agentAnswererStub) Answer(context.Context, int64, string) (agentservice.Response, error) {
+func (agentAnswererStub) Answer(context.Context, int64, agentservice.ChatRequest) (agentservice.Response, error) {
 	return agentservice.Response{Answer: "OK"}, nil
 }
 
-func (agentAnswererStub) AnswerWithEvents(context.Context, int64, string, agentruntime.EventSink) (agentservice.Response, error) {
+func (agentAnswererStub) AnswerWithEvents(context.Context, int64, agentservice.ChatRequest, agentruntime.EventSink) (agentservice.Response, error) {
 	return agentservice.Response{Answer: "OK"}, nil
 }
 

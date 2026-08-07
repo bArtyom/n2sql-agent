@@ -25,14 +25,16 @@ var (
 	ErrInvalidMaxSteps           = errors.New("agent max steps must be positive")
 	ErrInvalidTimeout            = errors.New("agent timeout must be positive")
 	ErrInvalidMaxToolResultBytes = errors.New("agent max tool result bytes must be at least 2")
+	ErrInvalidMaxHistoryMessages = errors.New("agent max history messages must be positive")
+	ErrInvalidMaxHistoryBytes    = errors.New("agent max history bytes must be positive")
 )
 
 type Answerer interface {
-	Answer(context.Context, int64, string) (Response, error)
+	Answer(context.Context, int64, ChatRequest) (Response, error)
 }
 
 type EventAnswerer interface {
-	AnswerWithEvents(context.Context, int64, string, agentruntime.EventSink) (Response, error)
+	AnswerWithEvents(context.Context, int64, ChatRequest, agentruntime.EventSink) (Response, error)
 }
 
 type Response struct {
@@ -48,14 +50,20 @@ type Service struct {
 	maxSteps           int
 	timeout            time.Duration
 	maxToolResultBytes int
+	maxHistoryMessages int
+	maxHistoryBytes    int
 	sequence           atomic.Uint64
 }
 
 func NewService(chat modelruntime.ToolChatRunner, searcher retrieval.Searcher, maxSteps int, timeout time.Duration) (*Service, error) {
-	return NewServiceWithToolResultLimit(chat, searcher, maxSteps, timeout, agent.DefaultMaxToolResultBytes)
+	return NewServiceWithLimits(chat, searcher, maxSteps, timeout, agent.DefaultMaxToolResultBytes, agent.DefaultMaxHistoryMessages, agent.DefaultMaxHistoryBytes)
 }
 
 func NewServiceWithToolResultLimit(chat modelruntime.ToolChatRunner, searcher retrieval.Searcher, maxSteps int, timeout time.Duration, maxToolResultBytes int) (*Service, error) {
+	return NewServiceWithLimits(chat, searcher, maxSteps, timeout, maxToolResultBytes, agent.DefaultMaxHistoryMessages, agent.DefaultMaxHistoryBytes)
+}
+
+func NewServiceWithLimits(chat modelruntime.ToolChatRunner, searcher retrieval.Searcher, maxSteps int, timeout time.Duration, maxToolResultBytes, maxHistoryMessages, maxHistoryBytes int) (*Service, error) {
 	if chat == nil || searcher == nil {
 		return nil, ErrInvalidService
 	}
@@ -68,24 +76,42 @@ func NewServiceWithToolResultLimit(chat modelruntime.ToolChatRunner, searcher re
 	if maxToolResultBytes < 2 {
 		return nil, ErrInvalidMaxToolResultBytes
 	}
-	return &Service{chat: chat, searcher: searcher, maxSteps: maxSteps, timeout: timeout, maxToolResultBytes: maxToolResultBytes}, nil
+	if maxHistoryMessages <= 0 {
+		return nil, ErrInvalidMaxHistoryMessages
+	}
+	if maxHistoryBytes <= 0 {
+		return nil, ErrInvalidMaxHistoryBytes
+	}
+	return &Service{
+		chat:               chat,
+		searcher:           searcher,
+		maxSteps:           maxSteps,
+		timeout:            timeout,
+		maxToolResultBytes: maxToolResultBytes,
+		maxHistoryMessages: maxHistoryMessages,
+		maxHistoryBytes:    maxHistoryBytes,
+	}, nil
 }
 
-func (s *Service) Answer(ctx context.Context, knowledgeBaseID int64, question string) (Response, error) {
-	return s.answer(ctx, knowledgeBaseID, question, nil)
+func (s *Service) Answer(ctx context.Context, knowledgeBaseID int64, request ChatRequest) (Response, error) {
+	return s.answer(ctx, knowledgeBaseID, request, nil)
 }
 
-func (s *Service) AnswerWithEvents(ctx context.Context, knowledgeBaseID int64, question string, sink agentruntime.EventSink) (Response, error) {
-	return s.answer(ctx, knowledgeBaseID, question, sink)
+func (s *Service) AnswerWithEvents(ctx context.Context, knowledgeBaseID int64, request ChatRequest, sink agentruntime.EventSink) (Response, error) {
+	return s.answer(ctx, knowledgeBaseID, request, sink)
 }
 
-func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, question string, sink agentruntime.EventSink) (Response, error) {
+func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request ChatRequest, sink agentruntime.EventSink) (Response, error) {
 	if ctx == nil {
 		return Response{}, agentruntime.ErrInvalidContext
 	}
-	question = strings.TrimSpace(question)
-	if knowledgeBaseID <= 0 || question == "" || len(question) > maxQuestionBytes {
+	request.Message = strings.TrimSpace(request.Message)
+	if knowledgeBaseID <= 0 || request.Message == "" || len(request.Message) > maxQuestionBytes {
 		return Response{}, ErrInvalidRequest
+	}
+	history, err := buildHistoryMessages(request.History, s.maxHistoryMessages, s.maxHistoryBytes)
+	if err != nil {
+		return Response{}, err
 	}
 
 	registry, err := agent.NewKnowledgeSearchRegistryForKnowledgeBaseWithMaxBytes(s.searcher, knowledgeBaseID, s.maxToolResultBytes)
@@ -100,8 +126,9 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, question st
 	runID := s.nextRunID()
 	messages := []modelclient.ChatMessage{
 		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: question},
 	}
+	messages = append(messages, history...)
+	messages = append(messages, modelclient.ChatMessage{Role: "user", Content: request.Message})
 	runContext, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	var result agentruntime.Result

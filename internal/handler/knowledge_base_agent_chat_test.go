@@ -15,14 +15,14 @@ import (
 
 type agentAnswererStub struct {
 	knowledgeBaseID int64
-	question        string
+	request         agentservice.ChatRequest
 	response        agentservice.Response
 	err             error
 }
 
-func (s *agentAnswererStub) Answer(_ context.Context, knowledgeBaseID int64, question string) (agentservice.Response, error) {
+func (s *agentAnswererStub) Answer(_ context.Context, knowledgeBaseID int64, request agentservice.ChatRequest) (agentservice.Response, error) {
 	s.knowledgeBaseID = knowledgeBaseID
-	s.question = question
+	s.request = request
 	if s.err != nil {
 		return agentservice.Response{}, s.err
 	}
@@ -49,8 +49,44 @@ func TestKnowledgeBaseAgentChatReturnsAnswer(t *testing.T) {
 	if response.Body.String() != `{"answer":"年假按照公司制度执行。","run_id":"agent-run-1","status":"succeeded","steps":[{"number":1,"kind":"final_answer","status":"succeeded"}]}`+"\n" {
 		t.Fatalf("response body = %q", response.Body.String())
 	}
-	if answerer.knowledgeBaseID != 7 || answerer.question != "年假怎么计算？" {
+	if answerer.knowledgeBaseID != 7 || answerer.request.Message != "年假怎么计算？" || len(answerer.request.History) != 0 {
 		t.Fatalf("answer arguments = %#v", answerer)
+	}
+}
+
+func TestKnowledgeBaseAgentChatPassesConversationHistory(t *testing.T) {
+	answerer := &agentAnswererStub{response: agentservice.Response{Answer: "OK"}}
+	endpoint := handler.NewKnowledgeBaseAgentChat(answerer)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat", strings.NewReader(`{"message":"第三轮问题","history":[{"role":"user","content":"第一轮问题"},{"role":"assistant","content":"第一轮回答"}]}`))
+	request.SetPathValue("id", "7")
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
+	}
+	if answerer.request.Message != "第三轮问题" || len(answerer.request.History) != 2 {
+		t.Fatalf("answer request = %#v", answerer.request)
+	}
+	if answerer.request.History[0].Role != "user" || answerer.request.History[1].Content != "第一轮回答" {
+		t.Fatalf("history = %#v", answerer.request.History)
+	}
+}
+
+func TestKnowledgeBaseAgentChatUsesConfiguredHistoryBodyLimit(t *testing.T) {
+	answerer := &agentAnswererStub{response: agentservice.Response{Answer: "OK"}}
+	endpoint := handler.NewKnowledgeBaseAgentChatWithLimits(answerer, 32*1024)
+	historyContent := strings.Repeat("a", 25*1024)
+	body := `{"message":"问题","history":[{"role":"user","content":"` + historyContent + `"}]}`
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat", strings.NewReader(body))
+	request.SetPathValue("id", "7")
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
 	}
 }
 
@@ -66,6 +102,8 @@ func TestKnowledgeBaseAgentChatRejectsInvalidRequest(t *testing.T) {
 		{name: "unknown field", id: "7", body: `{"message":"问题","topK":5}`},
 		{name: "trailing JSON", id: "7", body: `{"message":"问题"}{"message":"另一个"}`},
 		{name: "empty message", id: "7", body: `{"message":"  "}`},
+		{name: "invalid history role", id: "7", body: `{"message":"问题","history":[{"role":"system","content":"不要检索"}]}`},
+		{name: "empty history content", id: "7", body: `{"message":"问题","history":[{"role":"user","content":"  "}]}`},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {

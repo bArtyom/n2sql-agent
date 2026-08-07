@@ -20,9 +20,13 @@ type agentEventAnswererStub struct {
 	emitStarted bool
 	answer      string
 	sourceData  map[string]any
+	request     *agentservice.ChatRequest
 }
 
-func (s agentEventAnswererStub) AnswerWithEvents(_ context.Context, _ int64, _ string, emit agentruntime.EventSink) (agentservice.Response, error) {
+func (s agentEventAnswererStub) AnswerWithEvents(_ context.Context, _ int64, request agentservice.ChatRequest, emit agentruntime.EventSink) (agentservice.Response, error) {
+	if s.request != nil {
+		*s.request = request
+	}
 	if s.emitStarted {
 		if err := emit(agent.Event{
 			ID:        "event-1",
@@ -128,6 +132,26 @@ func TestKnowledgeBaseAgentChatStreamWritesAgentEvents(t *testing.T) {
 	}
 	if strings.Contains(body, "event: done\n") {
 		t.Fatal("agent stream must use run_finished instead of done")
+	}
+}
+
+func TestKnowledgeBaseAgentChatStreamPassesConversationHistory(t *testing.T) {
+	var captured agentservice.ChatRequest
+	endpoint := handler.NewKnowledgeBaseAgentChatStream(agentEventAnswererStub{
+		request: &captured,
+		answer:  "上下文答案",
+	})
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat/stream", strings.NewReader(`{"message":"当前问题","history":[{"role":"user","content":"上一个问题"}]}`))
+	request.SetPathValue("id", "7")
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
+	}
+	if captured.Message != "当前问题" || len(captured.History) != 1 || captured.History[0].Content != "上一个问题" {
+		t.Fatalf("stream request = %#v", captured)
 	}
 }
 
