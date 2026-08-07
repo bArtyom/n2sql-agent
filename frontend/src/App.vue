@@ -24,6 +24,7 @@ type ChatMessage = {
   status?: "streaming" | "done" | "error";
   activity?: string;
 };
+type AgentHistoryMessage = Pick<ChatMessage, "role" | "content">;
 type StreamPayload = {
   delta?: string;
   sources?: Source[];
@@ -71,6 +72,7 @@ const providerMessage = ref("");
 const providerMessageKind = ref<"idle" | "success" | "error">("idle");
 const providerForm = ref<ModelProvider>(emptyModelProvider());
 let documentPollTimer: number | undefined;
+const maxClientHistoryMessages = 10;
 
 const selectedKnowledgeBase = computed(() =>
   knowledgeBases.value.find((item) => item.id === selectedKnowledgeBaseId.value) ?? null,
@@ -121,6 +123,17 @@ function mergeSources(existing: Source[], incoming: Source[]): Source[] {
     if (!merged.has(key)) merged.set(key, source);
   }
   return [...merged.values()];
+}
+
+function buildAgentHistory(): AgentHistoryMessage[] {
+  return messages.value
+    .filter((message) => {
+      if (!message.content.trim()) return false;
+      if (message.role === "user") return true;
+      return message.status === "done";
+    })
+    .slice(-maxClientHistoryMessages)
+    .map(({ role, content }) => ({ role, content }));
 }
 
 async function openProviderSettings() {
@@ -313,6 +326,7 @@ function scheduleDocumentPolling() {
 async function askQuestion() {
   const prompt = question.value.trim();
   if (!prompt || !selectedKnowledgeBaseId.value || streaming.value) return;
+  const history = buildAgentHistory();
   question.value = "";
   messages.value.push({ role: "user", content: prompt });
   const answer: ChatMessage = { role: "assistant", content: "", sources: [], status: "streaming" };
@@ -323,7 +337,7 @@ async function askQuestion() {
     const response = await fetch(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/agent-chat/stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-      body: JSON.stringify({ message: prompt }),
+      body: JSON.stringify({ message: prompt, history }),
     });
     if (!response.ok || !response.body) {
       const payload = await response.json().catch(() => null);
