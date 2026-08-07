@@ -22,6 +22,15 @@ type ChatMessage = {
   content: string;
   sources?: Source[];
   status?: "streaming" | "done" | "error";
+  activity?: string;
+};
+type StreamPayload = {
+  delta?: string;
+  sources?: Source[];
+  error?: string;
+  answer?: string;
+  content?: string;
+  data?: Record<string, unknown>;
 };
 type ModelProvider = {
   name: string;
@@ -290,10 +299,10 @@ async function askQuestion() {
   const answerIndex = messages.value.length - 1;
   streaming.value = true;
   try {
-    const response = await fetch(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/chat/stream`, {
+    const response = await fetch(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/agent-chat/stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-      body: JSON.stringify({ message: prompt, topK: 5 }),
+      body: JSON.stringify({ message: prompt }),
     });
     if (!response.ok || !response.body) {
       const payload = await response.json().catch(() => null);
@@ -336,16 +345,43 @@ function consumeSSEBlock(block: string, answerIndex: number) {
   }
   if (!dataLines.length) return;
   try {
-    const payload = JSON.parse(dataLines.join("\n")) as { delta?: string; sources?: Source[]; error?: string };
+    const payload = JSON.parse(dataLines.join("\n")) as StreamPayload;
+    const eventData = payload.data && typeof payload.data === "object" ? payload.data : {};
+    const dataString = (key: string) => typeof eventData[key] === "string" ? eventData[key] as string : "";
+
     if (event === "sources") answer.sources = payload.sources ?? [];
     if (event === "delta") answer.content += payload.delta ?? "";
-    if (event === "error") {
-      answer.status = "error";
-      answer.content = payload.error || "问答失败。";
+    if (event === "run_started") answer.activity = "正在理解问题…";
+    if (event === "tool_called") {
+      answer.activity = dataString("tool_name") === "knowledge_search" ? "正在查找资料…" : "正在调用工具…";
     }
-    if (event === "done") answer.status = "done";
+    if (event === "tool_finished") answer.activity = "资料查找完成，正在组织答案…";
+    if (event === "message_delta") {
+      answer.content += dataString("content") || payload.content || "";
+      answer.activity = "正在组织答案…";
+    }
+    if (event === "run_finished") {
+      answer.content ||= dataString("answer") || payload.answer || "";
+      answer.activity = "";
+      answer.status = "done";
+    }
+    if (event === "run_failed" || event === "error") {
+      answer.status = "error";
+      answer.activity = "";
+      answer.content = dataString("error") || payload.error || "问答失败。";
+    }
+    if (event === "run_canceled") {
+      answer.status = "error";
+      answer.activity = "";
+      answer.content = "请求已取消。";
+    }
+    if (event === "done") {
+      answer.activity = "";
+      answer.status = "done";
+    }
   } catch {
     answer.status = "error";
+    answer.activity = "";
     answer.content = "收到无法解析的流式响应。";
   }
 }
@@ -486,6 +522,10 @@ onUnmounted(() => window.clearInterval(documentPollTimer));
             <div v-if="!messages.length" class="chat-empty"><span>“</span><p>问一个关于这套资料的问题，<br />让线索自己浮上来。</p></div>
             <article v-for="(message, index) in messages" :key="index" class="message" :class="`message--${message.role}`">
               <div class="message-label">{{ message.role === "user" ? "你" : "文库助手" }}</div>
+              <div v-if="message.role === 'assistant' && message.status === 'streaming' && message.activity" class="message-activity">
+                <span class="message-activity-dot" />
+                <span>{{ message.activity }}</span>
+              </div>
               <div class="message-bubble" :class="{ 'message-bubble--error': message.status === 'error' }">
                 <span v-if="message.role === 'assistant' && !message.content && message.status === 'streaming'" class="typing"><i /><i /><i /></span>
                 <span v-else>{{ message.content }}</span>
