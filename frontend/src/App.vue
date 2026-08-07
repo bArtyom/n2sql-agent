@@ -321,7 +321,11 @@ async function askQuestion() {
     }
     if (buffer.trim()) consumeSSEBlock(buffer, answerIndex);
     const currentAnswer = messages.value[answerIndex];
-    if (currentAnswer?.status === "streaming") currentAnswer.status = "done";
+    if (currentAnswer?.status === "streaming") {
+      currentAnswer.status = "error";
+      currentAnswer.activity = "";
+      currentAnswer.content = currentAnswer.content || "流式响应提前结束，请重试。";
+    }
   } catch (error) {
     const currentAnswer = messages.value[answerIndex];
     if (currentAnswer) {
@@ -349,35 +353,46 @@ function consumeSSEBlock(block: string, answerIndex: number) {
     const eventData = payload.data && typeof payload.data === "object" ? payload.data : {};
     const dataString = (key: string) => typeof eventData[key] === "string" ? eventData[key] as string : "";
 
-    if (event === "sources") answer.sources = payload.sources ?? [];
-    if (event === "delta") answer.content += payload.delta ?? "";
-    if (event === "run_started") answer.activity = "正在理解问题…";
-    if (event === "tool_called") {
-      answer.activity = dataString("tool_name") === "knowledge_search" ? "正在查找资料…" : "正在调用工具…";
-    }
-    if (event === "tool_finished") answer.activity = "资料查找完成，正在组织答案…";
-    if (event === "message_delta") {
-      answer.content += dataString("content") || payload.content || "";
-      answer.activity = "正在组织答案…";
-    }
-    if (event === "run_finished") {
-      answer.content ||= dataString("answer") || payload.answer || "";
-      answer.activity = "";
-      answer.status = "done";
-    }
-    if (event === "run_failed" || event === "error") {
-      answer.status = "error";
-      answer.activity = "";
-      answer.content = dataString("error") || payload.error || "问答失败。";
-    }
-    if (event === "run_canceled") {
-      answer.status = "error";
-      answer.activity = "";
-      answer.content = "请求已取消。";
-    }
-    if (event === "done") {
-      answer.activity = "";
-      answer.status = "done";
+    switch (event) {
+      case "sources":
+        answer.sources = payload.sources ?? [];
+        break;
+      case "delta":
+        answer.content += payload.delta ?? "";
+        break;
+      case "run_started":
+        answer.activity = "正在理解问题…";
+        break;
+      case "tool_called":
+        answer.activity = dataString("tool_name") === "knowledge_search" ? "正在查找资料…" : "正在调用工具…";
+        break;
+      case "tool_finished":
+        answer.activity = "资料查找完成，正在组织答案…";
+        break;
+      case "message_delta":
+        answer.content += dataString("content") || payload.content || "";
+        answer.activity = "正在组织答案…";
+        break;
+      case "run_finished":
+        answer.content ||= dataString("answer") || payload.answer || "";
+        answer.activity = "";
+        answer.status = "done";
+        break;
+      case "run_failed":
+      case "error":
+        answer.status = "error";
+        answer.activity = "";
+        answer.content = dataString("error") || payload.error || "问答失败。";
+        break;
+      case "run_canceled":
+        answer.status = "error";
+        answer.activity = "";
+        answer.content = "请求已取消。";
+        break;
+      case "done":
+        answer.activity = "";
+        answer.status = "done";
+        break;
     }
   } catch {
     answer.status = "error";
