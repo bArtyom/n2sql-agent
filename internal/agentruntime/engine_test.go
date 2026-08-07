@@ -21,8 +21,9 @@ func (s chatStub) ChatMessagesWithTools(ctx context.Context, messages []modelcli
 }
 
 type toolStub struct {
-	args json.RawMessage
-	err  error
+	args     json.RawMessage
+	err      error
+	metadata map[string]any
 }
 
 func (t *toolStub) Name() string { return "knowledge_search" }
@@ -38,7 +39,7 @@ func (t *toolStub) Call(_ context.Context, args json.RawMessage) (agent.ToolResu
 	if t.err != nil {
 		return agent.ToolResult{}, t.err
 	}
-	return agent.ToolResult{Content: `[{"content":"annual leave policy"}]`}, nil
+	return agent.ToolResult{Content: `[{"content":"annual leave policy"}]`, Metadata: t.metadata}, nil
 }
 
 func TestEngineReturnsModelAnswerWithoutToolCall(t *testing.T) {

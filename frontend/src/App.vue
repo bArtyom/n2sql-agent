@@ -102,6 +102,18 @@ function emptyModelProvider(): ModelProvider {
   };
 }
 
+function parseSources(value: unknown): Source[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is Source => {
+    if (!item || typeof item !== "object") return false;
+    const source = item as Record<string, unknown>;
+    return typeof source.documentId === "number"
+      && typeof source.position === "number"
+      && typeof source.content === "string"
+      && typeof source.distance === "number";
+  });
+}
+
 async function openProviderSettings() {
   providerSettingsOpen.value = true;
   providerLoading.value = true;
@@ -355,7 +367,7 @@ function consumeSSEBlock(block: string, answerIndex: number) {
 
     switch (event) {
       case "sources":
-        answer.sources = payload.sources ?? [];
+        answer.sources = parseSources(payload.sources);
         break;
       case "delta":
         answer.content += payload.delta ?? "";
@@ -367,6 +379,9 @@ function consumeSSEBlock(block: string, answerIndex: number) {
         answer.activity = dataString("tool_name") === "knowledge_search" ? "正在查找资料…" : "正在调用工具…";
         break;
       case "tool_finished":
+        if (Object.prototype.hasOwnProperty.call(eventData, "sources")) {
+          answer.sources = parseSources(eventData.sources);
+        }
         answer.activity = "资料查找完成，正在组织答案…";
         break;
       case "message_delta":

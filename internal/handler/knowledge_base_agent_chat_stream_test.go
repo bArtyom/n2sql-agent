@@ -19,6 +19,7 @@ type agentEventAnswererStub struct {
 	err         error
 	emitStarted bool
 	answer      string
+	sourceData  map[string]any
 }
 
 func (s agentEventAnswererStub) AnswerWithEvents(_ context.Context, _ int64, _ string, emit agentruntime.EventSink) (agentservice.Response, error) {
@@ -35,6 +36,17 @@ func (s agentEventAnswererStub) AnswerWithEvents(_ context.Context, _ int64, _ s
 	}
 	if s.err != nil {
 		return agentservice.Response{Status: agent.RunFailed}, s.err
+	}
+	if s.sourceData != nil {
+		if err := emit(agent.Event{
+			ID:        "event-sources",
+			RunID:     "run-1",
+			Type:      agent.EventToolFinished,
+			Data:      s.sourceData,
+			CreatedAt: time.Date(2026, time.August, 7, 0, 0, 0, 500000000, time.UTC),
+		}); err != nil {
+			return agentservice.Response{}, err
+		}
 	}
 	for _, event := range []agent.Event{
 		{
@@ -57,6 +69,35 @@ func (s agentEventAnswererStub) AnswerWithEvents(_ context.Context, _ int64, _ s
 		}
 	}
 	return agentservice.Response{Answer: s.answer, RunID: "run-1", Status: agent.RunSucceeded}, nil
+}
+
+func TestKnowledgeBaseAgentChatStreamWritesToolSources(t *testing.T) {
+	endpoint := handler.NewKnowledgeBaseAgentChatStream(agentEventAnswererStub{
+		sourceData: map[string]any{
+			"tool_name": "knowledge_search",
+			"sources": []map[string]any{{
+				"documentId":       11,
+				"originalFilename": "employee-handbook.md",
+				"position":         2,
+				"content":          "工作满一年可享受五天年假。",
+				"distance":         0.12,
+			}},
+		},
+		answer: "年假答案",
+	})
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat/stream", strings.NewReader(`{"message":"年假"}`))
+	request.SetPathValue("id", "7")
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, "event: tool_finished\n") || !strings.Contains(body, `"sources":[{"content":"工作满一年可享受五天年假。"`) {
+		t.Fatalf("body = %q, want tool sources", body)
+	}
 }
 
 func TestKnowledgeBaseAgentChatStreamWritesAgentEvents(t *testing.T) {

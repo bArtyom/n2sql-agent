@@ -39,7 +39,15 @@ func TestEngineRunWithEventsEmitsDirectAnswerLifecycle(t *testing.T) {
 }
 
 func TestEngineRunWithEventsEmitsToolLifecycle(t *testing.T) {
-	tool := &toolStub{}
+	tool := &toolStub{metadata: map[string]any{
+		"sources": []map[string]any{{
+			"documentId":       int64(11),
+			"originalFilename": "employee-handbook.md",
+			"position":         2,
+			"content":          "工作满一年可享受五天年假。",
+			"distance":         0.12,
+		}},
+	}}
 	registry := agent.NewToolRegistry()
 	if err := registry.Register(tool); err != nil {
 		t.Fatalf("Register() error = %v", err)
@@ -73,6 +81,10 @@ func TestEngineRunWithEventsEmitsToolLifecycle(t *testing.T) {
 		t.Fatalf("RunWithEvents() error = %v", err)
 	}
 	assertEventTypes(t, events, agent.EventRunStarted, agent.EventToolCalled, agent.EventToolFinished, agent.EventMessageDelta, agent.EventRunFinished)
+	toolFinished := events[2].Data.(map[string]any)
+	if _, ok := toolFinished["sources"]; !ok {
+		t.Fatalf("tool_finished data = %#v, want sources", toolFinished)
+	}
 }
 
 func TestEngineRunWithEventsEmitsFailureAndCancellation(t *testing.T) {

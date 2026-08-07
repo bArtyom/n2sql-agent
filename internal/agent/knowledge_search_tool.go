@@ -145,7 +145,10 @@ func (t *KnowledgeSearchTool) Call(ctx context.Context, raw json.RawMessage) (To
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("encode knowledge search results: %w", err)
 	}
-	return ToolResult{Content: string(content)}, nil
+	return ToolResult{
+		Content:  string(content),
+		Metadata: map[string]any{"sources": results},
+	}, nil
 }
 
 func decodeKnowledgeSearchArguments(raw json.RawMessage, destination any) error {

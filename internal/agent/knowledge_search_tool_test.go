@@ -68,6 +68,10 @@ func TestKnowledgeSearchToolCallsSearcherAndReturnsJSON(t *testing.T) {
 	if len(results) != 1 || results[0].Content != "工作满一年可享受五天年假。" {
 		t.Fatalf("tool results = %#v", results)
 	}
+	metadata, ok := result.Metadata["sources"].([]retrieval.Result)
+	if !ok || len(metadata) != 1 || metadata[0].DocumentID != 11 {
+		t.Fatalf("tool source metadata = %#v", result.Metadata)
+	}
 }
 
 func TestNewKnowledgeSearchRegistryRegistersSearchTool(t *testing.T) {

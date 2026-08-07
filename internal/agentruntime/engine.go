@@ -168,10 +168,17 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			}); err != nil {
 				return finishErrorWithEvents(result, err, emitter)
 			}
-			if err := emitter.emit(agent.EventToolFinished, len(run.Steps()), map[string]any{
+			toolFinishedData := map[string]any{
 				"tool_call_id": toolCall.ID,
 				"tool_name":    toolCall.Function.Name,
-			}); err != nil {
+			}
+			for key, value := range toolResult.Metadata {
+				if key == "tool_call_id" || key == "tool_name" {
+					continue
+				}
+				toolFinishedData[key] = value
+			}
+			if err := emitter.emit(agent.EventToolFinished, len(run.Steps()), toolFinishedData); err != nil {
 				return finishError(result, err)
 			}
 			conversation = append(conversation, modelclient.ChatMessage{

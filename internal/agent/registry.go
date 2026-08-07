@@ -26,7 +26,8 @@ type Tool interface {
 
 // ToolResult is the normalized result returned by a tool.
 type ToolResult struct {
-	Content string `json:"content"`
+	Content  string         `json:"content"`
+	Metadata map[string]any `json:"-"`
 }
 
 // FunctionDefinition describes a tool in the shape expected by model adapters.
