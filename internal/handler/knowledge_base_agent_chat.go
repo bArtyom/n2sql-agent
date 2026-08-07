@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
@@ -69,14 +70,19 @@ func writeAgentChatDecodeError(w http.ResponseWriter, err error) {
 }
 
 func writeKnowledgeBaseAgentChatError(w http.ResponseWriter, err error) {
+	message, status := knowledgeBaseAgentChatError(err)
+	http.Error(w, `{"error":`+strconv.Quote(message)+`}`, status)
+}
+
+func knowledgeBaseAgentChatError(err error) (string, int) {
 	switch {
 	case errors.Is(err, agentservice.ErrInvalidRequest):
-		http.Error(w, `{"error":"invalid agent chat request"}`, http.StatusBadRequest)
+		return "invalid agent chat request", http.StatusBadRequest
 	case errors.Is(err, modelprovider.ErrNotFound):
-		http.Error(w, `{"error":"model provider not configured"}`, http.StatusNotFound)
+		return "model provider not configured", http.StatusNotFound
 	case errors.Is(err, modelruntime.ErrAPIKeyEnvironmentMismatch), errors.Is(err, modelruntime.ErrAPIKeyNotConfigured):
-		http.Error(w, `{"error":"model provider API key is not configured"}`, http.StatusBadRequest)
+		return "model provider API key is not configured", http.StatusBadRequest
 	default:
-		http.Error(w, `{"error":"agent chat failed"}`, http.StatusBadGateway)
+		return "agent chat failed", http.StatusBadGateway
 	}
 }

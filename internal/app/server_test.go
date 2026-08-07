@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/app"
 	"github.com/bArtyom/n2sql-agent/internal/document"
@@ -64,6 +65,10 @@ func (answererStub) Stream(_ context.Context, _ int64, _ string, _ int, emit fun
 type agentAnswererStub struct{}
 
 func (agentAnswererStub) Answer(context.Context, int64, string) (agentservice.Response, error) {
+	return agentservice.Response{Answer: "OK"}, nil
+}
+
+func (agentAnswererStub) AnswerWithEvents(context.Context, int64, string, agentruntime.EventSink) (agentservice.Response, error) {
 	return agentservice.Response{Answer: "OK"}, nil
 }
 
@@ -201,6 +206,20 @@ func TestServerRoutesKnowledgeBaseAgentChat(t *testing.T) {
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
+	}
+}
+
+func TestServerRoutesKnowledgeBaseAgentChatStream(t *testing.T) {
+	response := httptest.NewRecorder()
+	server := app.New(app.Dependencies{AgentStreamingAnswers: agentAnswererStub{}})
+
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat/stream", strings.NewReader(`{"message":"问题"}`)))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
+	}
+	if contentType := response.Header().Get("Content-Type"); contentType != "text/event-stream" {
+		t.Fatalf("content type = %q, want text/event-stream", contentType)
 	}
 }
 

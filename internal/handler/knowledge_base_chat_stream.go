@@ -51,6 +51,10 @@ func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, event string, va
 	default:
 		return fmt.Errorf("invalid SSE event type")
 	}
+	return writeSSEMessage(w, flusher, event, value)
+}
+
+func writeSSEMessage(w http.ResponseWriter, flusher http.Flusher, event string, value any) error {
 	payload, err := json.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("encode SSE event: %w", err)

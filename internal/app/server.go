@@ -15,17 +15,18 @@ import (
 )
 
 type Dependencies struct {
-	Providers         modelprovider.Store
-	KnowledgeBases    knowledgebase.Store
-	Documents         document.Uploader
-	ConnectionChecker modelclient.ConnectionChecker
-	Embeddings        modelruntime.EmbeddingRunner
-	Chat              modelruntime.ChatRunner
-	Search            retrieval.Searcher
-	Answers           rag.Answerer
-	StreamingAnswers  rag.StreamAnswerer
-	AgentAnswers      agentservice.Answerer
-	APIKeyEnvVar      string
+	Providers             modelprovider.Store
+	KnowledgeBases        knowledgebase.Store
+	Documents             document.Uploader
+	ConnectionChecker     modelclient.ConnectionChecker
+	Embeddings            modelruntime.EmbeddingRunner
+	Chat                  modelruntime.ChatRunner
+	Search                retrieval.Searcher
+	Answers               rag.Answerer
+	StreamingAnswers      rag.StreamAnswerer
+	AgentAnswers          agentservice.Answerer
+	AgentStreamingAnswers agentservice.EventAnswerer
+	APIKeyEnvVar          string
 }
 
 func New(dependencies Dependencies) http.Handler {
@@ -65,6 +66,9 @@ func New(dependencies Dependencies) http.Handler {
 	}
 	if dependencies.AgentAnswers != nil {
 		mux.Handle("POST /api/knowledge-bases/{id}/agent-chat", handler.NewKnowledgeBaseAgentChat(dependencies.AgentAnswers))
+	}
+	if dependencies.AgentStreamingAnswers != nil {
+		mux.Handle("POST /api/knowledge-bases/{id}/agent-chat/stream", handler.NewKnowledgeBaseAgentChatStream(dependencies.AgentStreamingAnswers))
 	}
 
 	return mux
