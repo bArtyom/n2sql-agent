@@ -20,6 +20,7 @@ const (
 	defaultOCRConcurrency            = 1
 	defaultAgentMaxSteps             = 4
 	defaultAgentTimeout              = time.Minute
+	defaultAgentMaxToolResultBytes   = 32 * 1024
 )
 
 type Config struct {
@@ -37,6 +38,7 @@ type Config struct {
 	OCRConcurrency            int
 	AgentMaxSteps             int
 	AgentTimeout              time.Duration
+	AgentMaxToolResultBytes   int
 }
 
 func Load() Config {
@@ -68,7 +70,16 @@ func Load() Config {
 		OCRConcurrency:            positiveIntEnv("OCR_CONCURRENCY", defaultOCRConcurrency),
 		AgentMaxSteps:             positiveIntEnv("AGENT_MAX_STEPS", defaultAgentMaxSteps),
 		AgentTimeout:              time.Duration(positiveIntEnv("AGENT_TIMEOUT_MS", int(defaultAgentTimeout/time.Millisecond))) * time.Millisecond,
+		AgentMaxToolResultBytes:   agentMaxToolResultBytes(),
 	}
+}
+
+func agentMaxToolResultBytes() int {
+	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv("AGENT_MAX_TOOL_RESULT_BYTES")))
+	if err != nil || value < 2 {
+		return defaultAgentMaxToolResultBytes
+	}
+	return value
 }
 
 func workerPollInterval() time.Duration {

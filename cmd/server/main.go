@@ -55,7 +55,7 @@ func main() {
 	runner := worker.NewRunner(worker.NewPostgresStore(db), processor)
 	searchService := retrieval.NewService(embeddingService, chunkStore)
 	answerService := rag.NewService(searchService, chatService)
-	agentAnswerService, err := agentservice.NewService(chatService, searchService, cfg.AgentMaxSteps, cfg.AgentTimeout)
+	agentAnswerService, err := agentservice.NewServiceWithToolResultLimit(chatService, searchService, cfg.AgentMaxSteps, cfg.AgentTimeout, cfg.AgentMaxToolResultBytes)
 	if err != nil {
 		log.Fatal(err)
 	}

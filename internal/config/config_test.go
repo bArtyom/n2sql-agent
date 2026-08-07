@@ -51,6 +51,7 @@ func TestLoadReadsOCRSettings(t *testing.T) {
 func TestLoadReadsAgentSettings(t *testing.T) {
 	t.Setenv("AGENT_MAX_STEPS", "7")
 	t.Setenv("AGENT_TIMEOUT_MS", "1250")
+	t.Setenv("AGENT_MAX_TOOL_RESULT_BYTES", "4096")
 
 	cfg := config.Load()
 	if cfg.AgentMaxSteps != 7 {
@@ -58,6 +59,9 @@ func TestLoadReadsAgentSettings(t *testing.T) {
 	}
 	if cfg.AgentTimeout != 1250*time.Millisecond {
 		t.Fatalf("agent timeout = %s, want 1.25s", cfg.AgentTimeout)
+	}
+	if cfg.AgentMaxToolResultBytes != 4096 {
+		t.Fatalf("agent max tool result bytes = %d, want 4096", cfg.AgentMaxToolResultBytes)
 	}
 }
 
@@ -67,5 +71,14 @@ func TestLoadUsesDefaultAgentTimeoutForInvalidValue(t *testing.T) {
 	cfg := config.Load()
 	if cfg.AgentTimeout != time.Minute {
 		t.Fatalf("agent timeout = %s, want 1m default", cfg.AgentTimeout)
+	}
+}
+
+func TestLoadUsesDefaultAgentToolResultBytesForInvalidValue(t *testing.T) {
+	t.Setenv("AGENT_MAX_TOOL_RESULT_BYTES", "1")
+
+	cfg := config.Load()
+	if cfg.AgentMaxToolResultBytes != 32*1024 {
+		t.Fatalf("agent max tool result bytes = %d, want 32768 default", cfg.AgentMaxToolResultBytes)
 	}
 }

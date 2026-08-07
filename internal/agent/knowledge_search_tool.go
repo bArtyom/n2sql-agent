@@ -16,7 +16,10 @@ var (
 	ErrInvalidKnowledgeSearchInput  = errors.New("invalid knowledge search input")
 	ErrInvalidKnowledgeBaseScope    = errors.New("invalid knowledge base scope")
 	ErrKnowledgeSearcherUnavailable = errors.New("knowledge searcher unavailable")
+	ErrInvalidMaxResultBytes        = errors.New("knowledge search result byte limit must be at least 2")
 )
+
+const DefaultMaxToolResultBytes = 32 * 1024
 
 type KnowledgeSearchInput struct {
 	KnowledgeBaseID int64  `json:"knowledge_base_id"`
@@ -73,22 +76,40 @@ var scopedKnowledgeSearchParameters = json.RawMessage(`{
 type KnowledgeSearchTool struct {
 	searcher        retrieval.Searcher
 	knowledgeBaseID int64
+	maxResultBytes  int
 }
 
 var _ Tool = (*KnowledgeSearchTool)(nil)
 
 func NewKnowledgeSearchTool(searcher retrieval.Searcher) *KnowledgeSearchTool {
-	return &KnowledgeSearchTool{searcher: searcher}
+	return &KnowledgeSearchTool{searcher: searcher, maxResultBytes: DefaultMaxToolResultBytes}
 }
 
 func NewKnowledgeSearchToolForKnowledgeBase(searcher retrieval.Searcher, knowledgeBaseID int64) (*KnowledgeSearchTool, error) {
+	return NewKnowledgeSearchToolForKnowledgeBaseWithMaxBytes(searcher, knowledgeBaseID, DefaultMaxToolResultBytes)
+}
+
+func NewKnowledgeSearchToolWithMaxBytes(searcher retrieval.Searcher, maxResultBytes int) (*KnowledgeSearchTool, error) {
+	if searcher == nil {
+		return nil, ErrKnowledgeSearcherUnavailable
+	}
+	if maxResultBytes < 2 {
+		return nil, ErrInvalidMaxResultBytes
+	}
+	return &KnowledgeSearchTool{searcher: searcher, maxResultBytes: maxResultBytes}, nil
+}
+
+func NewKnowledgeSearchToolForKnowledgeBaseWithMaxBytes(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes int) (*KnowledgeSearchTool, error) {
 	if searcher == nil {
 		return nil, ErrKnowledgeSearcherUnavailable
 	}
 	if knowledgeBaseID <= 0 {
 		return nil, ErrInvalidKnowledgeBaseScope
 	}
-	return &KnowledgeSearchTool{searcher: searcher, knowledgeBaseID: knowledgeBaseID}, nil
+	if maxResultBytes < 2 {
+		return nil, ErrInvalidMaxResultBytes
+	}
+	return &KnowledgeSearchTool{searcher: searcher, knowledgeBaseID: knowledgeBaseID, maxResultBytes: maxResultBytes}, nil
 }
 
 func (t *KnowledgeSearchTool) Name() string {
@@ -141,14 +162,85 @@ func (t *KnowledgeSearchTool) Call(ctx context.Context, raw json.RawMessage) (To
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("knowledge search: %w", err)
 	}
-	content, err := json.Marshal(results)
+	content, visibleResults, truncated, err := limitKnowledgeSearchResults(results, t.maxResultBytes)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("encode knowledge search results: %w", err)
 	}
+	metadata := map[string]any{"sources": visibleResults}
+	if truncated {
+		metadata["truncated"] = true
+	}
 	return ToolResult{
 		Content:  string(content),
-		Metadata: map[string]any{"sources": results},
+		Metadata: metadata,
 	}, nil
+}
+
+func limitKnowledgeSearchResults(results []retrieval.Result, maxBytes int) ([]byte, []retrieval.Result, bool, error) {
+	if maxBytes < 2 {
+		return nil, nil, false, ErrInvalidMaxResultBytes
+	}
+	visible := make([]retrieval.Result, 0, len(results))
+	for _, result := range results {
+		candidate := appendSearchResult(visible, result)
+		encoded, err := json.Marshal(candidate)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if len(encoded) <= maxBytes {
+			visible = candidate
+			continue
+		}
+
+		shortened, fits, err := shortenSearchResult(visible, result, maxBytes)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if fits {
+			visible = append(visible, shortened)
+		}
+		encoded, err = json.Marshal(visible)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		return encoded, visible, true, nil
+	}
+
+	encoded, err := json.Marshal(visible)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return encoded, visible, false, nil
+}
+
+func shortenSearchResult(prefix []retrieval.Result, result retrieval.Result, maxBytes int) (retrieval.Result, bool, error) {
+	runes := []rune(result.Content)
+	low, high := 0, len(runes)
+	best := -1
+	var shortened retrieval.Result
+	for low <= high {
+		middle := low + (high-low)/2
+		candidate := result
+		candidate.Content = string(runes[:middle])
+		encoded, err := json.Marshal(appendSearchResult(prefix, candidate))
+		if err != nil {
+			return retrieval.Result{}, false, err
+		}
+		if len(encoded) <= maxBytes {
+			best = middle
+			shortened = candidate
+			low = middle + 1
+		} else {
+			high = middle - 1
+		}
+	}
+	return shortened, best >= 0, nil
+}
+
+func appendSearchResult(results []retrieval.Result, result retrieval.Result) []retrieval.Result {
+	copyOfResults := make([]retrieval.Result, len(results), len(results)+1)
+	copy(copyOfResults, results)
+	return append(copyOfResults, result)
 }
 
 func decodeKnowledgeSearchArguments(raw json.RawMessage, destination any) error {
@@ -178,7 +270,11 @@ func NewKnowledgeSearchRegistry(searcher retrieval.Searcher) (*ToolRegistry, err
 }
 
 func NewKnowledgeSearchRegistryForKnowledgeBase(searcher retrieval.Searcher, knowledgeBaseID int64) (*ToolRegistry, error) {
-	tool, err := NewKnowledgeSearchToolForKnowledgeBase(searcher, knowledgeBaseID)
+	return NewKnowledgeSearchRegistryForKnowledgeBaseWithMaxBytes(searcher, knowledgeBaseID, DefaultMaxToolResultBytes)
+}
+
+func NewKnowledgeSearchRegistryForKnowledgeBaseWithMaxBytes(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes int) (*ToolRegistry, error) {
+	tool, err := NewKnowledgeSearchToolForKnowledgeBaseWithMaxBytes(searcher, knowledgeBaseID, maxResultBytes)
 	if err != nil {
 		return nil, err
 	}

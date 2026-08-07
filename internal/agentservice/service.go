@@ -20,10 +20,11 @@ const maxQuestionBytes = 8000
 const systemPrompt = "你是一个通用文档知识库问答助手。需要事实信息时必须调用 knowledge_search 工具；只能依据工具返回的资料回答，不要凭空编造。如果资料不足，请明确说明知识库中没有足够信息。"
 
 var (
-	ErrInvalidService  = errors.New("invalid agent service")
-	ErrInvalidRequest  = errors.New("invalid agent chat request")
-	ErrInvalidMaxSteps = errors.New("agent max steps must be positive")
-	ErrInvalidTimeout  = errors.New("agent timeout must be positive")
+	ErrInvalidService            = errors.New("invalid agent service")
+	ErrInvalidRequest            = errors.New("invalid agent chat request")
+	ErrInvalidMaxSteps           = errors.New("agent max steps must be positive")
+	ErrInvalidTimeout            = errors.New("agent timeout must be positive")
+	ErrInvalidMaxToolResultBytes = errors.New("agent max tool result bytes must be at least 2")
 )
 
 type Answerer interface {
@@ -42,14 +43,19 @@ type Response struct {
 }
 
 type Service struct {
-	chat     modelruntime.ToolChatRunner
-	searcher retrieval.Searcher
-	maxSteps int
-	timeout  time.Duration
-	sequence atomic.Uint64
+	chat               modelruntime.ToolChatRunner
+	searcher           retrieval.Searcher
+	maxSteps           int
+	timeout            time.Duration
+	maxToolResultBytes int
+	sequence           atomic.Uint64
 }
 
 func NewService(chat modelruntime.ToolChatRunner, searcher retrieval.Searcher, maxSteps int, timeout time.Duration) (*Service, error) {
+	return NewServiceWithToolResultLimit(chat, searcher, maxSteps, timeout, agent.DefaultMaxToolResultBytes)
+}
+
+func NewServiceWithToolResultLimit(chat modelruntime.ToolChatRunner, searcher retrieval.Searcher, maxSteps int, timeout time.Duration, maxToolResultBytes int) (*Service, error) {
 	if chat == nil || searcher == nil {
 		return nil, ErrInvalidService
 	}
@@ -59,7 +65,10 @@ func NewService(chat modelruntime.ToolChatRunner, searcher retrieval.Searcher, m
 	if timeout <= 0 {
 		return nil, ErrInvalidTimeout
 	}
-	return &Service{chat: chat, searcher: searcher, maxSteps: maxSteps, timeout: timeout}, nil
+	if maxToolResultBytes < 2 {
+		return nil, ErrInvalidMaxToolResultBytes
+	}
+	return &Service{chat: chat, searcher: searcher, maxSteps: maxSteps, timeout: timeout, maxToolResultBytes: maxToolResultBytes}, nil
 }
 
 func (s *Service) Answer(ctx context.Context, knowledgeBaseID int64, question string) (Response, error) {
@@ -79,7 +88,7 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, question st
 		return Response{}, ErrInvalidRequest
 	}
 
-	registry, err := agent.NewKnowledgeSearchRegistryForKnowledgeBase(s.searcher, knowledgeBaseID)
+	registry, err := agent.NewKnowledgeSearchRegistryForKnowledgeBaseWithMaxBytes(s.searcher, knowledgeBaseID, s.maxToolResultBytes)
 	if err != nil {
 		return Response{}, fmt.Errorf("create knowledge search registry: %w", err)
 	}

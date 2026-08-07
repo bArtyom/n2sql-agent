@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
@@ -14,18 +15,23 @@ type searcherStub struct {
 	knowledgeBaseID int64
 	query           string
 	limit           int
+	content         string
 }
 
 func (s *searcherStub) Search(_ context.Context, knowledgeBaseID int64, query string, limit int) ([]retrieval.Result, error) {
 	s.knowledgeBaseID = knowledgeBaseID
 	s.query = query
 	s.limit = limit
+	content := s.content
+	if content == "" {
+		content = "工作满一年可享受五天年假。"
+	}
 	return []retrieval.Result{
 		{
 			DocumentID:       11,
 			OriginalFilename: "employee-handbook.md",
 			Position:         2,
-			Content:          "工作满一年可享受五天年假。",
+			Content:          content,
 			Distance:         0.12,
 		},
 	}, nil
@@ -71,6 +77,43 @@ func TestKnowledgeSearchToolCallsSearcherAndReturnsJSON(t *testing.T) {
 	metadata, ok := result.Metadata["sources"].([]retrieval.Result)
 	if !ok || len(metadata) != 1 || metadata[0].DocumentID != 11 {
 		t.Fatalf("tool source metadata = %#v", result.Metadata)
+	}
+}
+
+func TestKnowledgeSearchToolTruncatesStructuredResults(t *testing.T) {
+	tool, err := agent.NewKnowledgeSearchToolWithMaxBytes(&searcherStub{content: strings.Repeat("年假制度 ", 200)}, 180)
+	if err != nil {
+		t.Fatalf("NewKnowledgeSearchToolWithMaxBytes() error = %v", err)
+	}
+
+	result, err := tool.Call(context.Background(), json.RawMessage(`{"knowledge_base_id":7,"query":"年假"}`))
+	if err != nil {
+		t.Fatalf("Call() error = %v", err)
+	}
+	if len([]byte(result.Content)) > 180 {
+		t.Fatalf("tool result bytes = %d, want at most 180", len([]byte(result.Content)))
+	}
+	var visible []retrieval.Result
+	if err := json.Unmarshal([]byte(result.Content), &visible); err != nil {
+		t.Fatalf("truncated result is invalid JSON: %v", err)
+	}
+	if len(visible) != 1 || len(visible[0].Content) >= 1000 {
+		t.Fatalf("visible results = %#v, want one shortened result", visible)
+	}
+	truncated, ok := result.Metadata["truncated"].(bool)
+	if !ok || !truncated {
+		t.Fatalf("truncated metadata = %#v, want true", result.Metadata)
+	}
+	sources, ok := result.Metadata["sources"].([]retrieval.Result)
+	if !ok || len(sources) != len(visible) || sources[0].Content != visible[0].Content {
+		t.Fatalf("source metadata = %#v, want same visible results", result.Metadata)
+	}
+}
+
+func TestNewKnowledgeSearchToolWithMaxBytesRejectsInvalidLimit(t *testing.T) {
+	_, err := agent.NewKnowledgeSearchToolWithMaxBytes(&searcherStub{}, 1)
+	if !errors.Is(err, agent.ErrInvalidMaxResultBytes) {
+		t.Fatalf("error = %v, want %v", err, agent.ErrInvalidMaxResultBytes)
 	}
 }
 

@@ -47,6 +47,7 @@ func TestEngineRunWithEventsEmitsToolLifecycle(t *testing.T) {
 			"content":          "工作满一年可享受五天年假。",
 			"distance":         0.12,
 		}},
+		"truncated": true,
 	}}
 	registry := agent.NewToolRegistry()
 	if err := registry.Register(tool); err != nil {
@@ -84,6 +85,9 @@ func TestEngineRunWithEventsEmitsToolLifecycle(t *testing.T) {
 	toolFinished := events[2].Data.(map[string]any)
 	if _, ok := toolFinished["sources"]; !ok {
 		t.Fatalf("tool_finished data = %#v, want sources", toolFinished)
+	}
+	if truncated, ok := toolFinished["truncated"].(bool); !ok || !truncated {
+		t.Fatalf("tool_finished data = %#v, want truncated=true", toolFinished)
 	}
 }
 

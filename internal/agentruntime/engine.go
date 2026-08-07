@@ -175,6 +175,9 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			if sources, ok := toolResult.Metadata["sources"]; ok {
 				toolFinishedData["sources"] = sources
 			}
+			if truncated, ok := toolResult.Metadata["truncated"].(bool); ok {
+				toolFinishedData["truncated"] = truncated
+			}
 			if err := emitter.emit(agent.EventToolFinished, len(run.Steps()), toolFinishedData); err != nil {
 				return finishError(result, err)
 			}

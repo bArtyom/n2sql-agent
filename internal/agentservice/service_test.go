@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,13 +18,18 @@ type searcherStub struct {
 	knowledgeBaseID int64
 	query           string
 	limit           int
+	content         string
 }
 
 func (s *searcherStub) Search(_ context.Context, knowledgeBaseID int64, query string, limit int) ([]retrieval.Result, error) {
 	s.knowledgeBaseID = knowledgeBaseID
 	s.query = query
 	s.limit = limit
-	return []retrieval.Result{{Content: "年假制度内容"}}, nil
+	content := s.content
+	if content == "" {
+		content = "年假制度内容"
+	}
+	return []retrieval.Result{{Content: content}}, nil
 }
 
 type chatStub struct {
@@ -127,6 +133,40 @@ func TestServiceAnswersWithEvents(t *testing.T) {
 	assertEventTypes(t, events, agent.EventRunStarted, agent.EventMessageDelta, agent.EventRunFinished)
 }
 
+func TestServicePassesToolResultLimitToKnowledgeSearch(t *testing.T) {
+	callCount := 0
+	chat := chatStub{call: func(messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		callCount++
+		if callCount == 1 {
+			return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+				ID:   "call-1",
+				Type: "function",
+				Function: modelclient.ToolCallFunction{
+					Name:      "knowledge_search",
+					Arguments: `{"query":"年假"}`,
+				},
+			}}}, nil
+		}
+		if len(messages) != 4 || len([]byte(messages[3].Content)) > 180 {
+			t.Fatalf("tool message = %#v, want valid result at most 180 bytes", messages[3])
+		}
+		return modelclient.ChatResponse{Message: "已根据有限资料回答。"}, nil
+	}}
+	service, err := agentservice.NewServiceWithToolResultLimit(
+		chat,
+		&searcherStub{content: strings.Repeat("年假制度 ", 200)},
+		3,
+		time.Minute,
+		180,
+	)
+	if err != nil {
+		t.Fatalf("NewServiceWithToolResultLimit() error = %v", err)
+	}
+	if _, err := service.Answer(context.Background(), 7, "年假"); err != nil {
+		t.Fatalf("Answer() error = %v", err)
+	}
+}
+
 func TestServiceAnswersWithEventsPropagatesCancellation(t *testing.T) {
 	service, err := agentservice.NewService(chatStub{call: func(_ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 		t.Fatal("model must not be called after cancellation")
@@ -179,6 +219,9 @@ func TestNewServiceRejectsInvalidDependencies(t *testing.T) {
 	}
 	if _, err := agentservice.NewService(chatStub{}, &searcherStub{}, 3, 0); !errors.Is(err, agentservice.ErrInvalidTimeout) {
 		t.Fatalf("invalid timeout error = %v, want ErrInvalidTimeout", err)
+	}
+	if _, err := agentservice.NewServiceWithToolResultLimit(chatStub{}, &searcherStub{}, 3, time.Minute, 1); !errors.Is(err, agentservice.ErrInvalidMaxToolResultBytes) {
+		t.Fatalf("invalid tool result limit error = %v, want ErrInvalidMaxToolResultBytes", err)
 	}
 }
 
