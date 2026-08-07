@@ -98,4 +98,13 @@ func TestKnowledgeBaseAgentChatMapsServiceErrors(t *testing.T) {
 	if response.Code != http.StatusBadGateway {
 		t.Fatalf("unexpected failure status = %d, want %d", response.Code, http.StatusBadGateway)
 	}
+
+	endpoint = handler.NewKnowledgeBaseAgentChat(&agentAnswererStub{err: context.DeadlineExceeded})
+	response = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat", strings.NewReader(`{"message":"问题"}`))
+	request.SetPathValue("id", "7")
+	endpoint.ServeHTTP(response, request)
+	if response.Code != http.StatusGatewayTimeout {
+		t.Fatalf("timeout status = %d, want %d", response.Code, http.StatusGatewayTimeout)
+	}
 }

@@ -19,6 +19,7 @@ const (
 	defaultOCRMaxPages               = 20
 	defaultOCRConcurrency            = 1
 	defaultAgentMaxSteps             = 4
+	defaultAgentTimeout              = time.Minute
 )
 
 type Config struct {
@@ -35,6 +36,7 @@ type Config struct {
 	OCRMaxPages               int
 	OCRConcurrency            int
 	AgentMaxSteps             int
+	AgentTimeout              time.Duration
 }
 
 func Load() Config {
@@ -65,6 +67,7 @@ func Load() Config {
 		OCRMaxPages:               positiveIntEnv("OCR_MAX_PAGES", defaultOCRMaxPages),
 		OCRConcurrency:            positiveIntEnv("OCR_CONCURRENCY", defaultOCRConcurrency),
 		AgentMaxSteps:             positiveIntEnv("AGENT_MAX_STEPS", defaultAgentMaxSteps),
+		AgentTimeout:              time.Duration(positiveIntEnv("AGENT_TIMEOUT_MS", int(defaultAgentTimeout/time.Millisecond))) * time.Millisecond,
 	}
 }
 

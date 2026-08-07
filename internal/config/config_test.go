@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/config"
 )
@@ -49,9 +50,22 @@ func TestLoadReadsOCRSettings(t *testing.T) {
 
 func TestLoadReadsAgentSettings(t *testing.T) {
 	t.Setenv("AGENT_MAX_STEPS", "7")
+	t.Setenv("AGENT_TIMEOUT_MS", "1250")
 
 	cfg := config.Load()
 	if cfg.AgentMaxSteps != 7 {
 		t.Fatalf("agent max steps = %d, want 7", cfg.AgentMaxSteps)
+	}
+	if cfg.AgentTimeout != 1250*time.Millisecond {
+		t.Fatalf("agent timeout = %s, want 1.25s", cfg.AgentTimeout)
+	}
+}
+
+func TestLoadUsesDefaultAgentTimeoutForInvalidValue(t *testing.T) {
+	t.Setenv("AGENT_TIMEOUT_MS", "not-a-duration")
+
+	cfg := config.Load()
+	if cfg.AgentTimeout != time.Minute {
+		t.Fatalf("agent timeout = %s, want 1m default", cfg.AgentTimeout)
 	}
 }

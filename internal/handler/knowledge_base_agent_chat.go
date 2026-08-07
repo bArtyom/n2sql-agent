@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -78,6 +79,8 @@ func knowledgeBaseAgentChatError(err error) (string, int) {
 	switch {
 	case errors.Is(err, agentservice.ErrInvalidRequest):
 		return "invalid agent chat request", http.StatusBadRequest
+	case errors.Is(err, context.DeadlineExceeded):
+		return "agent chat timed out", http.StatusGatewayTimeout
 	case errors.Is(err, modelprovider.ErrNotFound):
 		return "model provider not configured", http.StatusNotFound
 	case errors.Is(err, modelruntime.ErrAPIKeyEnvironmentMismatch), errors.Is(err, modelruntime.ErrAPIKeyNotConfigured):

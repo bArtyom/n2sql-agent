@@ -169,6 +169,26 @@ func TestKnowledgeBaseAgentChatStreamWritesErrorAfterStreamingStarts(t *testing.
 	}
 }
 
+func TestKnowledgeBaseAgentChatStreamReportsTimeout(t *testing.T) {
+	endpoint := handler.NewKnowledgeBaseAgentChatStream(agentEventAnswererStub{
+		err:         context.DeadlineExceeded,
+		emitStarted: true,
+	})
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat/stream", strings.NewReader(`{"message":"问题"}`))
+	request.SetPathValue("id", "7")
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, "event: error\n") || !strings.Contains(body, `"error":"agent chat timed out"`) {
+		t.Fatalf("body = %q, want timeout error event", body)
+	}
+}
+
 func TestKnowledgeBaseAgentChatStreamIgnoresRequestCancellation(t *testing.T) {
 	endpoint := handler.NewKnowledgeBaseAgentChatStream(agentEventAnswererStub{err: context.Canceled})
 	response := httptest.NewRecorder()

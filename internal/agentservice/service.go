@@ -23,6 +23,7 @@ var (
 	ErrInvalidService  = errors.New("invalid agent service")
 	ErrInvalidRequest  = errors.New("invalid agent chat request")
 	ErrInvalidMaxSteps = errors.New("agent max steps must be positive")
+	ErrInvalidTimeout  = errors.New("agent timeout must be positive")
 )
 
 type Answerer interface {
@@ -44,17 +45,21 @@ type Service struct {
 	chat     modelruntime.ToolChatRunner
 	searcher retrieval.Searcher
 	maxSteps int
+	timeout  time.Duration
 	sequence atomic.Uint64
 }
 
-func NewService(chat modelruntime.ToolChatRunner, searcher retrieval.Searcher, maxSteps int) (*Service, error) {
+func NewService(chat modelruntime.ToolChatRunner, searcher retrieval.Searcher, maxSteps int, timeout time.Duration) (*Service, error) {
 	if chat == nil || searcher == nil {
 		return nil, ErrInvalidService
 	}
 	if maxSteps <= 0 {
 		return nil, ErrInvalidMaxSteps
 	}
-	return &Service{chat: chat, searcher: searcher, maxSteps: maxSteps}, nil
+	if timeout <= 0 {
+		return nil, ErrInvalidTimeout
+	}
+	return &Service{chat: chat, searcher: searcher, maxSteps: maxSteps, timeout: timeout}, nil
 }
 
 func (s *Service) Answer(ctx context.Context, knowledgeBaseID int64, question string) (Response, error) {
@@ -66,6 +71,9 @@ func (s *Service) AnswerWithEvents(ctx context.Context, knowledgeBaseID int64, q
 }
 
 func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, question string, sink agentruntime.EventSink) (Response, error) {
+	if ctx == nil {
+		return Response{}, agentruntime.ErrInvalidContext
+	}
 	question = strings.TrimSpace(question)
 	if knowledgeBaseID <= 0 || question == "" || len(question) > maxQuestionBytes {
 		return Response{}, ErrInvalidRequest
@@ -85,11 +93,13 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, question st
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: question},
 	}
+	runContext, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
 	var result agentruntime.Result
 	if sink == nil {
-		result, err = engine.Run(ctx, runID, messages)
+		result, err = engine.Run(runContext, runID, messages)
 	} else {
-		result, err = engine.RunWithEvents(ctx, runID, messages, sink)
+		result, err = engine.RunWithEvents(runContext, runID, messages, sink)
 	}
 	response := responseFromRun(result)
 	if err != nil {

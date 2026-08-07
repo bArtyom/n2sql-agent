@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
@@ -31,6 +32,13 @@ type chatStub struct {
 
 func (s chatStub) ChatMessagesWithTools(_ context.Context, messages []modelclient.ChatMessage, definitions []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 	return s.call(messages, definitions)
+}
+
+type blockingChatStub struct{}
+
+func (blockingChatStub) ChatMessagesWithTools(ctx context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+	<-ctx.Done()
+	return modelclient.ChatResponse{}, ctx.Err()
 }
 
 func TestServiceAnswersUsingScopedKnowledgeSearchTool(t *testing.T) {
@@ -78,7 +86,7 @@ func TestServiceAnswersUsingScopedKnowledgeSearchTool(t *testing.T) {
 		return modelclient.ChatResponse{Message: "年假按照公司制度执行。"}, nil
 	}}
 
-	service, err := agentservice.NewService(chat, searcher, 3)
+	service, err := agentservice.NewService(chat, searcher, 3, time.Minute)
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -100,7 +108,7 @@ func TestServiceAnswersUsingScopedKnowledgeSearchTool(t *testing.T) {
 func TestServiceAnswersWithEvents(t *testing.T) {
 	service, err := agentservice.NewService(chatStub{call: func(_ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 		return modelclient.ChatResponse{Message: "事件版答案"}, nil
-	}}, &searcherStub{}, 3)
+	}}, &searcherStub{}, 3, time.Minute)
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -123,7 +131,7 @@ func TestServiceAnswersWithEventsPropagatesCancellation(t *testing.T) {
 	service, err := agentservice.NewService(chatStub{call: func(_ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 		t.Fatal("model must not be called after cancellation")
 		return modelclient.ChatResponse{}, nil
-	}}, &searcherStub{}, 3)
+	}}, &searcherStub{}, 3, time.Minute)
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -148,7 +156,7 @@ func TestServiceRejectsInvalidQuestion(t *testing.T) {
 	service, err := agentservice.NewService(chatStub{call: func([]modelclient.ChatMessage, []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 		t.Fatal("model must not be called")
 		return modelclient.ChatResponse{}, nil
-	}}, &searcherStub{}, 3)
+	}}, &searcherStub{}, 3, time.Minute)
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -160,15 +168,38 @@ func TestServiceRejectsInvalidQuestion(t *testing.T) {
 }
 
 func TestNewServiceRejectsInvalidDependencies(t *testing.T) {
-	if _, err := agentservice.NewService(nil, &searcherStub{}, 3); !errors.Is(err, agentservice.ErrInvalidService) {
+	if _, err := agentservice.NewService(nil, &searcherStub{}, 3, time.Minute); !errors.Is(err, agentservice.ErrInvalidService) {
 		t.Fatalf("nil chat error = %v, want ErrInvalidService", err)
 	}
-	if _, err := agentservice.NewService(chatStub{}, nil, 3); !errors.Is(err, agentservice.ErrInvalidService) {
+	if _, err := agentservice.NewService(chatStub{}, nil, 3, time.Minute); !errors.Is(err, agentservice.ErrInvalidService) {
 		t.Fatalf("nil searcher error = %v, want ErrInvalidService", err)
 	}
-	if _, err := agentservice.NewService(chatStub{}, &searcherStub{}, 0); !errors.Is(err, agentservice.ErrInvalidMaxSteps) {
+	if _, err := agentservice.NewService(chatStub{}, &searcherStub{}, 0, time.Minute); !errors.Is(err, agentservice.ErrInvalidMaxSteps) {
 		t.Fatalf("invalid max steps error = %v, want ErrInvalidMaxSteps", err)
 	}
+	if _, err := agentservice.NewService(chatStub{}, &searcherStub{}, 3, 0); !errors.Is(err, agentservice.ErrInvalidTimeout) {
+		t.Fatalf("invalid timeout error = %v, want ErrInvalidTimeout", err)
+	}
+}
+
+func TestServiceCancelsRunWhenTimeoutExpires(t *testing.T) {
+	service, err := agentservice.NewService(blockingChatStub{}, &searcherStub{}, 3, 20*time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	var events []agent.Event
+	response, err := service.AnswerWithEvents(context.Background(), 7, "问题", func(event agent.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("AnswerWithEvents() error = %v, want deadline exceeded", err)
+	}
+	if response.Status != agent.RunCanceled {
+		t.Fatalf("response status = %s, want canceled", response.Status)
+	}
+	assertEventTypes(t, events, agent.EventRunStarted, agent.EventRunCanceled)
 }
 
 func assertEventTypes(t *testing.T, events []agent.Event, want ...agent.EventType) {
