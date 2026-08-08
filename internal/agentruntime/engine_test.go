@@ -24,11 +24,13 @@ func (s chatStub) ChatMessagesWithTools(ctx context.Context, messages []modelcli
 }
 
 type toolStub struct {
-	args     json.RawMessage
-	err      error
-	content  string
-	metadata map[string]any
-	onCall   func(context.Context)
+	args       json.RawMessage
+	err        error
+	content    string
+	metadata   map[string]any
+	noRelevant bool
+	fallback   string
+	onCall     func(context.Context)
 }
 
 func (t *toolStub) Name() string { return "knowledge_search" }
@@ -51,7 +53,41 @@ func (t *toolStub) Call(ctx context.Context, args json.RawMessage) (agent.ToolRe
 	if content == "" {
 		content = `[{"content":"annual leave policy"}]`
 	}
-	return agent.ToolResult{Content: content, Metadata: t.metadata}, nil
+	return agent.ToolResult{Content: content, Metadata: t.metadata, NoRelevantResults: t.noRelevant, FallbackAnswer: t.fallback}, nil
+}
+
+func TestEngineRefusesWhenToolHasNoRelevantKnowledge(t *testing.T) {
+	tool := &toolStub{noRelevant: true, fallback: "资料中没有足够信息，无法可靠回答。"}
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(tool); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	callCount := 0
+	chat := chatStub{call: func(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		callCount++
+		return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+			ID:   "call-no-result",
+			Type: "function",
+			Function: modelclient.ToolCallFunction{
+				Name:      "knowledge_search",
+				Arguments: `{"query":"量子计算"}`,
+			},
+		}}}, nil
+	}}
+	engine, err := agentruntime.NewEngine(chat, registry, 3)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	result, err := engine.Run(context.Background(), "run-no-result", []modelclient.ChatMessage{{Role: "user", Content: "量子计算"}})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Run.Status() != agent.RunSucceeded || result.Run.FinalAnswer() != "资料中没有足够信息，无法可靠回答。" {
+		t.Fatalf("run = %s, answer = %q", result.Run.Status(), result.Run.FinalAnswer())
+	}
+	if callCount != 1 {
+		t.Fatalf("model call count = %d, want 1", callCount)
+	}
 }
 
 func TestEngineReturnsModelAnswerWithoutToolCall(t *testing.T) {

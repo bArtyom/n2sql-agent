@@ -16,6 +16,7 @@ type searcherStub struct {
 	query           string
 	limit           int
 	content         string
+	distance        float64
 }
 
 type registryProbeTool struct{}
@@ -38,15 +39,38 @@ func (s *searcherStub) Search(_ context.Context, knowledgeBaseID int64, query st
 	if content == "" {
 		content = "工作满一年可享受五天年假。"
 	}
+	distance := s.distance
+	if distance == 0 {
+		distance = 0.12
+	}
 	return []retrieval.Result{
 		{
 			DocumentID:       11,
 			OriginalFilename: "employee-handbook.md",
 			Position:         2,
 			Content:          content,
-			Distance:         0.12,
+			Distance:         distance,
 		},
 	}, nil
+}
+
+func TestKnowledgeSearchToolMarksEmptyAndDistantResultsAsIrrelevant(t *testing.T) {
+	tool := agent.NewKnowledgeSearchTool(&searcherStub{distance: 0.9})
+
+	result, err := tool.Call(context.Background(), json.RawMessage(`{"knowledge_base_id":7,"query":"量子计算"}`))
+	if err != nil {
+		t.Fatalf("Call() error = %v", err)
+	}
+	if !result.NoRelevantResults || result.FallbackAnswer == "" {
+		t.Fatalf("result = %#v, want deterministic fallback metadata", result)
+	}
+	var visible []retrieval.Result
+	if err := json.Unmarshal([]byte(result.Content), &visible); err != nil {
+		t.Fatalf("result content = %q, error = %v", result.Content, err)
+	}
+	if len(visible) != 0 {
+		t.Fatalf("visible results = %#v, want empty", visible)
+	}
 }
 
 func TestKnowledgeSearchToolCallsSearcherAndReturnsJSON(t *testing.T) {

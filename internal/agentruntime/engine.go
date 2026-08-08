@@ -158,6 +158,8 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			Content:   response.Message,
 			ToolCalls: response.ToolCalls,
 		})
+		var fallbackAnswer string
+		hasRelevantToolResult := false
 		for _, toolCall := range response.ToolCalls {
 			if err := emitter.emit(agent.EventToolCalled, len(run.Steps())+1, map[string]any{
 				"tool_call_id": toolCall.ID,
@@ -191,6 +193,13 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			if err := result.Run.RecordToolCall(true); err != nil {
 				return finishErrorWithEvents(result, err, emitter)
 			}
+			if toolResult.NoRelevantResults {
+				if fallbackAnswer == "" {
+					fallbackAnswer = toolResult.FallbackAnswer
+				}
+			} else {
+				hasRelevantToolResult = true
+			}
 			toolFinishedData := map[string]any{
 				"tool_call_id": toolCall.ID,
 				"tool_name":    toolCall.Function.Name,
@@ -214,9 +223,38 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				Content:    toolContent,
 			})
 		}
+		if fallbackAnswer != "" && !hasRelevantToolResult {
+			return completeWithAnswer(result, emitter, fallbackAnswer)
+		}
 	}
 
 	return finishErrorWithCategory(result, ErrMaxStepsExceeded, agent.FailureStepLimit, emitter)
+}
+
+func completeWithAnswer(result Result, emitter *eventEmitter, answer string) (Result, error) {
+	safeMessage := security.RedactText(answer)
+	if strings.TrimSpace(safeMessage) == "" {
+		return finishErrorWithCategory(result, ErrEmptyFinalAnswer, agent.FailureValidation, emitter)
+	}
+	if err := result.Run.AddStep(agent.Step{Kind: agent.StepFinalAnswer, Status: agent.StepSucceeded}); err != nil {
+		return finishErrorWithEvents(result, err, emitter)
+	}
+	if err := emitter.emit(agent.EventMessageDelta, len(result.Run.Steps()), map[string]any{
+		"content": safeMessage,
+	}); err != nil {
+		return finishError(result, err)
+	}
+	if err := result.Run.Complete(safeMessage); err != nil {
+		return finishErrorWithEvents(result, err, emitter)
+	}
+	result.Response.Message = safeMessage
+	if err := emitter.emit(agent.EventRunFinished, len(result.Run.Steps()), map[string]any{
+		"answer": safeMessage,
+		"stats":  result.Run.Stats(),
+	}); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 func markUntrustedToolResult(content string) (string, error) {

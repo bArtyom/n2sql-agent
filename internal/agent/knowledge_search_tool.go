@@ -19,7 +19,15 @@ var (
 	ErrInvalidMaxResultBytes        = errors.New("knowledge search result byte limit must be at least 2")
 )
 
-const DefaultMaxToolResultBytes = 32 * 1024
+const (
+	DefaultMaxToolResultBytes = 32 * 1024
+	// DefaultMaxKnowledgeDistance is the largest pgvector cosine distance
+	// accepted as evidence for an Agent answer. Larger values are treated as
+	// unrelated search hits rather than being passed to the model as facts.
+	DefaultMaxKnowledgeDistance = 0.65
+)
+
+const noRelevantKnowledgeAnswer = "当前知识库中没有找到足够相关的资料，无法根据现有文档可靠回答这个问题。"
 
 type KnowledgeSearchInput struct {
 	KnowledgeBaseID int64  `json:"knowledge_base_id"`
@@ -162,7 +170,8 @@ func (t *KnowledgeSearchTool) Call(ctx context.Context, raw json.RawMessage) (To
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("knowledge search: %w", err)
 	}
-	content, visibleResults, truncated, err := limitKnowledgeSearchResults(results, t.maxResultBytes)
+	relevantResults := filterRelevantKnowledgeResults(results)
+	content, visibleResults, truncated, err := limitKnowledgeSearchResults(relevantResults, t.maxResultBytes)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("encode knowledge search results: %w", err)
 	}
@@ -170,10 +179,29 @@ func (t *KnowledgeSearchTool) Call(ctx context.Context, raw json.RawMessage) (To
 	if truncated {
 		metadata["truncated"] = true
 	}
+	if len(relevantResults) == 0 {
+		metadata["no_relevant_results"] = true
+		return ToolResult{
+			Content:           string(content),
+			Metadata:          metadata,
+			NoRelevantResults: true,
+			FallbackAnswer:    noRelevantKnowledgeAnswer,
+		}, nil
+	}
 	return ToolResult{
 		Content:  string(content),
 		Metadata: metadata,
 	}, nil
+}
+
+func filterRelevantKnowledgeResults(results []retrieval.Result) []retrieval.Result {
+	relevant := make([]retrieval.Result, 0, len(results))
+	for _, result := range results {
+		if result.Distance <= DefaultMaxKnowledgeDistance {
+			relevant = append(relevant, result)
+		}
+	}
+	return relevant
 }
 
 func limitKnowledgeSearchResults(results []retrieval.Result, maxBytes int) ([]byte, []retrieval.Result, bool, error) {
