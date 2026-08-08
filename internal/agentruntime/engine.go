@@ -10,6 +10,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
+	"github.com/bArtyom/n2sql-agent/internal/security"
 )
 
 var (
@@ -113,23 +114,25 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 		}
 
 		if len(response.ToolCalls) == 0 {
-			if strings.TrimSpace(response.Message) == "" {
+			safeMessage := security.RedactText(response.Message)
+			if strings.TrimSpace(safeMessage) == "" {
 				return finishErrorWithEvents(result, ErrEmptyFinalAnswer, emitter)
 			}
 			if err := run.AddStep(agent.Step{Kind: agent.StepFinalAnswer, Status: agent.StepSucceeded}); err != nil {
 				return finishErrorWithEvents(result, err, emitter)
 			}
 			if err := emitter.emit(agent.EventMessageDelta, len(run.Steps()), map[string]any{
-				"content": response.Message,
+				"content": safeMessage,
 			}); err != nil {
 				return finishError(result, err)
 			}
-			if err := run.Complete(response.Message); err != nil {
+			if err := run.Complete(safeMessage); err != nil {
 				return finishErrorWithEvents(result, err, emitter)
 			}
+			response.Message = safeMessage
 			result.Response = response
 			if err := emitter.emit(agent.EventRunFinished, len(run.Steps()), map[string]any{
-				"answer": response.Message,
+				"answer": safeMessage,
 			}); err != nil {
 				return result, err
 			}
@@ -163,6 +166,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			if strings.TrimSpace(toolResult.Content) == "" {
 				return addToolFailureWithEvents(result, toolCall.Function.Name, ErrInvalidToolResult, emitter)
 			}
+			toolResult = security.RedactToolResult(toolResult)
 			if err := result.Run.AddStep(agent.Step{
 				Kind:     agent.StepToolCall,
 				Status:   agent.StepSucceeded,

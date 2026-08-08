@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
+	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 )
 
 type chatStub struct {
@@ -163,6 +165,72 @@ func TestEngineMarksToolResultAsUntrustedData(t *testing.T) {
 	}
 	if _, err := engine.Run(context.Background(), "run-untrusted", []modelclient.ChatMessage{{Role: "user", Content: "查询资料"}}); err != nil {
 		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestEngineRedactsSecretsFromModelAndEvents(t *testing.T) {
+	tool := &toolStub{
+		content: `[{"content":"api_key=sk-live-12345678901234567890"}]`,
+		metadata: map[string]any{
+			"sources": []retrieval.Result{{Content: "password=super-secret"}},
+		},
+	}
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(tool); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	callCount := 0
+	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		callCount++
+		if callCount == 1 {
+			return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+				ID:   "call-secret",
+				Type: "function",
+				Function: modelclient.ToolCallFunction{
+					Name:      "knowledge_search",
+					Arguments: `{}`,
+				},
+			}}}, nil
+		}
+		if strings.Contains(messages[2].Content, "sk-live-12345678901234567890") {
+			t.Fatalf("model tool message contains API key: %q", messages[2].Content)
+		}
+		return modelclient.ChatResponse{Message: "请勿回显 sk-live-12345678901234567890"}, nil
+	}}
+
+	engine, err := agentruntime.NewEngine(chat, registry, 3)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	var events []agent.Event
+	result, err := engine.RunWithEvents(context.Background(), "run-redact", []modelclient.ChatMessage{{Role: "user", Content: "查询资料"}}, func(event agent.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("RunWithEvents() error = %v", err)
+	}
+	if strings.Contains(result.Run.FinalAnswer(), "sk-live-12345678901234567890") || strings.Contains(result.Response.Message, "sk-live-12345678901234567890") {
+		t.Fatalf("result contains API key: %#v", result)
+	}
+
+	for _, event := range events {
+		switch event.Type {
+		case agent.EventToolFinished:
+			data, ok := event.Data.(map[string]any)
+			if !ok {
+				t.Fatalf("tool_finished data = %#v", event.Data)
+			}
+			sources, ok := data["sources"].([]retrieval.Result)
+			if !ok || len(sources) != 1 || strings.Contains(sources[0].Content, "super-secret") {
+				t.Fatalf("tool_finished sources = %#v, want redacted source", data["sources"])
+			}
+		case agent.EventMessageDelta:
+			data, ok := event.Data.(map[string]any)
+			if !ok || strings.Contains(data["content"].(string), "sk-live-12345678901234567890") {
+				t.Fatalf("message_delta data = %#v, want redacted answer", event.Data)
+			}
+		}
 	}
 }
 
