@@ -49,6 +49,26 @@ func (s *conversationStoreStub) AppendExchange(_ context.Context, id int64, user
 	return nil
 }
 
+func (s *conversationStoreStub) UpdateTitle(_ context.Context, id int64, title string) (conversation.Conversation, error) {
+	for index := range s.records {
+		if s.records[index].ID == id {
+			s.records[index].Title = title
+			return s.records[index], nil
+		}
+	}
+	return conversation.Conversation{}, conversation.ErrNotFound
+}
+
+func (s *conversationStoreStub) Delete(_ context.Context, id int64) error {
+	for index := range s.records {
+		if s.records[index].ID == id {
+			s.records = append(s.records[:index], s.records[index+1:]...)
+			return nil
+		}
+	}
+	return conversation.ErrNotFound
+}
+
 func TestConversationHandlerCreatesAndListsConversation(t *testing.T) {
 	store := &conversationStoreStub{}
 	endpoint := handler.NewConversations(conversation.NewService(store))

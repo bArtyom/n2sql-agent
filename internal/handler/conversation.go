@@ -23,21 +23,30 @@ func NewConversations(service *conversation.Service) http.Handler {
 		}
 
 		if r.PathValue("conversationId") != "" {
-			if r.Method != http.MethodGet {
-				w.WriteHeader(http.StatusMethodNotAllowed)
-				return
-			}
 			conversationID, err := parsePositiveID(r.PathValue("conversationId"))
 			if err != nil {
 				http.Error(w, `{"error":"invalid conversation ID"}`, http.StatusBadRequest)
 				return
 			}
-			messages, err := service.Messages(r.Context(), conversationID, knowledgeBaseID)
-			if err != nil {
-				writeConversationError(w, err)
-				return
+			switch r.Method {
+			case http.MethodGet:
+				messages, err := service.Messages(r.Context(), conversationID, knowledgeBaseID)
+				if err != nil {
+					writeConversationError(w, err)
+					return
+				}
+				writeJSON(w, messages)
+			case http.MethodPatch:
+				renameConversation(w, r, service, conversationID, knowledgeBaseID)
+			case http.MethodDelete:
+				if err := service.Delete(r.Context(), conversationID, knowledgeBaseID); err != nil {
+					writeConversationError(w, err)
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				w.WriteHeader(http.StatusMethodNotAllowed)
 			}
-			writeJSON(w, messages)
 			return
 		}
 
@@ -55,6 +64,28 @@ func NewConversations(service *conversation.Service) http.Handler {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
 	})
+}
+
+func renameConversation(w http.ResponseWriter, r *http.Request, service *conversation.Service, conversationID, knowledgeBaseID int64) {
+	var request struct {
+		Title string `json:"title"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxConversationRequestBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		http.Error(w, `{"error":"invalid conversation request"}`, http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		http.Error(w, `{"error":"invalid conversation request"}`, http.StatusBadRequest)
+		return
+	}
+	updated, err := service.Rename(r.Context(), conversationID, knowledgeBaseID, request.Title)
+	if err != nil {
+		writeConversationError(w, err)
+		return
+	}
+	writeJSON(w, updated)
 }
 
 func createConversation(w http.ResponseWriter, r *http.Request, service *conversation.Service, knowledgeBaseID int64) {

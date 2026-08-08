@@ -52,6 +52,8 @@ type Store interface {
 	List(context.Context, int64) ([]Conversation, error)
 	ListMessages(context.Context, int64) ([]Message, error)
 	AppendExchange(context.Context, int64, string, string) error
+	UpdateTitle(context.Context, int64, string) (Conversation, error)
+	Delete(context.Context, int64) error
 }
 
 type Service struct {
@@ -81,18 +83,49 @@ func (s *Service) List(ctx context.Context, knowledgeBaseID int64) ([]Conversati
 	return s.store.List(ctx, knowledgeBaseID)
 }
 
-func (s *Service) Messages(ctx context.Context, conversationID, knowledgeBaseID int64) ([]Message, error) {
+func (s *Service) Rename(ctx context.Context, conversationID, knowledgeBaseID int64, title string) (Conversation, error) {
 	if conversationID <= 0 || knowledgeBaseID <= 0 {
-		return nil, ErrInvalidConversation
+		return Conversation{}, ErrInvalidConversation
+	}
+	if _, err := s.getOwnedConversation(ctx, conversationID, knowledgeBaseID); err != nil {
+		return Conversation{}, err
+	}
+	title = strings.TrimSpace(title)
+	if title == "" || len(title) > maxTitleBytes {
+		return Conversation{}, ErrInvalidTitle
+	}
+	return s.store.UpdateTitle(ctx, conversationID, title)
+}
+
+func (s *Service) Delete(ctx context.Context, conversationID, knowledgeBaseID int64) error {
+	if conversationID <= 0 || knowledgeBaseID <= 0 {
+		return ErrInvalidConversation
+	}
+	if _, err := s.getOwnedConversation(ctx, conversationID, knowledgeBaseID); err != nil {
+		return err
+	}
+	return s.store.Delete(ctx, conversationID)
+}
+
+func (s *Service) Messages(ctx context.Context, conversationID, knowledgeBaseID int64) ([]Message, error) {
+	if _, err := s.getOwnedConversation(ctx, conversationID, knowledgeBaseID); err != nil {
+		return nil, err
+	}
+	return s.store.ListMessages(ctx, conversationID)
+}
+
+func (s *Service) getOwnedConversation(ctx context.Context, conversationID, knowledgeBaseID int64) (Conversation, error) {
+	if conversationID <= 0 || knowledgeBaseID <= 0 {
+		return Conversation{}, ErrInvalidConversation
 	}
 	conversationRecord, err := s.store.Get(ctx, conversationID)
 	if err != nil {
-		return nil, err
+		return Conversation{}, err
 	}
 	if conversationRecord.KnowledgeBaseID != knowledgeBaseID {
-		return nil, ErrNotFound
+		return Conversation{}, ErrNotFound
 	}
-	return s.store.ListMessages(ctx, conversationID)
+	return conversationRecord, nil
 }
 
 func (s *Service) History(ctx context.Context, conversationID, knowledgeBaseID int64) ([]agentservice.HistoryMessage, error) {
@@ -187,6 +220,43 @@ func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Conv
 		return nil, fmt.Errorf("iterate conversations: %w", err)
 	}
 	return results, nil
+}
+
+func (s *PostgresStore) UpdateTitle(ctx context.Context, id int64, title string) (Conversation, error) {
+	var result Conversation
+	err := s.db.QueryRowContext(ctx, `
+		UPDATE conversations
+		SET title = $2
+		WHERE id = $1
+		  AND administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
+		RETURNING id, knowledge_base_id, title, created_at, updated_at`, id, title).Scan(
+		&result.ID, &result.KnowledgeBaseID, &result.Title, &result.CreatedAt, &result.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Conversation{}, ErrNotFound
+	}
+	if err != nil {
+		return Conversation{}, fmt.Errorf("update conversation title: %w", err)
+	}
+	return result, nil
+}
+
+func (s *PostgresStore) Delete(ctx context.Context, id int64) error {
+	result, err := s.db.ExecContext(ctx, `
+		DELETE FROM conversations
+		WHERE id = $1
+		  AND administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, id)
+	if err != nil {
+		return fmt.Errorf("delete conversation: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check deleted conversation: %w", err)
+	}
+	if affected != 1 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *PostgresStore) ListMessages(ctx context.Context, conversationID int64) ([]Message, error) {

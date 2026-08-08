@@ -285,6 +285,42 @@ async function createConversation() {
   }
 }
 
+async function renameConversation(item: Conversation) {
+  if (!selectedKnowledgeBaseId.value || streaming.value) return;
+  const title = window.prompt("新的会话名称", item.title)?.trim();
+  if (!title || title === item.title) return;
+  try {
+    const updated = await requestJSON<Conversation>(
+      `/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations/${item.id}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      },
+    );
+    conversations.value = conversations.value.map((conversation) => conversation.id === updated.id ? updated : conversation);
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function deleteConversation(item: Conversation) {
+  if (!selectedKnowledgeBaseId.value || streaming.value) return;
+  if (!window.confirm(`删除“${item.title}”？这会同时删除其中的对话记录。`)) return;
+  try {
+    await requestJSON<void>(
+      `/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations/${item.id}`,
+      { method: "DELETE" },
+    );
+    conversations.value = conversations.value.filter((conversation) => conversation.id !== item.id);
+    if (conversationId.value === item.id) {
+      await selectConversation(conversations.value[0]?.id ?? null);
+    }
+  } catch (error) {
+    showError(error);
+  }
+}
+
 async function ensureConversation(title: string): Promise<number> {
   if (conversationId.value) return conversationId.value;
   if (!selectedKnowledgeBaseId.value) throw new Error("请先选择知识库。");
@@ -656,18 +692,20 @@ onUnmounted(() => window.clearInterval(documentPollTimer));
             </button>
           </div>
           <div v-if="conversations.length" class="conversation-list" aria-label="会话列表">
-            <button
-              v-for="item in conversations"
-              :key="item.id"
-              type="button"
-              class="conversation-item"
-              :class="{ 'conversation-item--active': item.id === conversationId }"
-              :disabled="conversationsLoading || streaming"
-              @click="selectConversation(item.id)"
-            >
-              <span>{{ item.title }}</span>
-              <small>{{ new Date(item.updatedAt).toLocaleDateString("zh-CN") }}</small>
-            </button>
+              <div
+                v-for="item in conversations"
+                :key="item.id"
+                class="conversation-item"
+                :class="{ 'conversation-item--active': item.id === conversationId }"
+                @click="selectConversation(item.id)"
+              >
+                <span class="conversation-item-title">{{ item.title }}</span>
+                <small>{{ new Date(item.updatedAt).toLocaleDateString("zh-CN") }}</small>
+                <div class="conversation-actions">
+                  <button type="button" aria-label="重命名会话" :disabled="conversationsLoading || streaming" @click.stop="renameConversation(item)">改名</button>
+                  <button type="button" aria-label="删除会话" :disabled="conversationsLoading || streaming" @click.stop="deleteConversation(item)">删</button>
+                </div>
+              </div>
           </div>
           <div class="messages" aria-live="polite">
             <div v-if="!messages.length" class="chat-empty"><span>“</span><p>问一个关于这套资料的问题，<br />让线索自己浮上来。</p></div>

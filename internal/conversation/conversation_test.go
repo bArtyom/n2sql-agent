@@ -42,6 +42,13 @@ func (s *storeStub) AppendExchange(_ context.Context, _ int64, user, assistant s
 	return s.exchangeErr
 }
 
+func (s *storeStub) UpdateTitle(_ context.Context, _ int64, title string) (conversation.Conversation, error) {
+	s.conversation.Title = title
+	return s.conversation, nil
+}
+
+func (s *storeStub) Delete(context.Context, int64) error { return nil }
+
 func TestServiceCreatesConversationWithTrimmedTitle(t *testing.T) {
 	store := &storeStub{conversation: conversation.Conversation{ID: 9, KnowledgeBaseID: 7, Title: "年假"}}
 	service := conversation.NewService(store)
