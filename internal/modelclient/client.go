@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
 const (
@@ -52,8 +54,11 @@ type Embedding struct {
 }
 
 type EmbeddingResponse struct {
-	Data []Embedding `json:"data"`
+	Data  []Embedding `json:"data"`
+	Usage *TokenUsage `json:"usage,omitempty"`
 }
+
+type TokenUsage = usage.TokenUsage
 
 type ChatMessage struct {
 	Role       string     `json:"role"`
@@ -88,8 +93,9 @@ type ChatRequest struct {
 }
 
 type ChatResponse struct {
-	Message   string     `json:"message"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	Message   string      `json:"message"`
+	ToolCalls []ToolCall  `json:"tool_calls,omitempty"`
+	Usage     *TokenUsage `json:"usage,omitempty"`
 }
 
 // ToolDefinition is the OpenAI-compatible function tool shape sent with a
@@ -227,7 +233,8 @@ func (c *HTTPClient) Embed(ctx context.Context, baseURL, apiKey string, embeddin
 	}
 
 	var payload struct {
-		Data []struct {
+		Usage *TokenUsage `json:"usage"`
+		Data  []struct {
 			Index     int       `json:"index"`
 			Embedding []float32 `json:"embedding"`
 		} `json:"data"`
@@ -240,7 +247,7 @@ func (c *HTTPClient) Embed(ctx context.Context, baseURL, apiKey string, embeddin
 		return EmbeddingResponse{}, fmt.Errorf("embeddings response count = %d, want %d", len(payload.Data), len(embeddingRequest.Input))
 	}
 
-	result := EmbeddingResponse{Data: make([]Embedding, len(embeddingRequest.Input))}
+	result := EmbeddingResponse{Data: make([]Embedding, len(embeddingRequest.Input)), Usage: payload.Usage}
 	seenIndexes := make(map[int]struct{}, len(payload.Data))
 	for _, embedding := range payload.Data {
 		if embedding.Index < 0 || embedding.Index >= len(embeddingRequest.Input) {
@@ -296,6 +303,7 @@ func (c *HTTPClient) Chat(ctx context.Context, baseURL, apiKey string, chatReque
 	}
 
 	var payload struct {
+		Usage   *TokenUsage `json:"usage"`
 		Choices []struct {
 			Message ChatMessage `json:"message"`
 		} `json:"choices"`
@@ -315,7 +323,7 @@ func (c *HTTPClient) Chat(ctx context.Context, baseURL, apiKey string, chatReque
 			return ChatResponse{}, fmt.Errorf("chat response contains invalid tool call: %w", err)
 		}
 	}
-	return ChatResponse{Message: message.Content, ToolCalls: message.ToolCalls}, nil
+	return ChatResponse{Message: message.Content, ToolCalls: message.ToolCalls, Usage: payload.Usage}, nil
 }
 
 // OCR sends one JPEG page to an OpenAI-compatible vision chat endpoint and

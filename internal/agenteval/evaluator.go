@@ -39,6 +39,10 @@ type CaseResult struct {
 	ToolCalls           int             `json:"tool_calls"`
 	SuccessfulToolCalls int             `json:"successful_tool_calls"`
 	FailedToolCalls     int             `json:"failed_tool_calls"`
+	PromptTokens        int             `json:"prompt_tokens"`
+	CompletionTokens    int             `json:"completion_tokens"`
+	EmbeddingTokens     int             `json:"embedding_tokens"`
+	TotalTokens         int             `json:"total_tokens"`
 }
 
 type Report struct {
@@ -51,6 +55,10 @@ type Report struct {
 	SuccessfulToolCalls int            `json:"successful_tool_calls"`
 	FailedToolCalls     int            `json:"failed_tool_calls"`
 	ToolSuccessRate     float64        `json:"tool_success_rate"`
+	PromptTokens        int            `json:"prompt_tokens"`
+	CompletionTokens    int            `json:"completion_tokens"`
+	EmbeddingTokens     int            `json:"embedding_tokens"`
+	TotalTokens         int            `json:"total_tokens"`
 	FailureCategories   map[string]int `json:"failure_categories"`
 	Cases               []CaseResult   `json:"cases"`
 }
@@ -88,6 +96,10 @@ func Evaluate(ctx context.Context, answerer agentservice.Answerer, cases []Case)
 		report.ToolCalls += result.ToolCalls
 		report.SuccessfulToolCalls += result.SuccessfulToolCalls
 		report.FailedToolCalls += result.FailedToolCalls
+		report.PromptTokens += result.PromptTokens
+		report.CompletionTokens += result.CompletionTokens
+		report.EmbeddingTokens += result.EmbeddingTokens
+		report.TotalTokens += result.TotalTokens
 	}
 	report.PassRate = float64(report.Passed) / float64(report.Total)
 	report.AverageDurationMS = float64(totalDurationMS) / float64(report.Total)
@@ -156,6 +168,10 @@ func metricsFromResponse(response agentservice.Response, elapsed time.Duration) 
 		result.ToolCalls = stats.ToolCalls
 		result.SuccessfulToolCalls = stats.SuccessfulToolCalls
 		result.FailedToolCalls = stats.FailedToolCalls
+		result.PromptTokens = stats.PromptTokens
+		result.CompletionTokens = stats.CompletionTokens
+		result.EmbeddingTokens = stats.EmbeddingTokens
+		result.TotalTokens = stats.TotalTokens
 		result.ErrorCategory = string(stats.FailureCategory)
 		return result
 	}

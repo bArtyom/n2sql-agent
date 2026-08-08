@@ -12,6 +12,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
+	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
 type chatStub struct {
@@ -27,6 +28,7 @@ type toolStub struct {
 	err      error
 	content  string
 	metadata map[string]any
+	onCall   func(context.Context)
 }
 
 func (t *toolStub) Name() string { return "knowledge_search" }
@@ -37,7 +39,10 @@ func (t *toolStub) Parameters() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}}}`)
 }
 
-func (t *toolStub) Call(_ context.Context, args json.RawMessage) (agent.ToolResult, error) {
+func (t *toolStub) Call(ctx context.Context, args json.RawMessage) (agent.ToolResult, error) {
+	if t.onCall != nil {
+		t.onCall(ctx)
+	}
 	t.args = append(t.args[:0], args...)
 	if t.err != nil {
 		return agent.ToolResult{}, t.err
@@ -77,7 +82,13 @@ func TestEngineReturnsModelAnswerWithoutToolCall(t *testing.T) {
 }
 
 func TestEngineExecutesToolAndUsesResultForFinalAnswer(t *testing.T) {
-	tool := &toolStub{}
+	tool := &toolStub{onCall: func(ctx context.Context) {
+		observer := usage.ObserverFromContext(ctx)
+		if observer == nil {
+			t.Fatal("tool context has no usage observer")
+		}
+		observer.ObserveEmbeddingTokens(usage.TokenUsage{PromptTokens: 7, TotalTokens: 7})
+	}}
 	registry := agent.NewToolRegistry()
 	if err := registry.Register(tool); err != nil {
 		t.Fatalf("Register() error = %v", err)
@@ -89,7 +100,7 @@ func TestEngineExecutesToolAndUsesResultForFinalAnswer(t *testing.T) {
 			t.Fatalf("definitions = %#v", definitions)
 		}
 		if callCount == 1 {
-			return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+			return modelclient.ChatResponse{Usage: &modelclient.TokenUsage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15}, ToolCalls: []modelclient.ToolCall{{
 				ID:   "call-1",
 				Type: "function",
 				Function: modelclient.ToolCallFunction{
@@ -113,7 +124,7 @@ func TestEngineExecutesToolAndUsesResultForFinalAnswer(t *testing.T) {
 		if !reflect.DeepEqual(messages, wantMessages) {
 			t.Fatalf("messages = %#v, want %#v", messages, wantMessages)
 		}
-		return modelclient.ChatResponse{Message: "年假按入职年限计算。"}, nil
+		return modelclient.ChatResponse{Message: "年假按入职年限计算。", Usage: &modelclient.TokenUsage{PromptTokens: 20, CompletionTokens: 7, TotalTokens: 27}}, nil
 	}}
 	engine, err := agentruntime.NewEngine(chat, registry, 3)
 	if err != nil {
@@ -134,7 +145,7 @@ func TestEngineExecutesToolAndUsesResultForFinalAnswer(t *testing.T) {
 		t.Fatalf("model call count = %d, want 2", callCount)
 	}
 	stats := result.Run.Stats()
-	if stats.ModelCalls != 2 || stats.ToolCalls != 1 || stats.SuccessfulToolCalls != 1 || stats.FailedToolCalls != 0 || stats.StepCount != 4 {
+	if stats.ModelCalls != 2 || stats.ToolCalls != 1 || stats.SuccessfulToolCalls != 1 || stats.FailedToolCalls != 0 || stats.StepCount != 4 || stats.PromptTokens != 30 || stats.CompletionTokens != 12 || stats.EmbeddingTokens != 7 || stats.TotalTokens != 49 {
 		t.Fatalf("run stats = %#v, want two model calls, one successful tool and four steps", stats)
 	}
 }

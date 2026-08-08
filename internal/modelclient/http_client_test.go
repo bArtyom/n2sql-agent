@@ -98,7 +98,7 @@ func TestHTTPClientEmbedsTexts(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[{"index":0,"embedding":[0.1,0.2]},{"index":1,"embedding":[0.3,0.4]}]}`))
+		_, _ = w.Write([]byte(`{"data":[{"index":0,"embedding":[0.1,0.2]},{"index":1,"embedding":[0.3,0.4]}],"usage":{"prompt_tokens":7,"total_tokens":7}}`))
 	}))
 	defer server.Close()
 
@@ -112,6 +112,9 @@ func TestHTTPClientEmbedsTexts(t *testing.T) {
 	}
 	if len(response.Data) != 2 {
 		t.Fatalf("embedding count = %d, want 2", len(response.Data))
+	}
+	if response.Usage == nil || response.Usage.PromptTokens != 7 || response.Usage.TotalTokens != 7 {
+		t.Fatalf("embedding usage = %#v, want prompt=7 total=7", response.Usage)
 	}
 	if response.Data[0].Index != 0 || len(response.Data[0].Vector) != 2 {
 		t.Fatalf("first embedding = %#v", response.Data[0])
@@ -152,7 +155,7 @@ func TestHTTPClientCompletesChat(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"OK"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"OK"}}],"usage":{"prompt_tokens":11,"completion_tokens":3,"total_tokens":14}}`))
 	}))
 	defer server.Close()
 
@@ -170,6 +173,9 @@ func TestHTTPClientCompletesChat(t *testing.T) {
 	}
 	if response.Message != "OK" {
 		t.Fatalf("message = %q, want %q", response.Message, "OK")
+	}
+	if response.Usage == nil || response.Usage.PromptTokens != 11 || response.Usage.CompletionTokens != 3 || response.Usage.TotalTokens != 14 {
+		t.Fatalf("chat usage = %#v, want prompt=11 completion=3 total=14", response.Usage)
 	}
 }
 

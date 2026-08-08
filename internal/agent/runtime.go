@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
 var (
@@ -65,21 +67,27 @@ type Step struct {
 
 // AgentRun tracks one complete execution of an Agent.
 type AgentRun struct {
-	id           string
-	status       RunStatus
-	finalAnswer  string
-	errorMessage string
-	steps        []Step
-	startedAt    time.Time
-	finishedAt   time.Time
-	modelCalls   int
-	toolCalls    int
-	successTools int
-	failedTools  int
-	failure      FailureCategory
+	id               string
+	status           RunStatus
+	finalAnswer      string
+	errorMessage     string
+	steps            []Step
+	startedAt        time.Time
+	finishedAt       time.Time
+	modelCalls       int
+	toolCalls        int
+	successTools     int
+	failedTools      int
+	promptTokens     int
+	completionTokens int
+	embeddingTokens  int
+	totalTokens      int
+	failure          FailureCategory
 }
 
-// RunStats is a safe, bounded summary of one Agent execution.
+// RunStats is a safe, bounded summary of one Agent execution. PromptTokens
+// and CompletionTokens describe chat calls; EmbeddingTokens is kept separate,
+// while TotalTokens is the sum of all reported chat and embedding tokens.
 type RunStats struct {
 	Status              RunStatus       `json:"status"`
 	StartedAt           time.Time       `json:"started_at"`
@@ -90,6 +98,10 @@ type RunStats struct {
 	ToolCalls           int             `json:"tool_calls"`
 	SuccessfulToolCalls int             `json:"successful_tool_calls"`
 	FailedToolCalls     int             `json:"failed_tool_calls"`
+	PromptTokens        int             `json:"prompt_tokens"`
+	CompletionTokens    int             `json:"completion_tokens"`
+	EmbeddingTokens     int             `json:"embedding_tokens"`
+	TotalTokens         int             `json:"total_tokens"`
 	FailureCategory     FailureCategory `json:"failure_category,omitempty"`
 }
 
@@ -202,6 +214,26 @@ func (r *AgentRun) RecordToolCall(success bool) error {
 	return nil
 }
 
+// ObserveChatTokens adds provider-reported chat usage to this running Agent.
+func (r *AgentRun) ObserveChatTokens(tokenUsage usage.TokenUsage) {
+	if r == nil || r.status != RunRunning {
+		return
+	}
+	r.promptTokens += nonNegative(tokenUsage.PromptTokens)
+	r.completionTokens += nonNegative(tokenUsage.CompletionTokens)
+	r.totalTokens += tokenUsage.EffectiveTotal()
+}
+
+// ObserveEmbeddingTokens adds provider-reported embedding usage to this run.
+func (r *AgentRun) ObserveEmbeddingTokens(tokenUsage usage.TokenUsage) {
+	if r == nil || r.status != RunRunning {
+		return
+	}
+	total := tokenUsage.EffectiveTotal()
+	r.embeddingTokens += total
+	r.totalTokens += total
+}
+
 func (r *AgentRun) Stats() RunStats {
 	if r == nil {
 		return RunStats{}
@@ -224,6 +256,10 @@ func (r *AgentRun) Stats() RunStats {
 		ToolCalls:           r.toolCalls,
 		SuccessfulToolCalls: r.successTools,
 		FailedToolCalls:     r.failedTools,
+		PromptTokens:        r.promptTokens,
+		CompletionTokens:    r.completionTokens,
+		EmbeddingTokens:     r.embeddingTokens,
+		TotalTokens:         r.totalTokens,
 		FailureCategory:     r.failure,
 	}
 }
@@ -271,4 +307,11 @@ func validFailureCategory(category FailureCategory) bool {
 	default:
 		return false
 	}
+}
+
+func nonNegative(value int) int {
+	if value < 0 {
+		return 0
+	}
+	return value
 }

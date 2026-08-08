@@ -61,10 +61,17 @@ func (s agentEventAnswererStub) AnswerWithEvents(_ context.Context, _ int64, req
 			CreatedAt: time.Date(2026, time.August, 7, 0, 0, 1, 0, time.UTC),
 		},
 		{
-			ID:        "event-3",
-			RunID:     "run-1",
-			Type:      agent.EventRunFinished,
-			Data:      map[string]any{"answer": s.answer},
+			ID:    "event-3",
+			RunID: "run-1",
+			Type:  agent.EventRunFinished,
+			Data: map[string]any{
+				"answer": s.answer,
+				"stats": agent.RunStats{
+					Status:          agent.RunSucceeded,
+					TotalTokens:     42,
+					EmbeddingTokens: 7,
+				},
+			},
 			CreatedAt: time.Date(2026, time.August, 7, 0, 0, 2, 0, time.UTC),
 		},
 	} {
@@ -129,6 +136,9 @@ func TestKnowledgeBaseAgentChatStreamWritesAgentEvents(t *testing.T) {
 	}
 	if !strings.Contains(body, `"answer":"最终答案"`) {
 		t.Fatalf("body = %q, want final answer event data", body)
+	}
+	if !strings.Contains(body, `"total_tokens":42`) || !strings.Contains(body, `"embedding_tokens":7`) {
+		t.Fatalf("body = %q, want token usage in run_finished event", body)
 	}
 	if strings.Contains(body, "event: done\n") {
 		t.Fatal("agent stream must use run_finished instead of done")

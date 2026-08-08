@@ -11,6 +11,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
 	"github.com/bArtyom/n2sql-agent/internal/security"
+	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
 var (
@@ -91,6 +92,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 	if err := run.Start(); err != nil {
 		return Result{Run: run}, err
 	}
+	ctx = usage.WithObserver(ctx, run)
 
 	result := Result{Run: run}
 	emitter := newEventEmitter(runID, sink)
@@ -116,6 +118,9 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				return finishErrorWithEvents(result, stepErr, emitter)
 			}
 			return finishErrorWithCategory(result, err, agent.FailureModel, emitter)
+		}
+		if response.Usage != nil {
+			run.ObserveChatTokens(*response.Usage)
 		}
 		if err := run.AddStep(agent.Step{Kind: agent.StepModelDecision, Status: agent.StepSucceeded}); err != nil {
 			return finishErrorWithEvents(result, err, emitter)

@@ -29,14 +29,21 @@ func TestEvaluateReportsPassRateAndRuntimeMetrics(t *testing.T) {
 		StepCount:           4,
 		ToolCalls:           1,
 		SuccessfulToolCalls: 1,
+		PromptTokens:        11,
+		CompletionTokens:    3,
+		EmbeddingTokens:     7,
+		TotalTokens:         21,
 	}
 	failedStats := agent.RunStats{
-		Status:          agent.RunFailed,
-		DurationMS:      20,
-		StepCount:       2,
-		ToolCalls:       1,
-		FailedToolCalls: 1,
-		FailureCategory: agent.FailureTool,
+		Status:           agent.RunFailed,
+		DurationMS:       20,
+		StepCount:        2,
+		ToolCalls:        1,
+		FailedToolCalls:  1,
+		PromptTokens:     5,
+		CompletionTokens: 2,
+		TotalTokens:      7,
+		FailureCategory:  agent.FailureTool,
 	}
 	answerer := &answererStub{
 		responses: []agentservice.Response{
@@ -64,6 +71,9 @@ func TestEvaluateReportsPassRateAndRuntimeMetrics(t *testing.T) {
 	}
 	if report.ToolSuccessRate != 0.5 {
 		t.Fatalf("tool success rate = %v, want 0.5", report.ToolSuccessRate)
+	}
+	if report.PromptTokens != 16 || report.CompletionTokens != 5 || report.EmbeddingTokens != 7 || report.TotalTokens != 28 {
+		t.Fatalf("report token metrics = %#v, want prompt=16 completion=5 embedding=7 total=28", report)
 	}
 	if report.FailureCategories[string(agent.FailureTool)] != 1 {
 		t.Fatalf("failure categories = %#v, want one tool failure", report.FailureCategories)

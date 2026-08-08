@@ -8,6 +8,7 @@ import (
 
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
+	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
 type embeddingStub struct {
@@ -17,8 +18,19 @@ type embeddingStub struct {
 func (s *embeddingStub) Embed(_ context.Context, input []string) (modelclient.EmbeddingResponse, error) {
 	s.input = input
 	return modelclient.EmbeddingResponse{
-		Data: []modelclient.Embedding{{Index: 0, Vector: []float32{0.1, 0.2}}},
+		Data:  []modelclient.Embedding{{Index: 0, Vector: []float32{0.1, 0.2}}},
+		Usage: &modelclient.TokenUsage{PromptTokens: 7, TotalTokens: 7},
 	}, nil
+}
+
+type usageObserverStub struct {
+	embedding usage.TokenUsage
+}
+
+func (s *usageObserverStub) ObserveChatTokens(usage.TokenUsage) {}
+
+func (s *usageObserverStub) ObserveEmbeddingTokens(value usage.TokenUsage) {
+	s.embedding = value
 }
 
 type chunkStoreStub struct {
@@ -51,6 +63,18 @@ func TestServiceEmbedsQueryAndSearchesKnowledgeBase(t *testing.T) {
 	}
 	if store.knowledgeBaseID != 7 || store.limit != 5 || len(store.embedding) != 2 || store.embedding[1] != 0.2 {
 		t.Fatalf("search arguments = %#v", store)
+	}
+}
+
+func TestServiceReportsEmbeddingUsageToContextObserver(t *testing.T) {
+	observer := &usageObserverStub{}
+	service := retrieval.NewService(&embeddingStub{}, &chunkStoreStub{})
+
+	if _, err := service.Search(usage.WithObserver(context.Background(), observer), 7, "问题", 5); err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if observer.embedding.PromptTokens != 7 || observer.embedding.TotalTokens != 7 {
+		t.Fatalf("embedding usage = %#v, want prompt=7 total=7", observer.embedding)
 	}
 }
 

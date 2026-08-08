@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
+	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
 func TestAgentRunStartsAndCompletes(t *testing.T) {
@@ -45,6 +46,8 @@ func TestAgentRunTracksRuntimeStats(t *testing.T) {
 	if err := run.RecordModelCall(); err != nil {
 		t.Fatalf("RecordModelCall() error = %v", err)
 	}
+	run.ObserveChatTokens(usage.TokenUsage{PromptTokens: 11, CompletionTokens: 3, TotalTokens: 14})
+	run.ObserveEmbeddingTokens(usage.TokenUsage{PromptTokens: 7, TotalTokens: 7})
 	if err := run.RecordToolCall(true); err != nil {
 		t.Fatalf("RecordToolCall(success) error = %v", err)
 	}
@@ -56,7 +59,7 @@ func TestAgentRunTracksRuntimeStats(t *testing.T) {
 	}
 
 	stats := run.Stats()
-	if stats.Status != agent.RunSucceeded || stats.ModelCalls != 1 || stats.ToolCalls != 2 || stats.SuccessfulToolCalls != 1 || stats.FailedToolCalls != 1 || stats.FailureCategory != "" {
+	if stats.Status != agent.RunSucceeded || stats.ModelCalls != 1 || stats.ToolCalls != 2 || stats.SuccessfulToolCalls != 1 || stats.FailedToolCalls != 1 || stats.PromptTokens != 11 || stats.CompletionTokens != 3 || stats.EmbeddingTokens != 7 || stats.TotalTokens != 21 || stats.FailureCategory != "" {
 		t.Fatalf("stats = %#v, want completed call counts", stats)
 	}
 	if stats.StartedAt.IsZero() || stats.FinishedAt.IsZero() || stats.FinishedAt.Before(stats.StartedAt) {

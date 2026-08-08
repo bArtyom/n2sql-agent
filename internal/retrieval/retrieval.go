@@ -8,6 +8,7 @@ import (
 
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
+	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
 var (
@@ -58,6 +59,9 @@ func (s *Service) Search(ctx context.Context, knowledgeBaseID int64, query strin
 	response, err := s.embedder.Embed(ctx, []string{query})
 	if err != nil {
 		return nil, fmt.Errorf("embed search query: %w", err)
+	}
+	if observer := usage.ObserverFromContext(ctx); observer != nil && response.Usage != nil {
+		observer.ObserveEmbeddingTokens(*response.Usage)
 	}
 	if len(response.Data) != 1 || len(response.Data[0].Vector) == 0 {
 		return nil, errors.New("embedding response does not contain one non-empty query vector")
