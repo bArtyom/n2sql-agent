@@ -34,6 +34,56 @@ func TestAgentRunStartsAndCompletes(t *testing.T) {
 	}
 }
 
+func TestAgentRunTracksRuntimeStats(t *testing.T) {
+	run, err := agent.NewAgentRun("run-stats")
+	if err != nil {
+		t.Fatalf("NewAgentRun() error = %v", err)
+	}
+	if err := run.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if err := run.RecordModelCall(); err != nil {
+		t.Fatalf("RecordModelCall() error = %v", err)
+	}
+	if err := run.RecordToolCall(true); err != nil {
+		t.Fatalf("RecordToolCall(success) error = %v", err)
+	}
+	if err := run.RecordToolCall(false); err != nil {
+		t.Fatalf("RecordToolCall(failure) error = %v", err)
+	}
+	if err := run.Complete("答案"); err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+
+	stats := run.Stats()
+	if stats.Status != agent.RunSucceeded || stats.ModelCalls != 1 || stats.ToolCalls != 2 || stats.SuccessfulToolCalls != 1 || stats.FailedToolCalls != 1 || stats.FailureCategory != "" {
+		t.Fatalf("stats = %#v, want completed call counts", stats)
+	}
+	if stats.StartedAt.IsZero() || stats.FinishedAt.IsZero() || stats.FinishedAt.Before(stats.StartedAt) {
+		t.Fatalf("stats timestamps = %#v, want ordered timestamps", stats)
+	}
+	if stats.DurationMS < 0 || stats.DurationMS > 60_000 {
+		t.Fatalf("stats duration = %dms, want a recent non-negative duration", stats.DurationMS)
+	}
+
+	failedRun, err := agent.NewAgentRun("run-stats-failed")
+	if err != nil {
+		t.Fatalf("NewAgentRun() failed run error = %v", err)
+	}
+	if err := failedRun.Start(); err != nil {
+		t.Fatalf("failed run Start() error = %v", err)
+	}
+	if err := failedRun.SetFailureCategory(agent.FailureTool); err != nil {
+		t.Fatalf("failed run SetFailureCategory() error = %v", err)
+	}
+	if err := failedRun.Fail(errors.New("tool failed")); err != nil {
+		t.Fatalf("failed run Fail() error = %v", err)
+	}
+	if got := failedRun.Stats().FailureCategory; got != agent.FailureTool {
+		t.Fatalf("failed run failure category = %q, want %q", got, agent.FailureTool)
+	}
+}
+
 func TestAgentRunRejectsInvalidLifecycleTransitions(t *testing.T) {
 	if _, err := agent.NewAgentRun("  "); !errors.Is(err, agent.ErrInvalidRunID) {
 		t.Fatalf("NewAgentRun() error = %v, want %v", err, agent.ErrInvalidRunID)

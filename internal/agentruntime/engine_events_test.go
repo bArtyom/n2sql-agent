@@ -31,6 +31,14 @@ func TestEngineRunWithEventsEmitsDirectAnswerLifecycle(t *testing.T) {
 		t.Fatalf("run status = %s, want succeeded", result.Run.Status())
 	}
 	assertEventTypes(t, events, agent.EventRunStarted, agent.EventMessageDelta, agent.EventRunFinished)
+	finishedData, ok := events[len(events)-1].Data.(map[string]any)
+	if !ok {
+		t.Fatalf("run_finished data = %#v", events[len(events)-1].Data)
+	}
+	stats, ok := finishedData["stats"].(agent.RunStats)
+	if !ok || stats.ModelCalls != 1 || stats.Status != agent.RunSucceeded {
+		t.Fatalf("run_finished stats = %#v, want one successful model call", finishedData["stats"])
+	}
 	for _, event := range events {
 		if event.RunID != "run-events" || event.ID == "" {
 			t.Fatalf("event identity = %#v", event)
@@ -152,7 +160,7 @@ func TestEngineRunWithEventsEmitsFailureAndCancellation(t *testing.T) {
 		t.Fatalf("NewEngine() error = %v", err)
 	}
 	var modelFailureEvents []agent.Event
-	_, err = modelEngine.RunWithEvents(context.Background(), "run-model-failed-events", []modelclient.ChatMessage{{Role: "user", Content: "问题"}}, func(event agent.Event) error {
+	modelResult, err := modelEngine.RunWithEvents(context.Background(), "run-model-failed-events", []modelclient.ChatMessage{{Role: "user", Content: "问题"}}, func(event agent.Event) error {
 		modelFailureEvents = append(modelFailureEvents, event)
 		return nil
 	})
@@ -160,6 +168,9 @@ func TestEngineRunWithEventsEmitsFailureAndCancellation(t *testing.T) {
 		t.Fatalf("RunWithEvents() error = %v, want model error", err)
 	}
 	assertEventTypes(t, modelFailureEvents, agent.EventRunStarted, agent.EventRunFailed)
+	if got := modelResult.Run.Stats().FailureCategory; got != agent.FailureModel {
+		t.Fatalf("model failure category = %q, want %q", got, agent.FailureModel)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

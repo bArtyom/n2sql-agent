@@ -107,6 +107,9 @@ func TestServiceAnswersUsingScopedKnowledgeSearchTool(t *testing.T) {
 	if response.Answer != "年假按照公司制度执行。" || response.Status != agent.RunSucceeded || response.RunID == "" {
 		t.Fatalf("response = %#v", response)
 	}
+	if response.Stats == nil || response.Stats.ModelCalls != 2 || response.Stats.ToolCalls != 1 || response.Stats.SuccessfulToolCalls != 1 {
+		t.Fatalf("response stats = %#v, want model/tool runtime metrics", response.Stats)
+	}
 	if searcher.knowledgeBaseID != 7 || searcher.query != "年假" {
 		t.Fatalf("search request = %#v", searcher)
 	}
@@ -363,12 +366,19 @@ func assertEventTypes(t *testing.T, events []agent.Event, want ...agent.EventTyp
 
 func extractUntrustedToolResult(t *testing.T, content string) string {
 	t.Helper()
-	const startMarker = "<untrusted_tool_result>\n"
-	const endMarker = "\n</untrusted_tool_result>"
-	start := strings.Index(content, startMarker)
-	end := strings.LastIndex(content, endMarker)
-	if start < 0 || end < start+len(startMarker) {
-		t.Fatalf("tool content = %q, want untrusted result markers", content)
+	const prefix = "UNTRUSTED_TOOL_RESULT\n"
+	if !strings.HasPrefix(content, prefix) {
+		t.Fatalf("tool content = %q, want structured untrusted result prefix", content)
 	}
-	return content[start+len(startMarker) : end]
+	var envelope struct {
+		Trusted bool   `json:"trusted"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(content, prefix)), &envelope); err != nil {
+		t.Fatalf("tool content = %q, want valid JSON envelope: %v", content, err)
+	}
+	if envelope.Trusted {
+		t.Fatalf("tool content = %q, want trusted=false", content)
+	}
+	return envelope.Content
 }

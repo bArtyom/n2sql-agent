@@ -4,13 +4,15 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 var (
-	ErrInvalidRunID         = errors.New("invalid agent run ID")
-	ErrInvalidRunTransition = errors.New("invalid agent run transition")
-	ErrMissingRunError      = errors.New("agent run error is required")
-	ErrInvalidStep          = errors.New("invalid agent step")
+	ErrInvalidRunID           = errors.New("invalid agent run ID")
+	ErrInvalidRunTransition   = errors.New("invalid agent run transition")
+	ErrMissingRunError        = errors.New("agent run error is required")
+	ErrInvalidStep            = errors.New("invalid agent step")
+	ErrInvalidFailureCategory = errors.New("invalid agent failure category")
 )
 
 type RunStatus string
@@ -40,6 +42,19 @@ const (
 	StepFailed    StepStatus = "failed"
 )
 
+type FailureCategory string
+
+const (
+	FailureNone       FailureCategory = ""
+	FailureModel      FailureCategory = "model_failed"
+	FailureTool       FailureCategory = "tool_failed"
+	FailureTimeout    FailureCategory = "timeout"
+	FailureCanceled   FailureCategory = "canceled"
+	FailureStepLimit  FailureCategory = "step_limit_exceeded"
+	FailureValidation FailureCategory = "validation_failed"
+	FailureInternal   FailureCategory = "internal_failed"
+)
+
 // Step records one observable unit in an Agent run.
 type Step struct {
 	Number   int        `json:"number"`
@@ -55,6 +70,27 @@ type AgentRun struct {
 	finalAnswer  string
 	errorMessage string
 	steps        []Step
+	startedAt    time.Time
+	finishedAt   time.Time
+	modelCalls   int
+	toolCalls    int
+	successTools int
+	failedTools  int
+	failure      FailureCategory
+}
+
+// RunStats is a safe, bounded summary of one Agent execution.
+type RunStats struct {
+	Status              RunStatus       `json:"status"`
+	StartedAt           time.Time       `json:"started_at"`
+	FinishedAt          time.Time       `json:"finished_at"`
+	DurationMS          int64           `json:"duration_ms"`
+	StepCount           int             `json:"step_count"`
+	ModelCalls          int             `json:"model_calls"`
+	ToolCalls           int             `json:"tool_calls"`
+	SuccessfulToolCalls int             `json:"successful_tool_calls"`
+	FailedToolCalls     int             `json:"failed_tool_calls"`
+	FailureCategory     FailureCategory `json:"failure_category,omitempty"`
 }
 
 func NewAgentRun(id string) (*AgentRun, error) {
@@ -91,6 +127,7 @@ func (r *AgentRun) Start() error {
 		return fmt.Errorf("%w: start from %s", ErrInvalidRunTransition, r.status)
 	}
 	r.status = RunRunning
+	r.startedAt = time.Now().UTC()
 	return nil
 }
 
@@ -100,6 +137,7 @@ func (r *AgentRun) Complete(answer string) error {
 	}
 	r.status = RunSucceeded
 	r.finalAnswer = answer
+	r.finishedAt = time.Now().UTC()
 	return nil
 }
 
@@ -112,6 +150,10 @@ func (r *AgentRun) Fail(err error) error {
 	}
 	r.status = RunFailed
 	r.errorMessage = err.Error()
+	if r.failure == FailureNone {
+		r.failure = FailureInternal
+	}
+	r.finishedAt = time.Now().UTC()
 	return nil
 }
 
@@ -121,7 +163,69 @@ func (r *AgentRun) Cancel(reason string) error {
 	}
 	r.status = RunCanceled
 	r.errorMessage = reason
+	if r.failure == FailureNone {
+		r.failure = FailureCanceled
+	}
+	r.finishedAt = time.Now().UTC()
 	return nil
+}
+
+func (r *AgentRun) SetFailureCategory(category FailureCategory) error {
+	if r.status != RunRunning {
+		return fmt.Errorf("%w: set failure category from %s", ErrInvalidRunTransition, r.status)
+	}
+	if !validFailureCategory(category) {
+		return ErrInvalidFailureCategory
+	}
+	r.failure = category
+	return nil
+}
+
+func (r *AgentRun) RecordModelCall() error {
+	if r.status != RunRunning {
+		return fmt.Errorf("%w: record model call from %s", ErrInvalidRunTransition, r.status)
+	}
+	r.modelCalls++
+	return nil
+}
+
+func (r *AgentRun) RecordToolCall(success bool) error {
+	if r.status != RunRunning {
+		return fmt.Errorf("%w: record tool call from %s", ErrInvalidRunTransition, r.status)
+	}
+	r.toolCalls++
+	if success {
+		r.successTools++
+	} else {
+		r.failedTools++
+	}
+	return nil
+}
+
+func (r *AgentRun) Stats() RunStats {
+	if r == nil {
+		return RunStats{}
+	}
+	finishedAt := r.finishedAt
+	if r.status == RunRunning {
+		finishedAt = time.Now().UTC()
+	}
+	var durationMS int64
+	if !r.startedAt.IsZero() && !finishedAt.IsZero() && finishedAt.After(r.startedAt) {
+		durationMS = finishedAt.Sub(r.startedAt).Milliseconds()
+	}
+	return RunStats{
+		Status:              r.status,
+		StartedAt:           r.startedAt,
+		FinishedAt:          finishedAt,
+		DurationMS:          durationMS,
+		StepCount:           len(r.steps),
+		ModelCalls:          r.modelCalls,
+		ToolCalls:           r.toolCalls,
+		SuccessfulToolCalls: r.successTools,
+		FailedToolCalls:     r.failedTools,
+		FailureCategory:     r.failure,
+	}
 }
 
 func (r *AgentRun) AddStep(step Step) error {
@@ -154,6 +258,15 @@ func validStepKind(kind StepKind) bool {
 func validStepStatus(status StepStatus) bool {
 	switch status {
 	case StepPending, StepRunning, StepSucceeded, StepFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func validFailureCategory(category FailureCategory) bool {
+	switch category {
+	case FailureNone, FailureModel, FailureTool, FailureTimeout, FailureCanceled, FailureStepLimit, FailureValidation, FailureInternal:
 		return true
 	default:
 		return false
