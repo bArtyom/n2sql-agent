@@ -262,7 +262,10 @@ func NewKnowledgeSearchRegistry(searcher retrieval.Searcher) (*ToolRegistry, err
 	if searcher == nil {
 		return nil, ErrKnowledgeSearcherUnavailable
 	}
-	registry := NewToolRegistry()
+	registry, err := NewToolRegistryWithAllowlist("knowledge_search")
+	if err != nil {
+		return nil, fmt.Errorf("create knowledge search allowlist: %w", err)
+	}
 	if err := registry.Register(NewKnowledgeSearchTool(searcher)); err != nil {
 		return nil, fmt.Errorf("register knowledge search tool: %w", err)
 	}
@@ -278,7 +281,10 @@ func NewKnowledgeSearchRegistryForKnowledgeBaseWithMaxBytes(searcher retrieval.S
 	if err != nil {
 		return nil, err
 	}
-	registry := NewToolRegistry()
+	registry, err := NewToolRegistryWithAllowlist("knowledge_search")
+	if err != nil {
+		return nil, fmt.Errorf("create scoped knowledge search allowlist: %w", err)
+	}
 	if err := registry.Register(tool); err != nil {
 		return nil, fmt.Errorf("register scoped knowledge search tool: %w", err)
 	}

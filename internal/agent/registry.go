@@ -12,7 +12,9 @@ import (
 var (
 	ErrInvalidTool           = errors.New("invalid tool")
 	ErrInvalidToolParameters = errors.New("invalid tool parameters")
+	ErrInvalidToolAllowlist  = errors.New("invalid tool allowlist")
 	ErrToolAlreadyRegistered = errors.New("tool already registered")
+	ErrToolNotAllowed        = errors.New("tool not allowed")
 	ErrToolNotFound          = errors.New("tool not found")
 )
 
@@ -39,11 +41,30 @@ type FunctionDefinition struct {
 
 // ToolRegistry stores the tools exposed to an Agent.
 type ToolRegistry struct {
-	tools map[string]Tool
+	tools        map[string]Tool
+	allowedTools map[string]struct{}
 }
 
 func NewToolRegistry() *ToolRegistry {
 	return &ToolRegistry{tools: make(map[string]Tool)}
+}
+
+// NewToolRegistryWithAllowlist creates a registry that only accepts the named
+// tools. An empty allowlist is valid and creates a deny-all registry. The
+// unrestricted NewToolRegistry remains available for low-level callers that
+// intentionally assemble their own complete tool set.
+func NewToolRegistryWithAllowlist(toolNames ...string) (*ToolRegistry, error) {
+	allowedTools := make(map[string]struct{}, len(toolNames))
+	for _, name := range toolNames {
+		if name == "" || strings.TrimSpace(name) != name {
+			return nil, fmt.Errorf("%w: %q", ErrInvalidToolAllowlist, name)
+		}
+		allowedTools[name] = struct{}{}
+	}
+	return &ToolRegistry{
+		tools:        make(map[string]Tool),
+		allowedTools: allowedTools,
+	}, nil
 }
 
 func (r *ToolRegistry) Register(tool Tool) error {
@@ -53,6 +74,9 @@ func (r *ToolRegistry) Register(tool Tool) error {
 	name := tool.Name()
 	if name == "" || strings.TrimSpace(name) != name {
 		return ErrInvalidTool
+	}
+	if !r.isAllowed(name) {
+		return fmt.Errorf("%w: %s", ErrToolNotAllowed, name)
 	}
 	if !validFunctionParameters(tool.Parameters()) {
 		return fmt.Errorf("%w: %s", ErrInvalidToolParameters, name)
@@ -73,11 +97,22 @@ func (r *ToolRegistry) Get(name string) (Tool, bool) {
 }
 
 func (r *ToolRegistry) Find(name string) (Tool, error) {
+	if !r.isAllowed(name) {
+		return nil, fmt.Errorf("%w: %s", ErrToolNotAllowed, name)
+	}
 	tool, ok := r.Get(name)
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrToolNotFound, name)
 	}
 	return tool, nil
+}
+
+func (r *ToolRegistry) isAllowed(name string) bool {
+	if r == nil || r.allowedTools == nil {
+		return r != nil
+	}
+	_, ok := r.allowedTools[name]
+	return ok
 }
 
 func (r *ToolRegistry) List() []Tool {

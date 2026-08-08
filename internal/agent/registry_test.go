@@ -68,6 +68,39 @@ func TestToolRegistryRejectsDuplicateTool(t *testing.T) {
 	}
 }
 
+func TestToolRegistryWithAllowlistRejectsUnapprovedTool(t *testing.T) {
+	registry, err := agent.NewToolRegistryWithAllowlist("knowledge_search")
+	if err != nil {
+		t.Fatalf("NewToolRegistryWithAllowlist() error = %v", err)
+	}
+
+	if err := registry.Register(stubTool{name: "knowledge_search"}); err != nil {
+		t.Fatalf("Register() approved tool error = %v", err)
+	}
+	if err := registry.Register(stubTool{name: "document_delete"}); !errors.Is(err, agent.ErrToolNotAllowed) {
+		t.Fatalf("Register() unapproved tool error = %v, want %v", err, agent.ErrToolNotAllowed)
+	}
+	if _, err := registry.Find("document_delete"); !errors.Is(err, agent.ErrToolNotAllowed) {
+		t.Fatalf("Find() unapproved tool error = %v, want %v", err, agent.ErrToolNotAllowed)
+	}
+}
+
+func TestToolRegistryWithAllowlistValidatesNamesAndDefaultsToDenyAll(t *testing.T) {
+	for _, name := range []string{"", "  ", " knowledge_search", "knowledge_search "} {
+		if _, err := agent.NewToolRegistryWithAllowlist(name); !errors.Is(err, agent.ErrInvalidToolAllowlist) {
+			t.Fatalf("NewToolRegistryWithAllowlist(%q) error = %v, want %v", name, err, agent.ErrInvalidToolAllowlist)
+		}
+	}
+
+	registry, err := agent.NewToolRegistryWithAllowlist()
+	if err != nil {
+		t.Fatalf("NewToolRegistryWithAllowlist() error = %v", err)
+	}
+	if err := registry.Register(stubTool{name: "knowledge_search"}); !errors.Is(err, agent.ErrToolNotAllowed) {
+		t.Fatalf("Register() in deny-all registry error = %v, want %v", err, agent.ErrToolNotAllowed)
+	}
+}
+
 func TestToolRegistryRejectsInvalidTool(t *testing.T) {
 	cases := []struct {
 		name string

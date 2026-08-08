@@ -18,6 +18,18 @@ type searcherStub struct {
 	content         string
 }
 
+type registryProbeTool struct{}
+
+func (registryProbeTool) Name() string { return "document_delete" }
+
+func (registryProbeTool) Description() string { return "删除文档" }
+
+func (registryProbeTool) Parameters() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+
+func (registryProbeTool) Call(context.Context, json.RawMessage) (agent.ToolResult, error) {
+	return agent.ToolResult{Content: "ok"}, nil
+}
+
 func (s *searcherStub) Search(_ context.Context, knowledgeBaseID int64, query string, limit int) ([]retrieval.Result, error) {
 	s.knowledgeBaseID = knowledgeBaseID
 	s.query = query
@@ -129,6 +141,32 @@ func TestNewKnowledgeSearchRegistryRegistersSearchTool(t *testing.T) {
 	}
 	if tool.Name() != "knowledge_search" {
 		t.Fatalf("registered tool name = %q, want knowledge_search", tool.Name())
+	}
+}
+
+func TestKnowledgeSearchRegistriesAllowOnlyKnowledgeSearch(t *testing.T) {
+	registries := []struct {
+		name   string
+		create func() (*agent.ToolRegistry, error)
+	}{
+		{name: "global", create: func() (*agent.ToolRegistry, error) {
+			return agent.NewKnowledgeSearchRegistry(&searcherStub{})
+		}},
+		{name: "scoped", create: func() (*agent.ToolRegistry, error) {
+			return agent.NewKnowledgeSearchRegistryForKnowledgeBase(&searcherStub{}, 7)
+		}},
+	}
+
+	for _, test := range registries {
+		t.Run(test.name, func(t *testing.T) {
+			registry, err := test.create()
+			if err != nil {
+				t.Fatalf("create registry error = %v", err)
+			}
+			if err := registry.Register(registryProbeTool{}); !errors.Is(err, agent.ErrToolNotAllowed) {
+				t.Fatalf("Register() unapproved tool error = %v, want %v", err, agent.ErrToolNotAllowed)
+			}
+		})
 	}
 }
 
