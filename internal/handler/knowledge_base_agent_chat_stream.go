@@ -7,6 +7,7 @@ import (
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
+	"github.com/bArtyom/n2sql-agent/internal/conversation"
 )
 
 func NewKnowledgeBaseAgentChatStream(answerer agentservice.EventAnswerer) http.Handler {
@@ -14,6 +15,10 @@ func NewKnowledgeBaseAgentChatStream(answerer agentservice.EventAnswerer) http.H
 }
 
 func NewKnowledgeBaseAgentChatStreamWithLimits(answerer agentservice.EventAnswerer, maxHistoryBytes int) http.Handler {
+	return NewKnowledgeBaseAgentChatStreamWithConversation(answerer, nil, maxHistoryBytes)
+}
+
+func NewKnowledgeBaseAgentChatStreamWithConversation(answerer agentservice.EventAnswerer, conversations *conversation.Service, maxHistoryBytes int) http.Handler {
 	if maxHistoryBytes <= 0 {
 		maxHistoryBytes = agent.DefaultMaxHistoryBytes
 	}
@@ -24,6 +29,10 @@ func NewKnowledgeBaseAgentChatStreamWithLimits(answerer agentservice.EventAnswer
 		}
 		knowledgeBaseID, request, ok := decodeKnowledgeBaseAgentChatRequest(w, r, maxHistoryBytes)
 		if !ok {
+			return
+		}
+		if err := loadConversationHistory(r.Context(), conversations, knowledgeBaseID, &request); err != nil {
+			writeKnowledgeBaseAgentChatError(w, err)
 			return
 		}
 		flusher, ok := w.(http.Flusher)
@@ -40,7 +49,8 @@ func NewKnowledgeBaseAgentChatStreamWithLimits(answerer agentservice.EventAnswer
 		emit := func(event agent.Event) error {
 			return writeAgentSSEEvent(w, flusher, string(event.Type), event)
 		}
-		if _, err := answerer.AnswerWithEvents(r.Context(), knowledgeBaseID, request, emit); err != nil {
+		response, err := answerer.AnswerWithEvents(r.Context(), knowledgeBaseID, request, emit)
+		if err != nil {
 			if r.Context().Err() != nil {
 				return
 			}
@@ -49,6 +59,18 @@ func NewKnowledgeBaseAgentChatStreamWithLimits(answerer agentservice.EventAnswer
 				Error string `json:"error"`
 			}{Error: message}); writeErr != nil {
 				log.Printf("agent SSE error event write failed: %v", writeErr)
+			}
+			return
+		}
+		if err := saveConversationExchange(r.Context(), conversations, request, response.Answer); err != nil {
+			if r.Context().Err() != nil {
+				return
+			}
+			message, _ := knowledgeBaseAgentChatError(err)
+			if writeErr := writeAgentSSEEvent(w, flusher, "error", struct {
+				Error string `json:"error"`
+			}{Error: message}); writeErr != nil {
+				log.Printf("agent SSE conversation save error event write failed: %v", writeErr)
 			}
 		}
 	})

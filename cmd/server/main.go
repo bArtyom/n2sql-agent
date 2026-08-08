@@ -13,6 +13,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/app"
 	"github.com/bArtyom/n2sql-agent/internal/config"
+	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
@@ -36,6 +37,7 @@ func main() {
 	defer db.Close()
 
 	providerStore := modelprovider.NewPostgresStore(db)
+	conversationService := conversation.NewService(conversation.NewPostgresStore(db))
 	knowledgeBaseStore := knowledgebase.NewPostgresStore(db)
 	documentStore := document.NewPostgresStore(db)
 	documentService := document.NewService(documentStore, document.NewLocalFileStore(cfg.UploadDir))
@@ -82,6 +84,7 @@ func main() {
 			StreamingAnswers:      answerService,
 			AgentAnswers:          agentAnswerService,
 			AgentStreamingAnswers: agentAnswerService,
+			Conversations:         conversationService,
 			AgentMaxHistoryBytes:  cfg.AgentMaxHistoryBytes,
 			APIKeyEnvVar:          cfg.ModelProviderAPIKeyEnvVar,
 		}),

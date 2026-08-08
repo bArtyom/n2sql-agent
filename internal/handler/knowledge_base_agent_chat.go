@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
+	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
 )
@@ -20,6 +22,10 @@ func NewKnowledgeBaseAgentChat(answerer agentservice.Answerer) http.Handler {
 }
 
 func NewKnowledgeBaseAgentChatWithLimits(answerer agentservice.Answerer, maxHistoryBytes int) http.Handler {
+	return NewKnowledgeBaseAgentChatWithConversation(answerer, nil, maxHistoryBytes)
+}
+
+func NewKnowledgeBaseAgentChatWithConversation(answerer agentservice.Answerer, conversations *conversation.Service, maxHistoryBytes int) http.Handler {
 	if maxHistoryBytes <= 0 {
 		maxHistoryBytes = agent.DefaultMaxHistoryBytes
 	}
@@ -32,9 +38,17 @@ func NewKnowledgeBaseAgentChatWithLimits(answerer agentservice.Answerer, maxHist
 		if !ok {
 			return
 		}
+		if err := loadConversationHistory(r.Context(), conversations, knowledgeBaseID, &request); err != nil {
+			writeKnowledgeBaseAgentChatError(w, err)
+			return
+		}
 
 		response, err := answerer.Answer(r.Context(), knowledgeBaseID, request)
 		if err != nil {
+			writeKnowledgeBaseAgentChatError(w, err)
+			return
+		}
+		if err := saveConversationExchange(r.Context(), conversations, request, response.Answer); err != nil {
 			writeKnowledgeBaseAgentChatError(w, err)
 			return
 		}
@@ -96,6 +110,10 @@ func knowledgeBaseAgentChatError(err error) (string, int) {
 	switch {
 	case errors.Is(err, agentservice.ErrInvalidRequest):
 		return "invalid agent chat request", http.StatusBadRequest
+	case errors.Is(err, conversation.ErrInvalidConversation), errors.Is(err, conversation.ErrInvalidKnowledgeBase), errors.Is(err, conversation.ErrInvalidMessage):
+		return "invalid conversation request", http.StatusBadRequest
+	case errors.Is(err, conversation.ErrNotFound):
+		return "conversation not found", http.StatusNotFound
 	case errors.Is(err, context.DeadlineExceeded):
 		return "agent chat timed out", http.StatusGatewayTimeout
 	case errors.Is(err, modelprovider.ErrNotFound):
@@ -105,4 +123,29 @@ func knowledgeBaseAgentChatError(err error) (string, int) {
 	default:
 		return "agent chat failed", http.StatusBadGateway
 	}
+}
+
+func loadConversationHistory(ctx context.Context, conversations *conversation.Service, knowledgeBaseID int64, request *agentservice.ChatRequest) error {
+	if request.ConversationID == 0 {
+		return nil
+	}
+	if conversations == nil {
+		return errors.New("conversation service is unavailable")
+	}
+	history, err := conversations.History(ctx, request.ConversationID, knowledgeBaseID)
+	if err != nil {
+		return fmt.Errorf("load conversation history: %w", err)
+	}
+	request.History = history
+	return nil
+}
+
+func saveConversationExchange(ctx context.Context, conversations *conversation.Service, request agentservice.ChatRequest, answer string) error {
+	if request.ConversationID == 0 || conversations == nil {
+		return nil
+	}
+	if err := conversations.SaveExchange(ctx, request.ConversationID, request.Message, answer); err != nil {
+		return fmt.Errorf("save conversation exchange: %w", err)
+	}
+	return nil
 }

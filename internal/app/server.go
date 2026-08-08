@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
+	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/handler"
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
@@ -26,6 +27,7 @@ type Dependencies struct {
 	StreamingAnswers      rag.StreamAnswerer
 	AgentAnswers          agentservice.Answerer
 	AgentStreamingAnswers agentservice.EventAnswerer
+	Conversations         *conversation.Service
 	AgentMaxHistoryBytes  int
 	APIKeyEnvVar          string
 }
@@ -43,6 +45,12 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("GET /api/knowledge-bases", knowledgeBaseHandler)
 		mux.Handle("POST /api/knowledge-bases", knowledgeBaseHandler)
 		mux.Handle("DELETE /api/knowledge-bases/{id}", knowledgeBaseHandler)
+	}
+	if dependencies.Conversations != nil {
+		conversationHandler := handler.NewConversations(dependencies.Conversations)
+		mux.Handle("POST /api/knowledge-bases/{id}/conversations", conversationHandler)
+		mux.Handle("GET /api/knowledge-bases/{id}/conversations", conversationHandler)
+		mux.Handle("GET /api/knowledge-bases/{id}/conversations/{conversationId}/messages", conversationHandler)
 	}
 	if dependencies.Documents != nil {
 		mux.Handle("POST /api/knowledge-bases/{id}/documents", handler.NewDocumentUpload(dependencies.Documents))
@@ -66,10 +74,10 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("POST /api/knowledge-bases/{id}/chat/stream", handler.NewKnowledgeBaseChatStream(dependencies.StreamingAnswers))
 	}
 	if dependencies.AgentAnswers != nil {
-		mux.Handle("POST /api/knowledge-bases/{id}/agent-chat", handler.NewKnowledgeBaseAgentChatWithLimits(dependencies.AgentAnswers, dependencies.AgentMaxHistoryBytes))
+		mux.Handle("POST /api/knowledge-bases/{id}/agent-chat", handler.NewKnowledgeBaseAgentChatWithConversation(dependencies.AgentAnswers, dependencies.Conversations, dependencies.AgentMaxHistoryBytes))
 	}
 	if dependencies.AgentStreamingAnswers != nil {
-		mux.Handle("POST /api/knowledge-bases/{id}/agent-chat/stream", handler.NewKnowledgeBaseAgentChatStreamWithLimits(dependencies.AgentStreamingAnswers, dependencies.AgentMaxHistoryBytes))
+		mux.Handle("POST /api/knowledge-bases/{id}/agent-chat/stream", handler.NewKnowledgeBaseAgentChatStreamWithConversation(dependencies.AgentStreamingAnswers, dependencies.Conversations, dependencies.AgentMaxHistoryBytes))
 	}
 
 	return mux

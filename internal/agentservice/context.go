@@ -14,8 +14,9 @@ type HistoryMessage struct {
 
 // ChatRequest contains the current question and an optional bounded conversation history.
 type ChatRequest struct {
-	Message string           `json:"message"`
-	History []HistoryMessage `json:"history,omitempty"`
+	Message        string           `json:"message"`
+	History        []HistoryMessage `json:"history,omitempty"`
+	ConversationID int64            `json:"conversation_id,omitempty"`
 }
 
 func buildHistoryMessages(history []HistoryMessage, maxMessages, maxBytes int) ([]modelclient.ChatMessage, error) {
