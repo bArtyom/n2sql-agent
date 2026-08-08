@@ -130,10 +130,16 @@ func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Conversa
 	var result Conversation
 	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO conversations (administrator_id, knowledge_base_id, title)
-		SELECT administrator_id, $1, $2 FROM system_settings WHERE id = 1
+		SELECT ss.administrator_id, kb.id, $2
+		FROM system_settings ss
+		JOIN knowledge_bases kb ON kb.administrator_id = ss.administrator_id
+		WHERE ss.id = 1 AND kb.id = $1
 		RETURNING id, knowledge_base_id, title, created_at, updated_at`, input.KnowledgeBaseID, input.Title).Scan(
 		&result.ID, &result.KnowledgeBaseID, &result.Title, &result.CreatedAt, &result.UpdatedAt,
 	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Conversation{}, ErrNotFound
+	}
 	if err != nil {
 		return Conversation{}, fmt.Errorf("create conversation: %w", err)
 	}

@@ -24,7 +24,6 @@ type ChatMessage = {
   status?: "streaming" | "done" | "error";
   activity?: string;
 };
-type AgentHistoryMessage = Pick<ChatMessage, "role" | "content">;
 type Conversation = { id: number; knowledgeBaseId: number; title: string; createdAt: string; updatedAt: string };
 type ConversationMessage = { id: number; conversationId: number; role: "user" | "assistant"; content: string; createdAt: string };
 type StreamPayload = {
@@ -75,11 +74,15 @@ const providerTesting = ref(false);
 const providerMessage = ref("");
 const providerMessageKind = ref<"idle" | "success" | "error">("idle");
 const providerForm = ref<ModelProvider>(emptyModelProvider());
+const conversationsLoading = ref(false);
+const conversationCreating = ref(false);
 let documentPollTimer: number | undefined;
-const maxClientHistoryMessages = 10;
 
 const selectedKnowledgeBase = computed(() =>
   knowledgeBases.value.find((item) => item.id === selectedKnowledgeBaseId.value) ?? null,
+);
+const selectedConversation = computed(() =>
+  conversations.value.find((item) => item.id === conversationId.value) ?? null,
 );
 const readyDocumentCount = computed(
   () => documents.value.filter((item) => item.processingStatus === "succeeded").length,
@@ -127,17 +130,6 @@ function mergeSources(existing: Source[], incoming: Source[]): Source[] {
     if (!merged.has(key)) merged.set(key, source);
   }
   return [...merged.values()];
-}
-
-function buildAgentHistory(): AgentHistoryMessage[] {
-  return messages.value
-    .filter((message) => {
-      if (!message.content.trim()) return false;
-      if (message.role === "user") return true;
-      return message.status === "done";
-    })
-    .slice(-maxClientHistoryMessages)
-    .map(({ role, content }) => ({ role, content }));
 }
 
 async function openProviderSettings() {
@@ -253,20 +245,43 @@ async function loadConversation() {
     messages.value = [];
     return;
   }
+  conversationsLoading.value = true;
   try {
     conversations.value = await requestJSON<Conversation[]>(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations`);
     const latest = conversations.value[0];
-    conversationId.value = latest?.id ?? null;
-    if (!latest) {
-      messages.value = [];
-      return;
-    }
-    const stored = await requestJSON<ConversationMessage[]>(
-      `/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations/${latest.id}/messages`,
-    );
-    messages.value = stored.map((message) => ({ role: message.role, content: message.content, status: "done" }));
+    await selectConversation(latest?.id ?? null);
   } catch (error) {
     showError(error);
+  } finally {
+    conversationsLoading.value = false;
+  }
+}
+
+async function selectConversation(id: number | null) {
+  conversationId.value = id;
+  messages.value = [];
+  if (!id || !selectedKnowledgeBaseId.value) return;
+  const stored = await requestJSON<ConversationMessage[]>(
+    `/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations/${id}/messages`,
+  );
+  messages.value = stored.map((message) => ({ role: message.role, content: message.content, status: "done" }));
+}
+
+async function createConversation() {
+  if (!selectedKnowledgeBaseId.value || conversationCreating.value || streaming.value) return;
+  conversationCreating.value = true;
+  try {
+    const created = await requestJSON<Conversation>(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "新对话" }),
+    });
+    conversations.value = [created, ...conversations.value];
+    await selectConversation(created.id);
+  } catch (error) {
+    showError(error);
+  } finally {
+    conversationCreating.value = false;
   }
 }
 
@@ -279,7 +294,7 @@ async function ensureConversation(title: string): Promise<number> {
     body: JSON.stringify({ title: title.slice(0, 80) }),
   });
   conversationId.value = created.id;
-  conversations.value = [created, ...conversations.value];
+  conversations.value = [created, ...conversations.value.filter((item) => item.id !== created.id)];
   return created.id;
 }
 
@@ -310,8 +325,11 @@ async function createKnowledgeBase() {
     newKnowledgeBaseName.value = "";
     newKnowledgeBaseDescription.value = "";
     messages.value = [];
+    conversations.value = [];
+    conversationId.value = null;
     documents.value = [];
     mobileRailOpen.value = false;
+    await loadConversation();
   } catch (error) {
     showError(error);
   } finally {
@@ -464,6 +482,14 @@ function consumeSSEBlock(block: string, answerIndex: number) {
         answer.content ||= dataString("answer") || payload.answer || "";
         answer.activity = "";
         answer.status = "done";
+        break;
+      case "conversation_saved":
+        answer.activity = "已保存到会话";
+        break;
+      case "conversation_save_failed":
+        answer.status = "error";
+        answer.activity = "";
+        answer.content += answer.content ? "\n\n（回答已生成，但保存会话失败）" : "回答已生成，但保存会话失败。";
         break;
       case "run_failed":
       case "error":
@@ -620,6 +646,29 @@ onUnmounted(() => window.clearInterval(documentPollTimer));
             <span class="panel-meta">STREAMING</span>
           </div>
           <div class="chat-intro"><span class="chat-spark">✦</span><div><strong>从资料里找答案</strong><p>回答会标记它引用的原始段落。</p></div></div>
+          <div class="conversation-bar">
+            <div class="conversation-current">
+              <span class="conversation-caption">当前会话</span>
+              <strong>{{ selectedConversation?.title || "还没有会话" }}</strong>
+            </div>
+            <button class="conversation-new" type="button" :disabled="conversationCreating || streaming || !selectedKnowledgeBase" @click="createConversation">
+              {{ conversationCreating ? "创建中…" : "+ 新对话" }}
+            </button>
+          </div>
+          <div v-if="conversations.length" class="conversation-list" aria-label="会话列表">
+            <button
+              v-for="item in conversations"
+              :key="item.id"
+              type="button"
+              class="conversation-item"
+              :class="{ 'conversation-item--active': item.id === conversationId }"
+              :disabled="conversationsLoading || streaming"
+              @click="selectConversation(item.id)"
+            >
+              <span>{{ item.title }}</span>
+              <small>{{ new Date(item.updatedAt).toLocaleDateString("zh-CN") }}</small>
+            </button>
+          </div>
           <div class="messages" aria-live="polite">
             <div v-if="!messages.length" class="chat-empty"><span>“</span><p>问一个关于这套资料的问题，<br />让线索自己浮上来。</p></div>
             <article v-for="(message, index) in messages" :key="index" class="message" :class="`message--${message.role}`">

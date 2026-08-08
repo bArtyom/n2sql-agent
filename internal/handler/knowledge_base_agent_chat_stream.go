@@ -67,10 +67,18 @@ func NewKnowledgeBaseAgentChatStreamWithConversation(answerer agentservice.Event
 				return
 			}
 			message, _ := knowledgeBaseAgentChatError(err)
-			if writeErr := writeAgentSSEEvent(w, flusher, "error", struct {
+			if writeErr := writeAgentSSEEvent(w, flusher, "conversation_save_failed", struct {
 				Error string `json:"error"`
 			}{Error: message}); writeErr != nil {
 				log.Printf("agent SSE conversation save error event write failed: %v", writeErr)
+			}
+			return
+		}
+		if request.ConversationID != 0 {
+			if writeErr := writeAgentSSEEvent(w, flusher, "conversation_saved", struct {
+				ConversationID int64 `json:"conversation_id"`
+			}{ConversationID: request.ConversationID}); writeErr != nil {
+				log.Printf("agent SSE conversation saved event write failed: %v", writeErr)
 			}
 		}
 	})
@@ -79,6 +87,8 @@ func NewKnowledgeBaseAgentChatStreamWithConversation(answerer agentservice.Event
 func writeAgentSSEEvent(w http.ResponseWriter, flusher http.Flusher, eventType string, value any) error {
 	switch eventType {
 	case "error",
+		"conversation_saved",
+		"conversation_save_failed",
 		string(agent.EventRunStarted),
 		string(agent.EventStepStarted),
 		string(agent.EventToolCalled),
