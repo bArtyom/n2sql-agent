@@ -25,6 +25,8 @@ type ChatMessage = {
   activity?: string;
 };
 type AgentHistoryMessage = Pick<ChatMessage, "role" | "content">;
+type Conversation = { id: number; knowledgeBaseId: number; title: string; createdAt: string; updatedAt: string };
+type ConversationMessage = { id: number; conversationId: number; role: "user" | "assistant"; content: string; createdAt: string };
 type StreamPayload = {
   delta?: string;
   sources?: Source[];
@@ -53,6 +55,8 @@ const knowledgeBases = ref<KnowledgeBase[]>([]);
 const selectedKnowledgeBaseId = ref<number | null>(null);
 const documents = ref<DocumentItem[]>([]);
 const messages = ref<ChatMessage[]>([]);
+const conversations = ref<Conversation[]>([]);
+const conversationId = ref<number | null>(null);
 const question = ref("");
 const newKnowledgeBaseName = ref("");
 const newKnowledgeBaseDescription = ref("");
@@ -242,11 +246,50 @@ async function refreshDocuments() {
   }
 }
 
+async function loadConversation() {
+  if (!selectedKnowledgeBaseId.value) {
+    conversations.value = [];
+    conversationId.value = null;
+    messages.value = [];
+    return;
+  }
+  try {
+    conversations.value = await requestJSON<Conversation[]>(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations`);
+    const latest = conversations.value[0];
+    conversationId.value = latest?.id ?? null;
+    if (!latest) {
+      messages.value = [];
+      return;
+    }
+    const stored = await requestJSON<ConversationMessage[]>(
+      `/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations/${latest.id}/messages`,
+    );
+    messages.value = stored.map((message) => ({ role: message.role, content: message.content, status: "done" }));
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function ensureConversation(title: string): Promise<number> {
+  if (conversationId.value) return conversationId.value;
+  if (!selectedKnowledgeBaseId.value) throw new Error("请先选择知识库。");
+  const created = await requestJSON<Conversation>(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: title.slice(0, 80) }),
+  });
+  conversationId.value = created.id;
+  conversations.value = [created, ...conversations.value];
+  return created.id;
+}
+
 function selectKnowledgeBase(id: number) {
   selectedKnowledgeBaseId.value = id;
   mobileRailOpen.value = false;
   messages.value = [];
+  conversationId.value = null;
   void refreshDocuments();
+  void loadConversation();
 }
 
 async function createKnowledgeBase() {
@@ -326,7 +369,13 @@ function scheduleDocumentPolling() {
 async function askQuestion() {
   const prompt = question.value.trim();
   if (!prompt || !selectedKnowledgeBaseId.value || streaming.value) return;
-  const history = buildAgentHistory();
+  let activeConversationID: number;
+  try {
+    activeConversationID = await ensureConversation(prompt);
+  } catch (error) {
+    showError(error);
+    return;
+  }
   question.value = "";
   messages.value.push({ role: "user", content: prompt });
   const answer: ChatMessage = { role: "assistant", content: "", sources: [], status: "streaming" };
@@ -337,7 +386,7 @@ async function askQuestion() {
     const response = await fetch(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/agent-chat/stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-      body: JSON.stringify({ message: prompt, history }),
+      body: JSON.stringify({ message: prompt, conversation_id: activeConversationID }),
     });
     if (!response.ok || !response.body) {
       const payload = await response.json().catch(() => null);
@@ -453,7 +502,7 @@ function formatBytes(size: number) {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
-onMounted(() => void loadKnowledgeBases());
+onMounted(() => void loadKnowledgeBases().then(() => loadConversation()));
 onUnmounted(() => window.clearInterval(documentPollTimer));
 </script>
 
