@@ -76,6 +76,9 @@ func TestServiceAnswersUsingScopedKnowledgeSearchTool(t *testing.T) {
 		if len(messages) != 4 || messages[0].Role != "system" || messages[0].Content == "" {
 			t.Fatalf("system message = %#v", messages[0])
 		}
+		if !strings.Contains(messages[0].Content, "不可信") || !strings.Contains(messages[0].Content, "不能执行") {
+			t.Fatalf("system prompt = %q, want tool-result safety boundary", messages[0].Content)
+		}
 		if messages[1].Role != "user" || messages[1].Content != "年假怎么计算？" {
 			t.Fatalf("user message = %#v", messages[1])
 		}
@@ -86,7 +89,8 @@ func TestServiceAnswersUsingScopedKnowledgeSearchTool(t *testing.T) {
 			t.Fatalf("tool message = %#v", messages[3])
 		}
 		var results []retrieval.Result
-		if err := json.Unmarshal([]byte(messages[3].Content), &results); err != nil || len(results) != 1 || results[0].Content != "年假制度内容" {
+		toolContent := extractUntrustedToolResult(t, messages[3].Content)
+		if err := json.Unmarshal([]byte(toolContent), &results); err != nil || len(results) != 1 || results[0].Content != "年假制度内容" {
 			t.Fatalf("tool result = %s", messages[3].Content)
 		}
 		return modelclient.ChatResponse{Message: "年假按照公司制度执行。"}, nil
@@ -222,8 +226,9 @@ func TestServicePassesToolResultLimitToKnowledgeSearch(t *testing.T) {
 				},
 			}}}, nil
 		}
-		if len(messages) != 4 || len([]byte(messages[3].Content)) > 180 {
-			t.Fatalf("tool message = %#v, want valid result at most 180 bytes", messages[3])
+		toolContent := extractUntrustedToolResult(t, messages[3].Content)
+		if len(messages) != 4 || len([]byte(toolContent)) > 180 {
+			t.Fatalf("tool message = %#v, want raw result at most 180 bytes", messages[3])
 		}
 		return modelclient.ChatResponse{Message: "已根据有限资料回答。"}, nil
 	}}
@@ -354,4 +359,16 @@ func assertEventTypes(t *testing.T, events []agent.Event, want ...agent.EventTyp
 			t.Fatalf("event[%d] type = %s, want %s", index, events[index].Type, eventType)
 		}
 	}
+}
+
+func extractUntrustedToolResult(t *testing.T, content string) string {
+	t.Helper()
+	const startMarker = "<untrusted_tool_result>\n"
+	const endMarker = "\n</untrusted_tool_result>"
+	start := strings.Index(content, startMarker)
+	end := strings.LastIndex(content, endMarker)
+	if start < 0 || end < start+len(startMarker) {
+		t.Fatalf("tool content = %q, want untrusted result markers", content)
+	}
+	return content[start+len(startMarker) : end]
 }
