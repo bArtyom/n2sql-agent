@@ -2,7 +2,9 @@ package agenteval
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"time"
 
@@ -14,19 +16,59 @@ var (
 	ErrInvalidEvaluator = errors.New("invalid agent evaluator")
 	ErrEmptyCases       = errors.New("agent evaluation cases are required")
 	ErrInvalidCase      = errors.New("invalid agent evaluation case")
+	ErrInvalidCaseFile  = errors.New("invalid agent evaluation case file")
 )
 
 // Case describes one deterministic evaluation question. The evaluator does
 // not decide whether an answer is factually correct; it checks execution
 // contracts such as success status, tool usage and step limits.
 type Case struct {
-	ID              string
-	KnowledgeBaseID int64
-	Question        string
-	History         []agentservice.HistoryMessage
-	ExpectedStatus  agent.RunStatus
-	RequireToolCall bool
-	MaxSteps        int
+	ID              string                        `json:"id"`
+	KnowledgeBaseID int64                         `json:"knowledge_base_id"`
+	Question        string                        `json:"question"`
+	History         []agentservice.HistoryMessage `json:"history,omitempty"`
+	ExpectedStatus  agent.RunStatus               `json:"expected_status,omitempty"`
+	RequireToolCall bool                          `json:"require_tool_call,omitempty"`
+	MaxSteps        int                           `json:"max_steps,omitempty"`
+}
+
+// LoadCases decodes and validates a JSON array of evaluation cases.
+func LoadCases(reader io.Reader) ([]Case, error) {
+	if reader == nil {
+		return nil, ErrInvalidCaseFile
+	}
+	decoder := json.NewDecoder(reader)
+	decoder.DisallowUnknownFields()
+	var cases []Case
+	if err := decoder.Decode(&cases); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, ErrEmptyCases
+		}
+		return nil, ErrInvalidCaseFile
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, ErrInvalidCaseFile
+	}
+	if len(cases) == 0 {
+		return nil, ErrEmptyCases
+	}
+	for _, evaluationCase := range cases {
+		if err := validateCase(evaluationCase); err != nil {
+			return nil, err
+		}
+	}
+	return cases, nil
+}
+
+// LimitCases returns at most maxCases cases while preserving file order.
+func LimitCases(cases []Case, maxCases int) ([]Case, error) {
+	if maxCases <= 0 {
+		return nil, ErrInvalidCase
+	}
+	if len(cases) <= maxCases {
+		return append([]Case(nil), cases...), nil
+	}
+	return append([]Case(nil), cases[:maxCases]...), nil
 }
 
 type CaseResult struct {
@@ -133,6 +175,7 @@ func evaluateCase(ctx context.Context, answerer agentservice.Answerer, evaluatio
 		History: evaluationCase.History,
 	})
 	result := metricsFromResponse(response, time.Since(startedAt))
+	result.ID = evaluationCase.ID
 	expectedStatus := evaluationCase.ExpectedStatus
 	if expectedStatus == "" {
 		expectedStatus = agent.RunSucceeded

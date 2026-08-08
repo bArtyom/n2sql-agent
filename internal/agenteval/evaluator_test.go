@@ -3,6 +3,7 @@ package agenteval_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
@@ -60,7 +61,7 @@ func TestEvaluateReportsPassRateAndRuntimeMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Evaluate() error = %v", err)
 	}
-	if report.Total != 2 || report.Passed != 1 || report.PassRate != 0.5 {
+	if report.Total != 2 || report.Passed != 1 || report.PassRate != 0.5 || report.Cases[0].ID != "success" || report.Cases[1].ID != "failure" {
 		t.Fatalf("report = %#v, want one of two cases passed", report)
 	}
 	if report.AverageSteps != 3 || report.AverageDurationMS != 30 {
@@ -109,5 +110,34 @@ func TestEvaluateAcceptsExpectedFailureStatus(t *testing.T) {
 	}
 	if report.Passed != 1 || !report.Cases[0].Passed {
 		t.Fatalf("report = %#v, want expected failure to pass", report)
+	}
+}
+
+func TestLoadCasesDecodesAndValidatesJSON(t *testing.T) {
+	cases, err := agenteval.LoadCases(strings.NewReader(`[
+		{"id":"annual-leave","knowledge_base_id":7,"question":"年假有几天？","require_tool_call":true,"max_steps":6}
+	]`))
+	if err != nil {
+		t.Fatalf("LoadCases() error = %v", err)
+	}
+	if len(cases) != 1 || cases[0].ID != "annual-leave" || !cases[0].RequireToolCall || cases[0].MaxSteps != 6 {
+		t.Fatalf("cases = %#v", cases)
+	}
+}
+
+func TestLoadCasesRejectsUnknownFieldsAndLimitPreservesOrder(t *testing.T) {
+	if _, err := agenteval.LoadCases(strings.NewReader(`[{"id":"case","knowledge_base_id":7,"question":"问题","unknown":true}]`)); !errors.Is(err, agenteval.ErrInvalidCaseFile) {
+		t.Fatalf("unknown field error = %v, want %v", err, agenteval.ErrInvalidCaseFile)
+	}
+	cases := []agenteval.Case{
+		{ID: "first", KnowledgeBaseID: 7, Question: "第一个"},
+		{ID: "second", KnowledgeBaseID: 7, Question: "第二个"},
+	}
+	limited, err := agenteval.LimitCases(cases, 1)
+	if err != nil {
+		t.Fatalf("LimitCases() error = %v", err)
+	}
+	if len(limited) != 1 || limited[0].ID != "first" {
+		t.Fatalf("limited cases = %#v, want first case", limited)
 	}
 }

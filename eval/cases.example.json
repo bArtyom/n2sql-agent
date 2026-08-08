@@ -1,0 +1,9 @@
+[
+  {
+    "id": "replace-with-a-real-question",
+    "knowledge_base_id": 1,
+    "question": "请把这个问题替换成知识库中的真实问题。",
+    "require_tool_call": true,
+    "max_steps": 6
+  }
+]
