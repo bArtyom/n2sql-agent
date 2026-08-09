@@ -37,6 +37,19 @@ func TestModelHistorySummarizerUsesChatWithoutTools(t *testing.T) {
 	}
 }
 
+func TestModelHistorySummarizerRecursivelyRewritesExistingSummary(t *testing.T) {
+	summarizer := agentservice.NewModelHistorySummarizer(summaryRunnerStub{call: func(messages []modelclient.ChatMessage) (modelclient.ChatResponse, error) {
+		if !strings.Contains(messages[0].Content, "已有摘要") || !strings.Contains(messages[1].Content, "之前摘要") {
+			t.Fatalf("recursive summary request = %#v", messages)
+		}
+		return modelclient.ChatResponse{Message: "重新整理后的摘要"}, nil
+	}})
+	result, err := summarizer.SummarizeWithExisting(context.Background(), "之前摘要", []agentservice.HistoryMessage{{Role: "user", Content: "新问题"}})
+	if err != nil || result.Content != "重新整理后的摘要" {
+		t.Fatalf("recursive summary = %#v, error = %v", result, err)
+	}
+}
+
 func TestModelHistorySummarizerRejectsEmptyResponse(t *testing.T) {
 	summarizer := agentservice.NewModelHistorySummarizer(summaryRunnerStub{call: func([]modelclient.ChatMessage) (modelclient.ChatResponse, error) {
 		return modelclient.ChatResponse{}, nil

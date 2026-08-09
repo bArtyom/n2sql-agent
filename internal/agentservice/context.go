@@ -112,12 +112,14 @@ func buildHistoryMessages(ctx context.Context, history []HistoryMessage, maxMess
 		historyMessages[len(keptReversed)-1-index] = keptReversed[index]
 	}
 	if len(droppedTurns) > 0 && len(historyMessages) < maxMessages {
-		summary, summaryStats := summarizeDroppedTurns(ctx, droppedTurns, remainingBytes, summarizer)
+		existingSummary := ""
+		if cachedSummary != nil {
+			existingSummary = cachedSummary.Content
+		}
+		summary, summaryStats := summarizeDroppedTurns(ctx, droppedTurns, remainingBytes, summarizer, existingSummary)
 		if cachedSummary != nil && strings.TrimSpace(cachedSummary.Content) != "" {
-			summary = mergeHistorySummary(cachedSummary.Content, summary, remainingBytes)
-			if summaryStats.Used {
-				summaryStats.Content = strings.TrimPrefix(summary, historySummaryPrefix)
-				summaryStats.SummaryBytes = len(summary)
+			if !summaryStats.Used {
+				summary = mergeHistorySummary(cachedSummary.Content, summary, remainingBytes)
 			}
 		}
 		if summary != "" {
@@ -157,7 +159,7 @@ func mergeHistorySummary(cachedContent, newSummary string, maxBytes int) string 
 	return historySummaryPrefix + content
 }
 
-func summarizeDroppedTurns(ctx context.Context, turns [][]HistoryMessage, maxBytes int, summarizer HistorySummarizer) (string, HistorySummaryStats) {
+func summarizeDroppedTurns(ctx context.Context, turns [][]HistoryMessage, maxBytes int, summarizer HistorySummarizer, existingSummary string) (string, HistorySummaryStats) {
 	history := flattenHistoryTurns(turns)
 	stats := HistorySummaryStats{
 		Attempted:       summarizer != nil,
@@ -169,7 +171,14 @@ func summarizeDroppedTurns(ctx context.Context, turns [][]HistoryMessage, maxByt
 		stats.InputBytes += len(message.Content)
 	}
 	if summarizer != nil {
-		if result, err := summarizer.Summarize(ctx, history); err == nil {
+		var result HistorySummaryResult
+		var err error
+		if recursive, ok := summarizer.(RecursiveHistorySummarizer); ok {
+			result, err = recursive.SummarizeWithExisting(ctx, existingSummary, history)
+		} else {
+			result, err = summarizer.Summarize(ctx, history)
+		}
+		if err == nil {
 			stats.DurationMS = result.DurationMS
 			if result.Usage != nil {
 				stats.PromptTokens = result.Usage.PromptTokens
