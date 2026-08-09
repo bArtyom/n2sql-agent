@@ -21,6 +21,23 @@ type searcherStub struct {
 	content         string
 }
 
+type historySummarizerStub struct {
+	called  int
+	summary string
+	err     error
+}
+
+func (s *historySummarizerStub) Summarize(_ context.Context, history []agentservice.HistoryMessage) (string, error) {
+	s.called++
+	if s.err != nil {
+		return "", s.err
+	}
+	if len(history) == 0 {
+		return "", errors.New("history must not be empty")
+	}
+	return s.summary, nil
+}
+
 func (s *searcherStub) Search(_ context.Context, knowledgeBaseID int64, query string, limit int) ([]retrieval.Result, error) {
 	s.knowledgeBaseID = knowledgeBaseID
 	s.query = query
@@ -208,6 +225,61 @@ func TestServiceAddsExtractiveHistorySummaryWhenOlderTurnsAreDropped(t *testing.
 	service, err := agentservice.NewServiceWithLimits(chat, &searcherStub{}, 3, time.Minute, agent.DefaultMaxToolResultBytes, 3, 1024)
 	if err != nil {
 		t.Fatalf("NewServiceWithLimits() error = %v", err)
+	}
+	_, err = service.Answer(context.Background(), 7, agentservice.ChatRequest{
+		Message: "当前问题",
+		History: []agentservice.HistoryMessage{
+			{Role: "user", Content: "旧问题"},
+			{Role: "assistant", Content: "旧回答"},
+			{Role: "user", Content: "新问题"},
+			{Role: "assistant", Content: "新回答"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Answer() error = %v", err)
+	}
+}
+
+func TestServiceUsesModelHistorySummaryWhenOlderTurnsAreDropped(t *testing.T) {
+	summarizer := &historySummarizerStub{summary: "用户之前讨论过年假制度。"}
+	chat := chatStub{call: func(messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		if len(messages) != 5 || messages[1].Role != "system" || !strings.Contains(messages[1].Content, "用户之前讨论过年假制度。") || !strings.Contains(messages[1].Content, "仅作背景") {
+			t.Fatalf("messages = %#v, want model summary in context", messages)
+		}
+		return modelclient.ChatResponse{Message: "OK"}, nil
+	}}
+	service, err := agentservice.NewServiceWithLimitsAndSummarizer(chat, &searcherStub{}, 3, time.Minute, agent.DefaultMaxToolResultBytes, 3, 1024, summarizer)
+	if err != nil {
+		t.Fatalf("NewServiceWithLimitsAndSummarizer() error = %v", err)
+	}
+	_, err = service.Answer(context.Background(), 7, agentservice.ChatRequest{
+		Message: "当前问题",
+		History: []agentservice.HistoryMessage{
+			{Role: "user", Content: "旧问题"},
+			{Role: "assistant", Content: "旧回答"},
+			{Role: "user", Content: "新问题"},
+			{Role: "assistant", Content: "新回答"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Answer() error = %v", err)
+	}
+	if summarizer.called != 1 {
+		t.Fatalf("summarizer calls = %d, want 1", summarizer.called)
+	}
+}
+
+func TestServiceFallsBackWhenModelHistorySummaryFails(t *testing.T) {
+	summarizer := &historySummarizerStub{err: errors.New("summary model unavailable")}
+	chat := chatStub{call: func(messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		if len(messages) != 5 || !strings.Contains(messages[1].Content, "更早对话的压缩记录") || !strings.Contains(messages[1].Content, "旧问题") {
+			t.Fatalf("messages = %#v, want extractive fallback", messages)
+		}
+		return modelclient.ChatResponse{Message: "OK"}, nil
+	}}
+	service, err := agentservice.NewServiceWithLimitsAndSummarizer(chat, &searcherStub{}, 3, time.Minute, agent.DefaultMaxToolResultBytes, 3, 1024, summarizer)
+	if err != nil {
+		t.Fatalf("NewServiceWithLimitsAndSummarizer() error = %v", err)
 	}
 	_, err = service.Answer(context.Background(), 7, agentservice.ChatRequest{
 		Message: "当前问题",

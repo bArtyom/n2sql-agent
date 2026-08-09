@@ -54,6 +54,8 @@ func TestLoadReadsAgentSettings(t *testing.T) {
 	t.Setenv("AGENT_MAX_TOOL_RESULT_BYTES", "4096")
 	t.Setenv("AGENT_MAX_HISTORY_MESSAGES", "6")
 	t.Setenv("AGENT_MAX_HISTORY_BYTES", "8192")
+	t.Setenv("AGENT_HISTORY_SUMMARY_ENABLED", "false")
+	t.Setenv("AGENT_HISTORY_SUMMARY_TIMEOUT_MS", "2500")
 
 	cfg := config.Load()
 	if cfg.AgentMaxSteps != 7 {
@@ -67,6 +69,12 @@ func TestLoadReadsAgentSettings(t *testing.T) {
 	}
 	if cfg.AgentMaxHistoryMessages != 6 || cfg.AgentMaxHistoryBytes != 8192 {
 		t.Fatalf("agent history settings = %d/%d, want 6/8192", cfg.AgentMaxHistoryMessages, cfg.AgentMaxHistoryBytes)
+	}
+	if cfg.AgentHistorySummaryEnabled {
+		t.Fatal("agent history summary enabled = true, want false")
+	}
+	if cfg.AgentHistorySummaryTimeout != 2500*time.Millisecond {
+		t.Fatalf("agent history summary timeout = %s, want 2.5s", cfg.AgentHistorySummaryTimeout)
 	}
 }
 

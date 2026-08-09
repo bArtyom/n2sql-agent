@@ -135,7 +135,11 @@ func newLiveAnswerer(ctx context.Context) (agentservice.Answerer, func(), error)
 	embeddingService := modelruntime.NewEmbeddingService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
 	chatService := modelruntime.NewChatService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
 	searchService := retrieval.NewService(embeddingService, documentchunk.NewPostgresStore(db))
-	answerService, err := agentservice.NewServiceWithLimits(
+	var historySummarizer agentservice.HistorySummarizer
+	if cfg.AgentHistorySummaryEnabled {
+		historySummarizer = agentservice.NewModelHistorySummarizerWithTimeout(chatService, cfg.AgentHistorySummaryTimeout)
+	}
+	answerService, err := agentservice.NewServiceWithLimitsAndSummarizer(
 		chatService,
 		searchService,
 		cfg.AgentMaxSteps,
@@ -143,6 +147,7 @@ func newLiveAnswerer(ctx context.Context) (agentservice.Answerer, func(), error)
 		cfg.AgentMaxToolResultBytes,
 		cfg.AgentMaxHistoryMessages,
 		cfg.AgentMaxHistoryBytes,
+		historySummarizer,
 	)
 	if err != nil {
 		closeDB()

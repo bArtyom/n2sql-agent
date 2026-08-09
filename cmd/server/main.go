@@ -57,7 +57,11 @@ func main() {
 	runner := worker.NewRunner(worker.NewPostgresStore(db), processor)
 	searchService := retrieval.NewService(embeddingService, chunkStore)
 	answerService := rag.NewService(searchService, chatService)
-	agentAnswerService, err := agentservice.NewServiceWithLimits(
+	var historySummarizer agentservice.HistorySummarizer
+	if cfg.AgentHistorySummaryEnabled {
+		historySummarizer = agentservice.NewModelHistorySummarizerWithTimeout(chatService, cfg.AgentHistorySummaryTimeout)
+	}
+	agentAnswerService, err := agentservice.NewServiceWithLimitsAndSummarizer(
 		chatService,
 		searchService,
 		cfg.AgentMaxSteps,
@@ -65,6 +69,7 @@ func main() {
 		cfg.AgentMaxToolResultBytes,
 		cfg.AgentMaxHistoryMessages,
 		cfg.AgentMaxHistoryBytes,
+		historySummarizer,
 	)
 	if err != nil {
 		log.Fatal(err)

@@ -53,6 +53,7 @@ type Service struct {
 	maxToolResultBytes int
 	maxHistoryMessages int
 	maxHistoryBytes    int
+	historySummarizer  HistorySummarizer
 	sequence           atomic.Uint64
 }
 
@@ -65,6 +66,10 @@ func NewServiceWithToolResultLimit(chat modelruntime.ToolChatRunner, searcher re
 }
 
 func NewServiceWithLimits(chat modelruntime.ToolChatRunner, searcher retrieval.Searcher, maxSteps int, timeout time.Duration, maxToolResultBytes, maxHistoryMessages, maxHistoryBytes int) (*Service, error) {
+	return NewServiceWithLimitsAndSummarizer(chat, searcher, maxSteps, timeout, maxToolResultBytes, maxHistoryMessages, maxHistoryBytes, nil)
+}
+
+func NewServiceWithLimitsAndSummarizer(chat modelruntime.ToolChatRunner, searcher retrieval.Searcher, maxSteps int, timeout time.Duration, maxToolResultBytes, maxHistoryMessages, maxHistoryBytes int, historySummarizer HistorySummarizer) (*Service, error) {
 	if chat == nil || searcher == nil {
 		return nil, ErrInvalidService
 	}
@@ -91,6 +96,7 @@ func NewServiceWithLimits(chat modelruntime.ToolChatRunner, searcher retrieval.S
 		maxToolResultBytes: maxToolResultBytes,
 		maxHistoryMessages: maxHistoryMessages,
 		maxHistoryBytes:    maxHistoryBytes,
+		historySummarizer:  historySummarizer,
 	}, nil
 }
 
@@ -110,7 +116,9 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	if knowledgeBaseID <= 0 || request.Message == "" || len(request.Message) > maxQuestionBytes {
 		return Response{}, ErrInvalidRequest
 	}
-	history, err := buildHistoryMessages(request.History, s.maxHistoryMessages, s.maxHistoryBytes)
+	runContext, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	history, err := buildHistoryMessages(runContext, request.History, s.maxHistoryMessages, s.maxHistoryBytes, s.historySummarizer)
 	if err != nil {
 		return Response{}, err
 	}
@@ -130,8 +138,6 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	}
 	messages = append(messages, history...)
 	messages = append(messages, modelclient.ChatMessage{Role: "user", Content: request.Message})
-	runContext, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
 	var result agentruntime.Result
 	if sink == nil {
 		result, err = engine.Run(runContext, runID, messages)

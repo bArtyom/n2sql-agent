@@ -28,6 +28,12 @@ type ToolChatRunner interface {
 	ChatMessagesWithTools(context.Context, []modelclient.ChatMessage, []agent.FunctionDefinition) (modelclient.ChatResponse, error)
 }
 
+// MessageChatRunner is the no-tools chat boundary used by infrastructure tasks
+// such as history summarization.
+type MessageChatRunner interface {
+	ChatMessages(context.Context, []modelclient.ChatMessage) (modelclient.ChatResponse, error)
+}
+
 type ChatService struct {
 	providers    modelprovider.Store
 	completer    modelclient.ChatCompleter

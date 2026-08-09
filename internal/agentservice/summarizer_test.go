@@ -1,0 +1,57 @@
+package agentservice_test
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/bArtyom/n2sql-agent/internal/agentservice"
+	"github.com/bArtyom/n2sql-agent/internal/modelclient"
+)
+
+type summaryRunnerStub struct {
+	call func([]modelclient.ChatMessage) (modelclient.ChatResponse, error)
+}
+
+func (s summaryRunnerStub) ChatMessages(_ context.Context, messages []modelclient.ChatMessage) (modelclient.ChatResponse, error) {
+	return s.call(messages)
+}
+
+func TestModelHistorySummarizerUsesChatWithoutTools(t *testing.T) {
+	summarizer := agentservice.NewModelHistorySummarizer(summaryRunnerStub{call: func(messages []modelclient.ChatMessage) (modelclient.ChatResponse, error) {
+		if len(messages) != 2 || messages[0].Role != "system" || messages[1].Role != "user" {
+			t.Fatalf("summary request = %#v", messages)
+		}
+		if !strings.Contains(messages[1].Content, "旧问题") {
+			t.Fatalf("summary transcript = %q", messages[1].Content)
+		}
+		return modelclient.ChatResponse{Message: "用户之前询问了旧问题。"}, nil
+	}})
+	summary, err := summarizer.Summarize(context.Background(), []agentservice.HistoryMessage{{Role: "user", Content: "旧问题"}})
+	if err != nil {
+		t.Fatalf("Summarize() error = %v", err)
+	}
+	if summary != "用户之前询问了旧问题。" {
+		t.Fatalf("summary = %q", summary)
+	}
+}
+
+func TestModelHistorySummarizerRejectsEmptyResponse(t *testing.T) {
+	summarizer := agentservice.NewModelHistorySummarizer(summaryRunnerStub{call: func([]modelclient.ChatMessage) (modelclient.ChatResponse, error) {
+		return modelclient.ChatResponse{}, nil
+	}})
+	if _, err := summarizer.Summarize(context.Background(), []agentservice.HistoryMessage{{Role: "user", Content: "旧问题"}}); err == nil {
+		t.Fatal("Summarize() error = nil, want invalid tool-call response")
+	}
+}
+
+func TestModelHistorySummarizerPropagatesChatError(t *testing.T) {
+	wantErr := errors.New("model unavailable")
+	summarizer := agentservice.NewModelHistorySummarizer(summaryRunnerStub{call: func([]modelclient.ChatMessage) (modelclient.ChatResponse, error) {
+		return modelclient.ChatResponse{}, wantErr
+	}})
+	if _, err := summarizer.Summarize(context.Background(), []agentservice.HistoryMessage{{Role: "user", Content: "旧问题"}}); !errors.Is(err, wantErr) {
+		t.Fatalf("Summarize() error = %v, want wrapped model error", err)
+	}
+}

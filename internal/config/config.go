@@ -10,39 +10,43 @@ import (
 )
 
 const (
-	defaultAddress                   = ":8080"
-	defaultModelProviderAPIKeyEnvVar = "OPENAI_API_KEY"
-	defaultModelProviderAllowedHost  = "api.openai.com"
-	defaultUploadDir                 = "./.data/uploads"
-	defaultWorkerPollInterval        = 2 * time.Second
-	defaultOCRPrompt                 = "请只转写图片中清晰可见的文字，保留原有段落和表格结构，不要解释或补充内容。"
-	defaultOCRRendererBinary         = "pdftoppm"
-	defaultOCRRenderDPI              = 150
-	defaultOCRMaxPages               = 20
-	defaultOCRConcurrency            = 1
-	defaultAgentMaxSteps             = 4
-	defaultAgentTimeout              = time.Minute
-	defaultAgentMaxToolResultBytes   = 32 * 1024
+	defaultAddress                    = ":8080"
+	defaultModelProviderAPIKeyEnvVar  = "OPENAI_API_KEY"
+	defaultModelProviderAllowedHost   = "api.openai.com"
+	defaultUploadDir                  = "./.data/uploads"
+	defaultWorkerPollInterval         = 2 * time.Second
+	defaultOCRPrompt                  = "请只转写图片中清晰可见的文字，保留原有段落和表格结构，不要解释或补充内容。"
+	defaultOCRRendererBinary          = "pdftoppm"
+	defaultOCRRenderDPI               = 150
+	defaultOCRMaxPages                = 20
+	defaultOCRConcurrency             = 1
+	defaultAgentMaxSteps              = 4
+	defaultAgentTimeout               = time.Minute
+	defaultAgentMaxToolResultBytes    = 32 * 1024
+	defaultAgentHistorySummary        = true
+	defaultAgentHistorySummaryTimeout = 10 * time.Second
 )
 
 type Config struct {
-	Address                   string
-	DatabaseURL               string
-	ModelProviderAPIKeyEnvVar string
-	ModelProviderAllowedHosts []string
-	UploadDir                 string
-	WorkerPollInterval        time.Duration
-	OCRModel                  string
-	OCRPrompt                 string
-	OCRRendererBinary         string
-	OCRRenderDPI              int
-	OCRMaxPages               int
-	OCRConcurrency            int
-	AgentMaxSteps             int
-	AgentTimeout              time.Duration
-	AgentMaxToolResultBytes   int
-	AgentMaxHistoryMessages   int
-	AgentMaxHistoryBytes      int
+	Address                    string
+	DatabaseURL                string
+	ModelProviderAPIKeyEnvVar  string
+	ModelProviderAllowedHosts  []string
+	UploadDir                  string
+	WorkerPollInterval         time.Duration
+	OCRModel                   string
+	OCRPrompt                  string
+	OCRRendererBinary          string
+	OCRRenderDPI               int
+	OCRMaxPages                int
+	OCRConcurrency             int
+	AgentMaxSteps              int
+	AgentTimeout               time.Duration
+	AgentMaxToolResultBytes    int
+	AgentMaxHistoryMessages    int
+	AgentMaxHistoryBytes       int
+	AgentHistorySummaryEnabled bool
+	AgentHistorySummaryTimeout time.Duration
 }
 
 func Load() Config {
@@ -60,24 +64,34 @@ func Load() Config {
 	}
 
 	return Config{
-		Address:                   address,
-		DatabaseURL:               os.Getenv("DATABASE_URL"),
-		ModelProviderAPIKeyEnvVar: apiKeyEnvVar,
-		ModelProviderAllowedHosts: allowedHosts,
-		UploadDir:                 uploadDir(),
-		WorkerPollInterval:        workerPollInterval(),
-		OCRModel:                  strings.TrimSpace(os.Getenv("OCR_MODEL")),
-		OCRPrompt:                 valueOrDefault("OCR_PROMPT", defaultOCRPrompt),
-		OCRRendererBinary:         valueOrDefault("OCR_RENDERER_BIN", defaultOCRRendererBinary),
-		OCRRenderDPI:              positiveIntEnv("OCR_RENDER_DPI", defaultOCRRenderDPI),
-		OCRMaxPages:               positiveIntEnv("OCR_MAX_PAGES", defaultOCRMaxPages),
-		OCRConcurrency:            positiveIntEnv("OCR_CONCURRENCY", defaultOCRConcurrency),
-		AgentMaxSteps:             positiveIntEnv("AGENT_MAX_STEPS", defaultAgentMaxSteps),
-		AgentTimeout:              time.Duration(positiveIntEnv("AGENT_TIMEOUT_MS", int(defaultAgentTimeout/time.Millisecond))) * time.Millisecond,
-		AgentMaxToolResultBytes:   agentMaxToolResultBytes(),
-		AgentMaxHistoryMessages:   positiveIntEnv("AGENT_MAX_HISTORY_MESSAGES", agent.DefaultMaxHistoryMessages),
-		AgentMaxHistoryBytes:      positiveIntEnv("AGENT_MAX_HISTORY_BYTES", agent.DefaultMaxHistoryBytes),
+		Address:                    address,
+		DatabaseURL:                os.Getenv("DATABASE_URL"),
+		ModelProviderAPIKeyEnvVar:  apiKeyEnvVar,
+		ModelProviderAllowedHosts:  allowedHosts,
+		UploadDir:                  uploadDir(),
+		WorkerPollInterval:         workerPollInterval(),
+		OCRModel:                   strings.TrimSpace(os.Getenv("OCR_MODEL")),
+		OCRPrompt:                  valueOrDefault("OCR_PROMPT", defaultOCRPrompt),
+		OCRRendererBinary:          valueOrDefault("OCR_RENDERER_BIN", defaultOCRRendererBinary),
+		OCRRenderDPI:               positiveIntEnv("OCR_RENDER_DPI", defaultOCRRenderDPI),
+		OCRMaxPages:                positiveIntEnv("OCR_MAX_PAGES", defaultOCRMaxPages),
+		OCRConcurrency:             positiveIntEnv("OCR_CONCURRENCY", defaultOCRConcurrency),
+		AgentMaxSteps:              positiveIntEnv("AGENT_MAX_STEPS", defaultAgentMaxSteps),
+		AgentTimeout:               time.Duration(positiveIntEnv("AGENT_TIMEOUT_MS", int(defaultAgentTimeout/time.Millisecond))) * time.Millisecond,
+		AgentMaxToolResultBytes:    agentMaxToolResultBytes(),
+		AgentMaxHistoryMessages:    positiveIntEnv("AGENT_MAX_HISTORY_MESSAGES", agent.DefaultMaxHistoryMessages),
+		AgentMaxHistoryBytes:       positiveIntEnv("AGENT_MAX_HISTORY_BYTES", agent.DefaultMaxHistoryBytes),
+		AgentHistorySummaryEnabled: boolEnv("AGENT_HISTORY_SUMMARY_ENABLED", defaultAgentHistorySummary),
+		AgentHistorySummaryTimeout: time.Duration(positiveIntEnv("AGENT_HISTORY_SUMMARY_TIMEOUT_MS", int(defaultAgentHistorySummaryTimeout/time.Millisecond))) * time.Millisecond,
 	}
+}
+
+func boolEnv(name string, fallback bool) bool {
+	value, err := strconv.ParseBool(strings.TrimSpace(os.Getenv(name)))
+	if err != nil {
+		return fallback
+	}
+	return value
 }
 
 func agentMaxToolResultBytes() int {
