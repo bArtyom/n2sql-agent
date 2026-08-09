@@ -169,8 +169,8 @@ func TestServiceIncludesBoundedConversationHistory(t *testing.T) {
 
 func TestServiceDropsOrphanAssistantHistory(t *testing.T) {
 	chat := chatStub{call: func(messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
-		if len(messages) != 3 || messages[1].Role != "user" || messages[1].Content != "最新问题" {
-			t.Fatalf("messages = %#v, want only the incomplete latest user turn", messages)
+		if len(messages) != 4 || messages[2].Role != "user" || messages[2].Content != "最新问题" {
+			t.Fatalf("messages = %#v, want summary and the incomplete latest user turn", messages)
 		}
 		return modelclient.ChatResponse{Message: "OK"}, nil
 	}}
@@ -185,6 +185,37 @@ func TestServiceDropsOrphanAssistantHistory(t *testing.T) {
 			{Role: "assistant", Content: "旧回答"},
 			{Role: "assistant", Content: "孤立回答"},
 			{Role: "user", Content: "最新问题"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Answer() error = %v", err)
+	}
+}
+
+func TestServiceAddsExtractiveHistorySummaryWhenOlderTurnsAreDropped(t *testing.T) {
+	chat := chatStub{call: func(messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		if len(messages) != 5 {
+			t.Fatalf("messages = %#v, want system, summary, two recent turns, and current question", messages)
+		}
+		if messages[1].Role != "system" || !strings.Contains(messages[1].Content, "更早对话的压缩记录") || !strings.Contains(messages[1].Content, "旧问题") {
+			t.Fatalf("summary = %#v", messages[1])
+		}
+		if messages[2].Content != "新问题" || messages[3].Content != "新回答" {
+			t.Fatalf("recent history = %#v", messages[2:4])
+		}
+		return modelclient.ChatResponse{Message: "OK"}, nil
+	}}
+	service, err := agentservice.NewServiceWithLimits(chat, &searcherStub{}, 3, time.Minute, agent.DefaultMaxToolResultBytes, 3, 1024)
+	if err != nil {
+		t.Fatalf("NewServiceWithLimits() error = %v", err)
+	}
+	_, err = service.Answer(context.Background(), 7, agentservice.ChatRequest{
+		Message: "当前问题",
+		History: []agentservice.HistoryMessage{
+			{Role: "user", Content: "旧问题"},
+			{Role: "assistant", Content: "旧回答"},
+			{Role: "user", Content: "新问题"},
+			{Role: "assistant", Content: "新回答"},
 		},
 	})
 	if err != nil {
