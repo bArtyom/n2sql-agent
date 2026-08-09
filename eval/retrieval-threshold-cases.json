@@ -1,0 +1,142 @@
+[
+  {
+    "id": "memory-problem",
+    "knowledge_base_id": 1,
+    "question": "这份资料认为现有 Text-to-SQL Memory 系统主要缺少哪些关键能力？",
+    "expected_relevant": true,
+    "notes": "文档明确列出三个关键能力"
+  },
+  {
+    "id": "research-focus",
+    "knowledge_base_id": 1,
+    "question": "这份研究建议 Text-to-SQL 长期记忆重点解决什么问题？",
+    "expected_relevant": true,
+    "notes": "对应研究重点段落"
+  },
+  {
+    "id": "memory-levels",
+    "knowledge_base_id": 1,
+    "question": "文档提出的分层长期记忆包括哪些层级？",
+    "expected_relevant": true,
+    "notes": "对应 Database/Table/Join/SQL/Error/Negative Memory"
+  },
+  {
+    "id": "probe-verified",
+    "knowledge_base_id": 1,
+    "question": "什么是 Probe-Verified Hierarchical SQL Memory？",
+    "expected_relevant": true,
+    "notes": "对应 Idea 1 标题和核心想法"
+  },
+  {
+    "id": "positive-probe",
+    "knowledge_base_id": 1,
+    "question": "Positive Probe 在这份资料中是用来做什么的？",
+    "expected_relevant": true,
+    "notes": "对应 Probe 类型说明"
+  },
+  {
+    "id": "negative-probe",
+    "knowledge_base_id": 1,
+    "question": "Negative Probe 和 Positive Probe 有什么区别？",
+    "expected_relevant": true,
+    "notes": "对应正向和负向验证"
+  },
+  {
+    "id": "memory-manager",
+    "knowledge_base_id": 1,
+    "question": "Memory Manager 支持哪些记忆生命周期操作？",
+    "expected_relevant": true,
+    "notes": "对应 ADD、UPDATE_SCOPE、MERGE 等操作"
+  },
+  {
+    "id": "counterexample",
+    "knowledge_base_id": 1,
+    "question": "为什么 SQL Memory 需要进行 Counterexample Search？",
+    "expected_relevant": true,
+    "notes": "对应反例搜索的设计动机"
+  },
+  {
+    "id": "reward",
+    "knowledge_base_id": 1,
+    "question": "文档给出的记忆奖励函数包含哪些因素？",
+    "expected_relevant": true,
+    "notes": "对应 Reward 示例"
+  },
+  {
+    "id": "causal-credit",
+    "knowledge_base_id": 1,
+    "question": "Causal Memory Credit 想解决什么问题？",
+    "expected_relevant": true,
+    "notes": "对应 Idea 2 的核心想法"
+  },
+  {
+    "id": "counterfactual",
+    "knowledge_base_id": 1,
+    "question": "如何通过 with-memory 和 without-memory 比较记忆是否有益？",
+    "expected_relevant": true,
+    "notes": "对应反事实配对干预"
+  },
+  {
+    "id": "stage-aware",
+    "knowledge_base_id": 1,
+    "question": "文档列出了哪些 Text-to-SQL 阶段来评估记忆效用？",
+    "expected_relevant": true,
+    "notes": "对应 QUESTION_REWRITE、SCHEMA_LINKING 等阶段"
+  },
+  {
+    "id": "weather",
+    "knowledge_base_id": 1,
+    "question": "北京今天的天气怎么样？",
+    "expected_relevant": false,
+    "notes": "文档外问题"
+  },
+  {
+    "id": "leave-policy",
+    "knowledge_base_id": 1,
+    "question": "公司年假有多少天？",
+    "expected_relevant": false,
+    "notes": "文档外问题"
+  },
+  {
+    "id": "go-start",
+    "knowledge_base_id": 1,
+    "question": "Go 服务应该如何启动？",
+    "expected_relevant": false,
+    "notes": "文档外问题"
+  },
+  {
+    "id": "pgvector",
+    "knowledge_base_id": 1,
+    "question": "pgvector 的索引应该如何创建？",
+    "expected_relevant": false,
+    "notes": "文档外问题"
+  },
+  {
+    "id": "ocr",
+    "knowledge_base_id": 1,
+    "question": "扫描 PDF 的 OCR 流程是什么？",
+    "expected_relevant": false,
+    "notes": "文档外问题"
+  },
+  {
+    "id": "travel",
+    "knowledge_base_id": 1,
+    "question": "上海有哪些适合周末旅行的地方？",
+    "expected_relevant": false,
+    "notes": "文档外问题"
+  },
+  {
+    "id": "database-schema",
+    "knowledge_base_id": 1,
+    "question": "这份资料中的数据库有哪些真实表和字段？",
+    "expected_relevant": false,
+    "notes": "文档讨论的是研究想法，不是实际数据库 schema"
+  },
+  {
+    "id": "frontend-design",
+    "knowledge_base_id": 1,
+    "question": "前端页面应该使用什么颜色和布局？",
+    "expected_relevant": false,
+    "notes": "文档外问题"
+  }
+]

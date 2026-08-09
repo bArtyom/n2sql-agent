@@ -100,3 +100,28 @@ npm run dev
 ```
 
 前端默认运行在 `http://localhost:5173`，并将后端请求代理到 `http://localhost:8080`。
+
+## 检索阈值评测
+
+`retrieval-eval` 用一组带 `expected_relevant` 标签的问题比较多个 pgvector 距离阈值。它只调用 Embedding 和检索，不调用聊天模型。
+
+先执行不产生外部调用的 dry-run：
+
+```sh
+go run ./cmd/retrieval-eval \
+  --cases eval/retrieval-threshold-cases.json
+```
+
+确认 `.env` 已导出、PostgreSQL 正在运行且允许消耗 Embedding 配额后，再执行真实评测：
+
+```sh
+set -a
+. ./.env
+set +a
+go run ./cmd/retrieval-eval \
+  --live \
+  --cases eval/retrieval-threshold-cases.json \
+  --thresholds 0.55,0.60,0.65,0.70,0.75
+```
+
+输出中的 `recall` 表示文档内问题被命中的比例，`refusal_rate` 表示文档外问题被正确拒答的比例，`false_refusals` 和 `unsupported_accepts` 分别表示误拒答和漏拒答。新增问题时复制 JSON 中的字段，并明确标注 `expected_relevant`，不要用模型自动生成标签。
