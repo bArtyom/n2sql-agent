@@ -32,6 +32,9 @@ type HistorySummaryStats struct {
 	Attempted        bool   `json:"attempted"`
 	Used             bool   `json:"used"`
 	Fallback         bool   `json:"fallback"`
+	CacheHit         bool   `json:"cache_hit"`
+	CacheMiss        bool   `json:"cache_miss"`
+	Recursive        bool   `json:"recursive"`
 	DroppedTurns     int    `json:"dropped_turns"`
 	DroppedMessages  int    `json:"dropped_messages"`
 	SummaryBytes     int    `json:"summary_bytes"`
@@ -70,6 +73,7 @@ func buildHistoryMessages(ctx context.Context, history []HistoryMessage, maxMess
 		}
 		normalized = filtered
 	}
+	cached := cachedSummary != nil && strings.TrimSpace(cachedSummary.Content) != ""
 	turns := historyTurns(normalized)
 	keptReversed := make([]modelclient.ChatMessage, 0, maxMessages)
 	remainingBytes := maxBytes
@@ -122,6 +126,10 @@ func buildHistoryMessages(ctx context.Context, history []HistoryMessage, maxMess
 				summary = mergeHistorySummary(cachedSummary.Content, summary, remainingBytes)
 			}
 		}
+		summaryStats.CacheHit = cached
+		summaryStats.CacheMiss = !cached
+		_, recursive := summarizer.(RecursiveHistorySummarizer)
+		summaryStats.Recursive = cached && recursive
 		if summary != "" {
 			historyMessages = append([]modelclient.ChatMessage{{Role: "system", Content: summary}}, historyMessages...)
 		}
@@ -133,7 +141,7 @@ func buildHistoryMessages(ctx context.Context, history []HistoryMessage, maxMess
 			historyMessages = append([]modelclient.ChatMessage{{Role: "system", Content: cached}}, historyMessages...)
 		}
 	}
-	return historyMessages, HistorySummaryStats{}, nil
+	return historyMessages, HistorySummaryStats{CacheHit: cached}, nil
 }
 
 func mergeHistorySummary(cachedContent, newSummary string, maxBytes int) string {

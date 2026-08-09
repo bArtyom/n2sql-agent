@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
@@ -66,10 +67,37 @@ type Store interface {
 }
 
 type Service struct {
-	store Store
+	store        Store
+	summaryLocks sync.Map
 }
 
 func NewService(store Store) *Service { return &Service{store: store} }
+
+func (s *Service) WithSummaryLock(ctx context.Context, conversationID, knowledgeBaseID int64, fn func() error) error {
+	if fn == nil {
+		return ErrInvalidConversation
+	}
+	if _, err := s.getOwnedConversation(ctx, conversationID, knowledgeBaseID); err != nil {
+		return err
+	}
+	lock := s.summaryLock(conversationID)
+	select {
+	case lock <- struct{}{}:
+		defer func() { <-lock }()
+		return fn()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Service) summaryLock(conversationID int64) chan struct{} {
+	if lock, ok := s.summaryLocks.Load(conversationID); ok {
+		return lock.(chan struct{})
+	}
+	created := make(chan struct{}, 1)
+	actual, _ := s.summaryLocks.LoadOrStore(conversationID, created)
+	return actual.(chan struct{})
+}
 
 func (s *Service) Create(ctx context.Context, knowledgeBaseID int64, title string) (Conversation, error) {
 	if knowledgeBaseID <= 0 {

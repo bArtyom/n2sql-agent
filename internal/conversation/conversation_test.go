@@ -128,6 +128,46 @@ func TestServiceLoadsAndSavesScopedSummary(t *testing.T) {
 	}
 }
 
+func TestServiceSerializesSummaryWorkPerConversation(t *testing.T) {
+	service := conversation.NewService(&storeStub{conversation: conversation.Conversation{ID: 9, KnowledgeBaseID: 7}})
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondStarted := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- service.WithSummaryLock(context.Background(), 9, 7, func() error {
+			close(firstStarted)
+			<-releaseFirst
+			return nil
+		})
+	}()
+	<-firstStarted
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- service.WithSummaryLock(context.Background(), 9, 7, func() error {
+			close(secondStarted)
+			return nil
+		})
+	}()
+	select {
+	case <-secondStarted:
+		t.Fatal("second summary callback started before first released")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first lock error = %v", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second lock error = %v", err)
+	}
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("second summary callback did not start")
+	}
+}
+
 func TestServiceRejectsInvalidConversationInputs(t *testing.T) {
 	service := conversation.NewService(&storeStub{})
 	if _, err := service.Create(context.Background(), 0, "标题"); !errors.Is(err, conversation.ErrInvalidKnowledgeBase) {

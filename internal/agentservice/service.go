@@ -172,7 +172,7 @@ func responseFromRun(result agentruntime.Result, historySummaryStats HistorySumm
 }
 
 func historySummaryStatsPointer(stats HistorySummaryStats) *HistorySummaryStats {
-	if stats.DroppedMessages == 0 {
+	if stats.DroppedMessages == 0 && !stats.CacheHit && !stats.CacheMiss {
 		return nil
 	}
 	return &stats

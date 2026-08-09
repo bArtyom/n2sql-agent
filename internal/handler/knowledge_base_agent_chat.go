@@ -39,25 +39,37 @@ func NewKnowledgeBaseAgentChatWithConversation(answerer agentservice.Answerer, c
 		if !ok {
 			return
 		}
-		if err := loadConversationHistory(r.Context(), conversations, knowledgeBaseID, &request); err != nil {
-			writeKnowledgeBaseAgentChatError(w, err)
-			return
-		}
-
-		response, err := answerer.Answer(r.Context(), knowledgeBaseID, request)
+		var response agentservice.Response
+		err := withConversationSummaryLock(r.Context(), conversations, knowledgeBaseID, request.ConversationID, func() error {
+			if err := loadConversationHistory(r.Context(), conversations, knowledgeBaseID, &request); err != nil {
+				return err
+			}
+			var err error
+			response, err = answerer.Answer(r.Context(), knowledgeBaseID, request)
+			if err != nil {
+				return err
+			}
+			if err := saveConversationExchange(r.Context(), conversations, request, response.Answer); err != nil {
+				return err
+			}
+			if err := saveConversationSummary(r.Context(), conversations, knowledgeBaseID, request, response); err != nil {
+				log.Printf("conversation summary save failed: %v", err)
+			}
+			return nil
+		})
 		if err != nil {
 			writeKnowledgeBaseAgentChatError(w, err)
 			return
 		}
-		if err := saveConversationExchange(r.Context(), conversations, request, response.Answer); err != nil {
-			writeKnowledgeBaseAgentChatError(w, err)
-			return
-		}
-		if err := saveConversationSummary(r.Context(), conversations, knowledgeBaseID, request, response); err != nil {
-			log.Printf("conversation summary save failed: %v", err)
-		}
 		writeJSON(w, response)
 	})
+}
+
+func withConversationSummaryLock(ctx context.Context, conversations *conversation.Service, knowledgeBaseID, conversationID int64, fn func() error) error {
+	if conversationID == 0 || conversations == nil {
+		return fn()
+	}
+	return conversations.WithSummaryLock(ctx, conversationID, knowledgeBaseID, fn)
 }
 
 func decodeKnowledgeBaseAgentChatRequest(w http.ResponseWriter, r *http.Request, maxHistoryBytes int) (int64, agentservice.ChatRequest, bool) {

@@ -31,10 +31,6 @@ func NewKnowledgeBaseAgentChatStreamWithConversation(answerer agentservice.Event
 		if !ok {
 			return
 		}
-		if err := loadConversationHistory(r.Context(), conversations, knowledgeBaseID, &request); err != nil {
-			writeKnowledgeBaseAgentChatError(w, err)
-			return
-		}
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			http.Error(w, `{"error":"streaming is not supported"}`, http.StatusInternalServerError)
@@ -49,7 +45,39 @@ func NewKnowledgeBaseAgentChatStreamWithConversation(answerer agentservice.Event
 		emit := func(event agent.Event) error {
 			return writeAgentSSEEvent(w, flusher, string(event.Type), event)
 		}
-		response, err := answerer.AnswerWithEvents(r.Context(), knowledgeBaseID, request, emit)
+		var response agentservice.Response
+		var conversationSaveErr error
+		err := withConversationSummaryLock(r.Context(), conversations, knowledgeBaseID, request.ConversationID, func() error {
+			if err := loadConversationHistory(r.Context(), conversations, knowledgeBaseID, &request); err != nil {
+				return err
+			}
+			var err error
+			response, err = answerer.AnswerWithEvents(r.Context(), knowledgeBaseID, request, emit)
+			if err != nil {
+				return err
+			}
+			if err := saveConversationExchange(r.Context(), conversations, request, response.Answer); err != nil {
+				conversationSaveErr = err
+				message, _ := knowledgeBaseAgentChatError(err)
+				if writeErr := writeAgentSSEEvent(w, flusher, "conversation_save_failed", struct {
+					Error string `json:"error"`
+				}{Error: message}); writeErr != nil {
+					log.Printf("agent SSE conversation save error event write failed: %v", writeErr)
+				}
+				return nil
+			}
+			if err := saveConversationSummary(r.Context(), conversations, knowledgeBaseID, request, response); err != nil {
+				log.Printf("agent SSE conversation summary save failed: %v", err)
+			}
+			if request.ConversationID != 0 {
+				if writeErr := writeAgentSSEEvent(w, flusher, "conversation_saved", struct {
+					ConversationID int64 `json:"conversation_id"`
+				}{ConversationID: request.ConversationID}); writeErr != nil {
+					log.Printf("agent SSE conversation saved event write failed: %v", writeErr)
+				}
+			}
+			return nil
+		})
 		if err != nil {
 			if r.Context().Err() != nil {
 				return
@@ -60,29 +88,9 @@ func NewKnowledgeBaseAgentChatStreamWithConversation(answerer agentservice.Event
 			}{Error: message}); writeErr != nil {
 				log.Printf("agent SSE error event write failed: %v", writeErr)
 			}
+		}
+		if conversationSaveErr != nil {
 			return
-		}
-		if err := saveConversationExchange(r.Context(), conversations, request, response.Answer); err != nil {
-			if r.Context().Err() != nil {
-				return
-			}
-			message, _ := knowledgeBaseAgentChatError(err)
-			if writeErr := writeAgentSSEEvent(w, flusher, "conversation_save_failed", struct {
-				Error string `json:"error"`
-			}{Error: message}); writeErr != nil {
-				log.Printf("agent SSE conversation save error event write failed: %v", writeErr)
-			}
-			return
-		}
-		if err := saveConversationSummary(r.Context(), conversations, knowledgeBaseID, request, response); err != nil {
-			log.Printf("agent SSE conversation summary save failed: %v", err)
-		}
-		if request.ConversationID != 0 {
-			if writeErr := writeAgentSSEEvent(w, flusher, "conversation_saved", struct {
-				ConversationID int64 `json:"conversation_id"`
-			}{ConversationID: request.ConversationID}); writeErr != nil {
-				log.Printf("agent SSE conversation saved event write failed: %v", writeErr)
-			}
 		}
 	})
 }

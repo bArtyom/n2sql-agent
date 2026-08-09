@@ -351,7 +351,7 @@ func TestServiceUsesCachedHistorySummaryAndSkipsCoveredMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewServiceWithLimitsAndSummarizer() error = %v", err)
 	}
-	_, err = service.Answer(context.Background(), 7, agentservice.ChatRequest{
+	response, err := service.Answer(context.Background(), 7, agentservice.ChatRequest{
 		Message:       "当前问题",
 		CachedSummary: &agentservice.CachedHistorySummary{ThroughMessageID: 2, Content: "之前摘要"},
 		History: []agentservice.HistoryMessage{
@@ -363,6 +363,9 @@ func TestServiceUsesCachedHistorySummaryAndSkipsCoveredMessages(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Answer() error = %v", err)
+	}
+	if response.HistorySummary == nil || !response.HistorySummary.CacheHit || response.HistorySummary.CacheMiss {
+		t.Fatalf("cache stats = %#v", response.HistorySummary)
 	}
 	if summarizer.called != 0 {
 		t.Fatalf("summarizer calls = %d, want 0", summarizer.called)
