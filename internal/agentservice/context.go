@@ -21,19 +21,34 @@ type ChatRequest struct {
 	ConversationID int64            `json:"conversation_id,omitempty"`
 }
 
-func buildHistoryMessages(ctx context.Context, history []HistoryMessage, maxMessages, maxBytes int, summarizer HistorySummarizer) ([]modelclient.ChatMessage, error) {
+type HistorySummaryStats struct {
+	Attempted        bool  `json:"attempted"`
+	Used             bool  `json:"used"`
+	Fallback         bool  `json:"fallback"`
+	DroppedTurns     int   `json:"dropped_turns"`
+	DroppedMessages  int   `json:"dropped_messages"`
+	SummaryBytes     int   `json:"summary_bytes"`
+	InputMessages    int   `json:"input_messages"`
+	InputBytes       int   `json:"input_bytes"`
+	PromptTokens     int   `json:"prompt_tokens,omitempty"`
+	CompletionTokens int   `json:"completion_tokens,omitempty"`
+	TotalTokens      int   `json:"total_tokens,omitempty"`
+	DurationMS       int64 `json:"duration_ms"`
+}
+
+func buildHistoryMessages(ctx context.Context, history []HistoryMessage, maxMessages, maxBytes int, summarizer HistorySummarizer) ([]modelclient.ChatMessage, HistorySummaryStats, error) {
 	if maxMessages <= 0 || maxBytes <= 0 {
-		return nil, ErrInvalidRequest
+		return nil, HistorySummaryStats{}, ErrInvalidRequest
 	}
 
 	normalized := make([]HistoryMessage, len(history))
 	for index, message := range history {
 		if message.Role != "user" && message.Role != "assistant" {
-			return nil, ErrInvalidRequest
+			return nil, HistorySummaryStats{}, ErrInvalidRequest
 		}
 		message.Content = strings.TrimSpace(message.Content)
 		if message.Content == "" {
-			return nil, ErrInvalidRequest
+			return nil, HistorySummaryStats{}, ErrInvalidRequest
 		}
 		normalized[index] = message
 	}
@@ -79,33 +94,56 @@ func buildHistoryMessages(ctx context.Context, history []HistoryMessage, maxMess
 		historyMessages[len(keptReversed)-1-index] = keptReversed[index]
 	}
 	if len(droppedTurns) > 0 && len(historyMessages) < maxMessages {
-		summary := summarizeDroppedTurns(ctx, droppedTurns, remainingBytes, summarizer)
+		summary, summaryStats := summarizeDroppedTurns(ctx, droppedTurns, remainingBytes, summarizer)
 		if summary != "" {
 			historyMessages = append([]modelclient.ChatMessage{{Role: "system", Content: summary}}, historyMessages...)
 		}
+		return historyMessages, summaryStats, nil
 	}
-	return historyMessages, nil
+	return historyMessages, HistorySummaryStats{}, nil
 }
 
-func summarizeDroppedTurns(ctx context.Context, turns [][]HistoryMessage, maxBytes int, summarizer HistorySummarizer) string {
+func summarizeDroppedTurns(ctx context.Context, turns [][]HistoryMessage, maxBytes int, summarizer HistorySummarizer) (string, HistorySummaryStats) {
+	history := flattenHistoryTurns(turns)
+	stats := HistorySummaryStats{
+		Attempted:       summarizer != nil,
+		DroppedTurns:    len(turns),
+		DroppedMessages: len(history),
+		InputMessages:   len(history),
+	}
+	for _, message := range history {
+		stats.InputBytes += len(message.Content)
+	}
 	if summarizer != nil {
-		history := flattenHistoryTurns(turns)
-		if summary, err := summarizer.Summarize(ctx, history); err == nil {
-			summary = strings.TrimSpace(summary)
+		if result, err := summarizer.Summarize(ctx, history); err == nil {
+			stats.DurationMS = result.DurationMS
+			if result.Usage != nil {
+				stats.PromptTokens = result.Usage.PromptTokens
+				stats.CompletionTokens = result.Usage.CompletionTokens
+				stats.TotalTokens = result.Usage.EffectiveTotal()
+			}
+			summary := strings.TrimSpace(result.Content)
 			if summary != "" && maxBytes > len(historySummaryPrefix) {
 				available := maxBytes - len(historySummaryPrefix)
 				if available > maxHistorySummaryBytes {
 					available = maxHistorySummaryBytes
 				}
 				if summary := truncateUTF8(summary, available); summary != "" {
-					return historySummaryPrefix + summary
+					stats.Used = true
+					stats.SummaryBytes = len(historySummaryPrefix) + len(summary)
+					return historySummaryPrefix + summary, stats
 				}
 			}
 		} else {
+			stats.Fallback = true
 			log.Printf("agent history semantic summary unavailable; using extractive fallback: %v", err)
 		}
 	}
-	return compactHistoryTurns(turns, maxBytes)
+	summary := compactHistoryTurns(turns, maxBytes)
+	if summary != "" {
+		stats.SummaryBytes = len(summary)
+	}
+	return summary, stats
 }
 
 func flattenHistoryTurns(turns [][]HistoryMessage) []HistoryMessage {

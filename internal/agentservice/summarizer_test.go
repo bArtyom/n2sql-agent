@@ -32,8 +32,8 @@ func TestModelHistorySummarizerUsesChatWithoutTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Summarize() error = %v", err)
 	}
-	if summary != "用户之前询问了旧问题。" {
-		t.Fatalf("summary = %q", summary)
+	if summary.Content != "用户之前询问了旧问题。" {
+		t.Fatalf("summary = %#v", summary)
 	}
 }
 

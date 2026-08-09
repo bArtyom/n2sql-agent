@@ -38,11 +38,12 @@ type EventAnswerer interface {
 }
 
 type Response struct {
-	Answer string          `json:"answer"`
-	RunID  string          `json:"run_id"`
-	Status agent.RunStatus `json:"status"`
-	Steps  []agent.Step    `json:"steps"`
-	Stats  *agent.RunStats `json:"stats,omitempty"`
+	Answer         string               `json:"answer"`
+	RunID          string               `json:"run_id"`
+	Status         agent.RunStatus      `json:"status"`
+	Steps          []agent.Step         `json:"steps"`
+	Stats          *agent.RunStats      `json:"stats,omitempty"`
+	HistorySummary *HistorySummaryStats `json:"history_summary,omitempty"`
 }
 
 type Service struct {
@@ -118,7 +119,7 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	}
 	runContext, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-	history, err := buildHistoryMessages(runContext, request.History, s.maxHistoryMessages, s.maxHistoryBytes, s.historySummarizer)
+	history, historySummaryStats, err := buildHistoryMessages(runContext, request.History, s.maxHistoryMessages, s.maxHistoryBytes, s.historySummarizer)
 	if err != nil {
 		return Response{}, err
 	}
@@ -142,9 +143,9 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	if sink == nil {
 		result, err = engine.Run(runContext, runID, messages)
 	} else {
-		result, err = engine.RunWithEvents(runContext, runID, messages, sink)
+		result, err = engine.RunWithEvents(runContext, runID, messages, withHistorySummaryStats(sink, historySummaryStats))
 	}
-	response := responseFromRun(result)
+	response := responseFromRun(result, historySummaryStats)
 	if err != nil {
 		return response, fmt.Errorf("run agent answer: %w", err)
 	}
@@ -155,16 +156,39 @@ func (s *Service) nextRunID() string {
 	return fmt.Sprintf("agent-run-%d-%d", time.Now().UnixNano(), s.sequence.Add(1))
 }
 
-func responseFromRun(result agentruntime.Result) Response {
+func responseFromRun(result agentruntime.Result, historySummaryStats HistorySummaryStats) Response {
 	if result.Run == nil {
 		return Response{}
 	}
 	stats := result.Run.Stats()
 	return Response{
-		Answer: result.Run.FinalAnswer(),
-		RunID:  result.Run.ID(),
-		Status: result.Run.Status(),
-		Steps:  result.Run.Steps(),
-		Stats:  &stats,
+		Answer:         result.Run.FinalAnswer(),
+		RunID:          result.Run.ID(),
+		Status:         result.Run.Status(),
+		Steps:          result.Run.Steps(),
+		Stats:          &stats,
+		HistorySummary: historySummaryStatsPointer(historySummaryStats),
+	}
+}
+
+func historySummaryStatsPointer(stats HistorySummaryStats) *HistorySummaryStats {
+	if stats.DroppedMessages == 0 {
+		return nil
+	}
+	return &stats
+}
+
+func withHistorySummaryStats(sink agentruntime.EventSink, stats HistorySummaryStats) agentruntime.EventSink {
+	if sink == nil || stats.DroppedMessages == 0 {
+		return sink
+	}
+	return func(event agent.Event) error {
+		switch event.Type {
+		case agent.EventRunFinished, agent.EventRunFailed, agent.EventRunCanceled:
+			if data, ok := event.Data.(map[string]any); ok {
+				data["history_summary"] = stats
+			}
+		}
+		return sink(event)
 	}
 }
