@@ -121,16 +121,16 @@ func TestServiceAnswersUsingScopedKnowledgeSearchTool(t *testing.T) {
 func TestServiceIncludesBoundedConversationHistory(t *testing.T) {
 	chat := chatStub{call: func(messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 		if len(messages) != 4 {
-			t.Fatalf("messages = %#v, want system, two recent history messages, and current question", messages)
+			t.Fatalf("messages = %#v, want system, one complete recent turn, and current question", messages)
 		}
 		if messages[0].Role != "system" {
 			t.Fatalf("messages[0] = %#v, want system prompt", messages[0])
 		}
-		if messages[1].Role != "assistant" || messages[1].Content != "第一轮回答" {
-			t.Fatalf("messages[1] = %#v, want most recent history window", messages[1])
+		if messages[1].Role != "user" || messages[1].Content != "第二轮问题" {
+			t.Fatalf("messages[1] = %#v, want most recent complete turn", messages[1])
 		}
-		if messages[2].Role != "user" || messages[2].Content != "第二轮问题" {
-			t.Fatalf("messages[2] = %#v, want most recent history window", messages[2])
+		if messages[2].Role != "assistant" || messages[2].Content != "第二轮回答" {
+			t.Fatalf("messages[2] = %#v, want most recent complete turn", messages[2])
 		}
 		if messages[3].Role != "user" || messages[3].Content != "第三轮问题" {
 			t.Fatalf("messages[3] = %#v, want current question", messages[3])
@@ -156,6 +156,7 @@ func TestServiceIncludesBoundedConversationHistory(t *testing.T) {
 			{Role: "user", Content: "第一轮问题"},
 			{Role: "assistant", Content: "第一轮回答"},
 			{Role: "user", Content: "第二轮问题"},
+			{Role: "assistant", Content: "第二轮回答"},
 		},
 	})
 	if err != nil {
@@ -163,6 +164,31 @@ func TestServiceIncludesBoundedConversationHistory(t *testing.T) {
 	}
 	if response.Answer != "基于上下文的回答" {
 		t.Fatalf("answer = %q", response.Answer)
+	}
+}
+
+func TestServiceDropsOrphanAssistantHistory(t *testing.T) {
+	chat := chatStub{call: func(messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		if len(messages) != 3 || messages[1].Role != "user" || messages[1].Content != "最新问题" {
+			t.Fatalf("messages = %#v, want only the incomplete latest user turn", messages)
+		}
+		return modelclient.ChatResponse{Message: "OK"}, nil
+	}}
+	service, err := agentservice.NewServiceWithLimits(chat, &searcherStub{}, 3, time.Minute, agent.DefaultMaxToolResultBytes, 2, 128)
+	if err != nil {
+		t.Fatalf("NewServiceWithLimits() error = %v", err)
+	}
+	_, err = service.Answer(context.Background(), 7, agentservice.ChatRequest{
+		Message: "当前问题",
+		History: []agentservice.HistoryMessage{
+			{Role: "user", Content: "旧问题"},
+			{Role: "assistant", Content: "旧回答"},
+			{Role: "assistant", Content: "孤立回答"},
+			{Role: "user", Content: "最新问题"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Answer() error = %v", err)
 	}
 }
 

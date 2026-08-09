@@ -35,20 +35,35 @@ func buildHistoryMessages(history []HistoryMessage, maxMessages, maxBytes int) (
 		}
 		normalized[index] = message
 	}
-	if len(normalized) > maxMessages {
-		normalized = normalized[len(normalized)-maxMessages:]
-	}
-
-	keptReversed := make([]modelclient.ChatMessage, 0, len(normalized))
+	turns := historyTurns(normalized)
+	keptReversed := make([]modelclient.ChatMessage, 0, maxMessages)
 	remainingBytes := maxBytes
-	for index := len(normalized) - 1; index >= 0 && remainingBytes > 0; index-- {
-		message := normalized[index]
-		content := truncateUTF8(message.Content, remainingBytes)
-		if content == "" {
+	keptMessages := 0
+	for _, turn := range turns {
+		if keptMessages+len(turn) > maxMessages {
 			break
 		}
-		keptReversed = append(keptReversed, modelclient.ChatMessage{Role: message.Role, Content: content})
-		remainingBytes -= len(content)
+		turnBytes := 0
+		for _, message := range turn {
+			turnBytes += len(message.Content)
+		}
+		if turnBytes > remainingBytes {
+			// Never split a complete user/assistant turn. A lone latest user
+			// message may still be truncated to honor the byte budget.
+			if keptMessages == 0 && len(turn) == 1 && remainingBytes > 0 {
+				content := truncateUTF8(turn[0].Content, remainingBytes)
+				if content != "" {
+					keptReversed = append(keptReversed, modelclient.ChatMessage{Role: turn[0].Role, Content: content})
+				}
+			}
+			break
+		}
+		for index := len(turn) - 1; index >= 0; index-- {
+			message := turn[index]
+			keptReversed = append(keptReversed, modelclient.ChatMessage{Role: message.Role, Content: message.Content})
+		}
+		keptMessages += len(turn)
+		remainingBytes -= turnBytes
 	}
 
 	historyMessages := make([]modelclient.ChatMessage, len(keptReversed))
@@ -56,6 +71,28 @@ func buildHistoryMessages(history []HistoryMessage, maxMessages, maxBytes int) (
 		historyMessages[len(keptReversed)-1-index] = keptReversed[index]
 	}
 	return historyMessages, nil
+}
+
+// historyTurns groups the newest history into complete user/assistant turns.
+// An orphan assistant message is ignored because it has no user question to
+// provide context for. A trailing user message is retained as an incomplete
+// latest turn, which supports clients that send the current draft history.
+func historyTurns(history []HistoryMessage) [][]HistoryMessage {
+	turns := make([][]HistoryMessage, 0, len(history)/2+1)
+	for index := len(history) - 1; index >= 0; {
+		if history[index].Role == "assistant" {
+			if index > 0 && history[index-1].Role == "user" {
+				turns = append(turns, history[index-1:index+1])
+				index -= 2
+				continue
+			}
+			index--
+			continue
+		}
+		turns = append(turns, history[index:index+1])
+		index--
+	}
+	return turns
 }
 
 func truncateUTF8(value string, maxBytes int) string {
