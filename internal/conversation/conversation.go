@@ -41,6 +41,13 @@ type Message struct {
 	CreatedAt      time.Time `json:"createdAt"`
 }
 
+type Summary struct {
+	ConversationID   int64     `json:"conversationId"`
+	ThroughMessageID int64     `json:"throughMessageId"`
+	Content          string    `json:"content"`
+	UpdatedAt        time.Time `json:"updatedAt"`
+}
+
 type CreateInput struct {
 	KnowledgeBaseID int64
 	Title           string
@@ -51,6 +58,8 @@ type Store interface {
 	Get(context.Context, int64) (Conversation, error)
 	List(context.Context, int64) ([]Conversation, error)
 	ListMessages(context.Context, int64) ([]Message, error)
+	GetSummary(context.Context, int64) (Summary, error)
+	SaveSummary(context.Context, int64, int64, string) error
 	AppendExchange(context.Context, int64, string, string) error
 	UpdateTitle(context.Context, int64, string) (Conversation, error)
 	Delete(context.Context, int64) error
@@ -138,9 +147,30 @@ func (s *Service) History(ctx context.Context, conversationID, knowledgeBaseID i
 		if (message.Role != "user" && message.Role != "assistant") || strings.TrimSpace(message.Content) == "" {
 			return nil, fmt.Errorf("%w: stored message %d", ErrInvalidMessage, message.ID)
 		}
-		history = append(history, agentservice.HistoryMessage{Role: message.Role, Content: message.Content})
+		history = append(history, agentservice.HistoryMessage{ID: message.ID, Role: message.Role, Content: message.Content})
 	}
 	return history, nil
+}
+
+func (s *Service) Summary(ctx context.Context, conversationID, knowledgeBaseID int64) (Summary, error) {
+	if _, err := s.getOwnedConversation(ctx, conversationID, knowledgeBaseID); err != nil {
+		return Summary{}, err
+	}
+	return s.store.GetSummary(ctx, conversationID)
+}
+
+func (s *Service) SaveSummary(ctx context.Context, conversationID, knowledgeBaseID, throughMessageID int64, content string) error {
+	if conversationID <= 0 || knowledgeBaseID <= 0 || throughMessageID <= 0 {
+		return ErrInvalidConversation
+	}
+	if _, err := s.getOwnedConversation(ctx, conversationID, knowledgeBaseID); err != nil {
+		return err
+	}
+	content = strings.TrimSpace(content)
+	if content == "" || len(content) > maxMessageSize {
+		return ErrInvalidMessage
+	}
+	return s.store.SaveSummary(ctx, conversationID, throughMessageID, content)
 }
 
 func (s *Service) SaveExchange(ctx context.Context, conversationID int64, userMessage, assistantMessage string) error {
@@ -283,6 +313,48 @@ func (s *PostgresStore) ListMessages(ctx context.Context, conversationID int64) 
 		return nil, fmt.Errorf("iterate conversation messages: %w", err)
 	}
 	return results, nil
+}
+
+func (s *PostgresStore) GetSummary(ctx context.Context, conversationID int64) (Summary, error) {
+	var result Summary
+	err := s.db.QueryRowContext(ctx, `
+		SELECT conversation_id, through_message_id, content, updated_at
+		FROM conversation_summaries
+		WHERE conversation_id = $1`, conversationID).Scan(
+		&result.ConversationID, &result.ThroughMessageID, &result.Content, &result.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Summary{}, ErrNotFound
+	}
+	if err != nil {
+		return Summary{}, fmt.Errorf("get conversation summary: %w", err)
+	}
+	return result, nil
+}
+
+func (s *PostgresStore) SaveSummary(ctx context.Context, conversationID, throughMessageID int64, content string) error {
+	result, err := s.db.ExecContext(ctx, `
+		INSERT INTO conversation_summaries (conversation_id, through_message_id, content)
+		SELECT c.id, $2, $3
+		FROM conversations c
+		JOIN conversation_messages m ON m.conversation_id = c.id AND m.id = $2
+		WHERE c.id = $1
+		ON CONFLICT (conversation_id) DO UPDATE
+		SET through_message_id = EXCLUDED.through_message_id,
+		    content = EXCLUDED.content,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE EXCLUDED.through_message_id > conversation_summaries.through_message_id`, conversationID, throughMessageID, content)
+	if err != nil {
+		return fmt.Errorf("save conversation summary: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check conversation summary: %w", err)
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *PostgresStore) AppendExchange(ctx context.Context, conversationID int64, userMessage, assistantMessage string) error {

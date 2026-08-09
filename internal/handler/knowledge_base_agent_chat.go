@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -51,6 +52,9 @@ func NewKnowledgeBaseAgentChatWithConversation(answerer agentservice.Answerer, c
 		if err := saveConversationExchange(r.Context(), conversations, request, response.Answer); err != nil {
 			writeKnowledgeBaseAgentChatError(w, err)
 			return
+		}
+		if err := saveConversationSummary(r.Context(), conversations, knowledgeBaseID, request, response); err != nil {
+			log.Printf("conversation summary save failed: %v", err)
 		}
 		writeJSON(w, response)
 	})
@@ -137,6 +141,15 @@ func loadConversationHistory(ctx context.Context, conversations *conversation.Se
 		return fmt.Errorf("load conversation history: %w", err)
 	}
 	request.History = history
+	summary, err := conversations.Summary(ctx, request.ConversationID, knowledgeBaseID)
+	if err == nil {
+		request.CachedSummary = &agentservice.CachedHistorySummary{
+			ThroughMessageID: summary.ThroughMessageID,
+			Content:          summary.Content,
+		}
+	} else if !errors.Is(err, conversation.ErrNotFound) {
+		return fmt.Errorf("load conversation summary: %w", err)
+	}
 	return nil
 }
 
@@ -146,6 +159,16 @@ func saveConversationExchange(ctx context.Context, conversations *conversation.S
 	}
 	if err := conversations.SaveExchange(ctx, request.ConversationID, request.Message, answer); err != nil {
 		return fmt.Errorf("save conversation exchange: %w", err)
+	}
+	return nil
+}
+
+func saveConversationSummary(ctx context.Context, conversations *conversation.Service, knowledgeBaseID int64, request agentservice.ChatRequest, response agentservice.Response) error {
+	if request.ConversationID == 0 || conversations == nil || response.HistorySummary == nil || !response.HistorySummary.Used || response.HistorySummary.ThroughMessageID == 0 {
+		return nil
+	}
+	if err := conversations.SaveSummary(ctx, request.ConversationID, knowledgeBaseID, response.HistorySummary.ThroughMessageID, response.HistorySummary.Content); err != nil {
+		return fmt.Errorf("save conversation summary: %w", err)
 	}
 	return nil
 }

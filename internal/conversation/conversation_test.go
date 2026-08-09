@@ -17,6 +17,8 @@ type storeStub struct {
 	exchangeUser string
 	exchangeBot  string
 	exchangeErr  error
+	summary      conversation.Summary
+	summaryErr   error
 }
 
 func (s *storeStub) Create(_ context.Context, input conversation.CreateInput) (conversation.Conversation, error) {
@@ -34,6 +36,15 @@ func (s *storeStub) List(context.Context, int64) ([]conversation.Conversation, e
 
 func (s *storeStub) ListMessages(context.Context, int64) ([]conversation.Message, error) {
 	return s.messages, nil
+}
+
+func (s *storeStub) GetSummary(context.Context, int64) (conversation.Summary, error) {
+	return s.summary, s.summaryErr
+}
+
+func (s *storeStub) SaveSummary(_ context.Context, conversationID, throughMessageID int64, content string) error {
+	s.summary = conversation.Summary{ConversationID: conversationID, ThroughMessageID: throughMessageID, Content: content}
+	return nil
 }
 
 func (s *storeStub) AppendExchange(_ context.Context, _ int64, user, assistant string) error {
@@ -78,8 +89,8 @@ func TestServiceLoadsScopedHistoryAsAgentMessages(t *testing.T) {
 		t.Fatalf("History() error = %v", err)
 	}
 	want := []agentservice.HistoryMessage{
-		{Role: "user", Content: "年假有几天？"},
-		{Role: "assistant", Content: "五天。"},
+		{ID: 1, Role: "user", Content: "年假有几天？"},
+		{ID: 2, Role: "assistant", Content: "五天。"},
 	}
 	if len(history) != len(want) || history[0] != want[0] || history[1] != want[1] {
 		t.Fatalf("history = %#v, want %#v", history, want)
@@ -95,6 +106,25 @@ func TestServiceSavesCompletedExchange(t *testing.T) {
 	}
 	if store.exchangeUser != "问题" || store.exchangeBot != "答案" {
 		t.Fatalf("saved exchange = %q / %q, want trimmed messages", store.exchangeUser, store.exchangeBot)
+	}
+}
+
+func TestServiceLoadsAndSavesScopedSummary(t *testing.T) {
+	store := &storeStub{
+		conversation: conversation.Conversation{ID: 9, KnowledgeBaseID: 7},
+		summary:      conversation.Summary{ConversationID: 9, ThroughMessageID: 12, Content: "之前讨论过年假。"},
+	}
+	service := conversation.NewService(store)
+
+	summary, err := service.Summary(context.Background(), 9, 7)
+	if err != nil || summary.ThroughMessageID != 12 {
+		t.Fatalf("Summary() = %#v, error = %v", summary, err)
+	}
+	if err := service.SaveSummary(context.Background(), 9, 7, 14, "  新摘要  "); err != nil {
+		t.Fatalf("SaveSummary() error = %v", err)
+	}
+	if store.summary.ThroughMessageID != 14 || store.summary.Content != "新摘要" {
+		t.Fatalf("saved summary = %#v", store.summary)
 	}
 }
 

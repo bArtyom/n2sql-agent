@@ -336,6 +336,39 @@ func TestServiceAddsHistorySummaryStatsToFinishedEvent(t *testing.T) {
 	}
 }
 
+func TestServiceUsesCachedHistorySummaryAndSkipsCoveredMessages(t *testing.T) {
+	chat := chatStub{call: func(messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		if len(messages) != 5 || !strings.Contains(messages[1].Content, "之前摘要") {
+			t.Fatalf("messages = %#v, want cached summary and only new history", messages)
+		}
+		if messages[2].Content != "新问题" || messages[3].Content != "新回答" {
+			t.Fatalf("history after cache = %#v", messages[2:4])
+		}
+		return modelclient.ChatResponse{Message: "OK"}, nil
+	}}
+	summarizer := &historySummarizerStub{summary: "不应调用"}
+	service, err := agentservice.NewServiceWithLimitsAndSummarizer(chat, &searcherStub{}, 3, time.Minute, agent.DefaultMaxToolResultBytes, 4, 1024, summarizer)
+	if err != nil {
+		t.Fatalf("NewServiceWithLimitsAndSummarizer() error = %v", err)
+	}
+	_, err = service.Answer(context.Background(), 7, agentservice.ChatRequest{
+		Message:       "当前问题",
+		CachedSummary: &agentservice.CachedHistorySummary{ThroughMessageID: 2, Content: "之前摘要"},
+		History: []agentservice.HistoryMessage{
+			{ID: 1, Role: "user", Content: "旧问题"},
+			{ID: 2, Role: "assistant", Content: "旧回答"},
+			{ID: 3, Role: "user", Content: "新问题"},
+			{ID: 4, Role: "assistant", Content: "新回答"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Answer() error = %v", err)
+	}
+	if summarizer.called != 0 {
+		t.Fatalf("summarizer calls = %d, want 0", summarizer.called)
+	}
+}
+
 func TestServiceTruncatesHistoryOnUTF8Boundary(t *testing.T) {
 	chat := chatStub{call: func(messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 		if len(messages) != 3 || messages[1].Content != "中" {

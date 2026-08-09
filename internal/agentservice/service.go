@@ -119,7 +119,7 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	}
 	runContext, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-	history, historySummaryStats, err := buildHistoryMessages(runContext, request.History, s.maxHistoryMessages, s.maxHistoryBytes, s.historySummarizer)
+	history, historySummaryStats, err := buildHistoryMessages(runContext, request.History, s.maxHistoryMessages, s.maxHistoryBytes, s.historySummarizer, request.CachedSummary)
 	if err != nil {
 		return Response{}, err
 	}

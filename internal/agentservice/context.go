@@ -10,33 +10,42 @@ import (
 
 // HistoryMessage is a trusted-shape conversation message supplied for short-term context.
 type HistoryMessage struct {
+	ID      int64  `json:"-"`
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
+type CachedHistorySummary struct {
+	ThroughMessageID int64
+	Content          string
+}
+
 // ChatRequest contains the current question and an optional bounded conversation history.
 type ChatRequest struct {
-	Message        string           `json:"message"`
-	History        []HistoryMessage `json:"history,omitempty"`
-	ConversationID int64            `json:"conversation_id,omitempty"`
+	Message        string                `json:"message"`
+	History        []HistoryMessage      `json:"history,omitempty"`
+	ConversationID int64                 `json:"conversation_id,omitempty"`
+	CachedSummary  *CachedHistorySummary `json:"-"`
 }
 
 type HistorySummaryStats struct {
-	Attempted        bool  `json:"attempted"`
-	Used             bool  `json:"used"`
-	Fallback         bool  `json:"fallback"`
-	DroppedTurns     int   `json:"dropped_turns"`
-	DroppedMessages  int   `json:"dropped_messages"`
-	SummaryBytes     int   `json:"summary_bytes"`
-	InputMessages    int   `json:"input_messages"`
-	InputBytes       int   `json:"input_bytes"`
-	PromptTokens     int   `json:"prompt_tokens,omitempty"`
-	CompletionTokens int   `json:"completion_tokens,omitempty"`
-	TotalTokens      int   `json:"total_tokens,omitempty"`
-	DurationMS       int64 `json:"duration_ms"`
+	Attempted        bool   `json:"attempted"`
+	Used             bool   `json:"used"`
+	Fallback         bool   `json:"fallback"`
+	DroppedTurns     int    `json:"dropped_turns"`
+	DroppedMessages  int    `json:"dropped_messages"`
+	SummaryBytes     int    `json:"summary_bytes"`
+	InputMessages    int    `json:"input_messages"`
+	InputBytes       int    `json:"input_bytes"`
+	PromptTokens     int    `json:"prompt_tokens,omitempty"`
+	CompletionTokens int    `json:"completion_tokens,omitempty"`
+	TotalTokens      int    `json:"total_tokens,omitempty"`
+	DurationMS       int64  `json:"duration_ms"`
+	Content          string `json:"-"`
+	ThroughMessageID int64  `json:"-"`
 }
 
-func buildHistoryMessages(ctx context.Context, history []HistoryMessage, maxMessages, maxBytes int, summarizer HistorySummarizer) ([]modelclient.ChatMessage, HistorySummaryStats, error) {
+func buildHistoryMessages(ctx context.Context, history []HistoryMessage, maxMessages, maxBytes int, summarizer HistorySummarizer, cachedSummary *CachedHistorySummary) ([]modelclient.ChatMessage, HistorySummaryStats, error) {
 	if maxMessages <= 0 || maxBytes <= 0 {
 		return nil, HistorySummaryStats{}, ErrInvalidRequest
 	}
@@ -51,6 +60,15 @@ func buildHistoryMessages(ctx context.Context, history []HistoryMessage, maxMess
 			return nil, HistorySummaryStats{}, ErrInvalidRequest
 		}
 		normalized[index] = message
+	}
+	if cachedSummary != nil && cachedSummary.ThroughMessageID > 0 && strings.TrimSpace(cachedSummary.Content) != "" {
+		filtered := normalized[:0]
+		for _, message := range normalized {
+			if message.ID == 0 || message.ID > cachedSummary.ThroughMessageID {
+				filtered = append(filtered, message)
+			}
+		}
+		normalized = filtered
 	}
 	turns := historyTurns(normalized)
 	keptReversed := make([]modelclient.ChatMessage, 0, maxMessages)
@@ -95,12 +113,48 @@ func buildHistoryMessages(ctx context.Context, history []HistoryMessage, maxMess
 	}
 	if len(droppedTurns) > 0 && len(historyMessages) < maxMessages {
 		summary, summaryStats := summarizeDroppedTurns(ctx, droppedTurns, remainingBytes, summarizer)
+		if cachedSummary != nil && strings.TrimSpace(cachedSummary.Content) != "" {
+			summary = mergeHistorySummary(cachedSummary.Content, summary, remainingBytes)
+			if summaryStats.Used {
+				summaryStats.Content = strings.TrimPrefix(summary, historySummaryPrefix)
+				summaryStats.SummaryBytes = len(summary)
+			}
+		}
 		if summary != "" {
 			historyMessages = append([]modelclient.ChatMessage{{Role: "system", Content: summary}}, historyMessages...)
 		}
 		return historyMessages, summaryStats, nil
 	}
+	if cachedSummary != nil && strings.TrimSpace(cachedSummary.Content) != "" {
+		cached := mergeHistorySummary(cachedSummary.Content, "", remainingBytes)
+		if cached != "" {
+			historyMessages = append([]modelclient.ChatMessage{{Role: "system", Content: cached}}, historyMessages...)
+		}
+	}
 	return historyMessages, HistorySummaryStats{}, nil
+}
+
+func mergeHistorySummary(cachedContent, newSummary string, maxBytes int) string {
+	content := strings.TrimSpace(cachedContent)
+	newContent := strings.TrimSpace(strings.TrimPrefix(newSummary, historySummaryPrefix))
+	if newContent != "" {
+		if content != "" {
+			content += "\n"
+		}
+		content += newContent
+	}
+	if content == "" || maxBytes <= len(historySummaryPrefix) {
+		return ""
+	}
+	available := maxBytes - len(historySummaryPrefix)
+	if available > maxHistorySummaryBytes {
+		available = maxHistorySummaryBytes
+	}
+	content = truncateUTF8(content, available)
+	if content == "" {
+		return ""
+	}
+	return historySummaryPrefix + content
 }
 
 func summarizeDroppedTurns(ctx context.Context, turns [][]HistoryMessage, maxBytes int, summarizer HistorySummarizer) (string, HistorySummaryStats) {
@@ -130,6 +184,12 @@ func summarizeDroppedTurns(ctx context.Context, turns [][]HistoryMessage, maxByt
 				}
 				if summary := truncateUTF8(summary, available); summary != "" {
 					stats.Used = true
+					stats.Content = summary
+					for _, message := range history {
+						if message.ID > stats.ThroughMessageID {
+							stats.ThroughMessageID = message.ID
+						}
+					}
 					stats.SummaryBytes = len(historySummaryPrefix) + len(summary)
 					return historySummaryPrefix + summary, stats
 				}

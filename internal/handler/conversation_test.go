@@ -42,6 +42,10 @@ func (s *conversationStoreStub) ListMessages(_ context.Context, id int64) ([]con
 	}
 	return result, nil
 }
+func (s *conversationStoreStub) GetSummary(context.Context, int64) (conversation.Summary, error) {
+	return conversation.Summary{}, conversation.ErrNotFound
+}
+func (s *conversationStoreStub) SaveSummary(context.Context, int64, int64, string) error { return nil }
 func (s *conversationStoreStub) AppendExchange(_ context.Context, id int64, user, assistant string) error {
 	s.messages = append(s.messages,
 		conversation.Message{ID: int64(len(s.messages) + 1), ConversationID: id, Role: "user", Content: user},

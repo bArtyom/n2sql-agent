@@ -74,6 +74,9 @@ func NewKnowledgeBaseAgentChatStreamWithConversation(answerer agentservice.Event
 			}
 			return
 		}
+		if err := saveConversationSummary(r.Context(), conversations, knowledgeBaseID, request, response); err != nil {
+			log.Printf("agent SSE conversation summary save failed: %v", err)
+		}
 		if request.ConversationID != 0 {
 			if writeErr := writeAgentSSEEvent(w, flusher, "conversation_saved", struct {
 				ConversationID int64 `json:"conversation_id"`
