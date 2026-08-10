@@ -2,6 +2,7 @@ package handler_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,8 +14,9 @@ import (
 )
 
 type conversationStoreStub struct {
-	records  []conversation.Conversation
-	messages []conversation.Message
+	records     []conversation.Conversation
+	messages    []conversation.Message
+	idempotency map[string]conversation.IdempotentResponse
 }
 
 func (s *conversationStoreStub) Create(_ context.Context, input conversation.CreateInput) (conversation.Conversation, error) {
@@ -71,6 +73,23 @@ func (s *conversationStoreStub) Delete(_ context.Context, id int64) error {
 		}
 	}
 	return conversation.ErrNotFound
+}
+
+func (s *conversationStoreStub) GetIdempotentResponse(_ context.Context, conversationID int64, key string) (conversation.IdempotentResponse, error) {
+	response, ok := s.idempotency[fmt.Sprintf("%d:%s", conversationID, key)]
+	if !ok {
+		return conversation.IdempotentResponse{}, conversation.ErrNotFound
+	}
+	response.Response = append([]byte(nil), response.Response...)
+	return response, nil
+}
+
+func (s *conversationStoreStub) SaveIdempotentResponse(_ context.Context, conversationID int64, key, requestHash string, response []byte) error {
+	if s.idempotency == nil {
+		s.idempotency = make(map[string]conversation.IdempotentResponse)
+	}
+	s.idempotency[fmt.Sprintf("%d:%s", conversationID, key)] = conversation.IdempotentResponse{RequestHash: requestHash, Response: append([]byte(nil), response...)}
+	return nil
 }
 
 func TestConversationHandlerCreatesAndListsConversation(t *testing.T) {

@@ -2,6 +2,8 @@ package handler
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,8 +41,27 @@ func NewKnowledgeBaseAgentChatWithConversation(answerer agentservice.Answerer, c
 		if !ok {
 			return
 		}
+		idempotencyKey, ok := decodeIdempotencyKey(w, r, request.ConversationID)
+		if !ok {
+			return
+		}
+		requestHash, err := idempotencyRequestHash(knowledgeBaseID, request)
+		if err != nil {
+			writeKnowledgeBaseAgentChatError(w, fmt.Errorf("hash idempotency request: %w", err))
+			return
+		}
 		var response agentservice.Response
-		err := withConversationSummaryLock(r.Context(), conversations, knowledgeBaseID, request.ConversationID, func() error {
+		err = withConversationSummaryLock(r.Context(), conversations, knowledgeBaseID, request.ConversationID, func() error {
+			if idempotencyKey != "" {
+				storedResponse, found, err := loadIdempotentResponse(r.Context(), conversations, knowledgeBaseID, request.ConversationID, idempotencyKey, requestHash)
+				if err != nil {
+					return err
+				}
+				if found {
+					response = storedResponse
+					return nil
+				}
+			}
 			if err := loadConversationHistory(r.Context(), conversations, knowledgeBaseID, &request); err != nil {
 				return err
 			}
@@ -55,6 +76,11 @@ func NewKnowledgeBaseAgentChatWithConversation(answerer agentservice.Answerer, c
 			if err := saveConversationSummary(r.Context(), conversations, knowledgeBaseID, request, response); err != nil {
 				log.Printf("conversation summary save failed: %v", err)
 			}
+			if idempotencyKey != "" {
+				if err := saveIdempotentResponse(r.Context(), conversations, knowledgeBaseID, request.ConversationID, idempotencyKey, requestHash, response); err != nil {
+					log.Printf("conversation idempotent response save failed: %v", err)
+				}
+			}
 			return nil
 		})
 		if err != nil {
@@ -63,6 +89,34 @@ func NewKnowledgeBaseAgentChatWithConversation(answerer agentservice.Answerer, c
 		}
 		writeJSON(w, response)
 	})
+}
+
+func decodeIdempotencyKey(w http.ResponseWriter, r *http.Request, conversationID int64) (string, bool) {
+	if conversationID == 0 {
+		return "", true
+	}
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if key == "" {
+		return "", true
+	}
+	if !conversation.ValidateIdempotencyKey(key) {
+		http.Error(w, `{"error":"invalid idempotency key"}`, http.StatusBadRequest)
+		return "", false
+	}
+	return key, true
+}
+
+func idempotencyRequestHash(knowledgeBaseID int64, request agentservice.ChatRequest) (string, error) {
+	payload, err := json.Marshal(struct {
+		KnowledgeBaseID int64  `json:"knowledge_base_id"`
+		ConversationID  int64  `json:"conversation_id"`
+		Message         string `json:"message"`
+	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func withConversationSummaryLock(ctx context.Context, conversations *conversation.Service, knowledgeBaseID, conversationID int64, fn func() error) error {
@@ -126,8 +180,10 @@ func knowledgeBaseAgentChatError(err error) (string, int) {
 	switch {
 	case errors.Is(err, agentservice.ErrInvalidRequest):
 		return "invalid agent chat request", http.StatusBadRequest
-	case errors.Is(err, conversation.ErrInvalidConversation), errors.Is(err, conversation.ErrInvalidKnowledgeBase), errors.Is(err, conversation.ErrInvalidMessage):
+	case errors.Is(err, conversation.ErrInvalidConversation), errors.Is(err, conversation.ErrInvalidKnowledgeBase), errors.Is(err, conversation.ErrInvalidMessage), errors.Is(err, conversation.ErrInvalidIdempotencyKey):
 		return "invalid conversation request", http.StatusBadRequest
+	case errors.Is(err, conversation.ErrIdempotencyConflict):
+		return "idempotency key was reused with a different request", http.StatusConflict
 	case errors.Is(err, conversation.ErrNotFound):
 		return "conversation not found", http.StatusNotFound
 	case errors.Is(err, context.DeadlineExceeded):
@@ -139,6 +195,38 @@ func knowledgeBaseAgentChatError(err error) (string, int) {
 	default:
 		return "agent chat failed", http.StatusBadGateway
 	}
+}
+
+func loadIdempotentResponse(ctx context.Context, conversations *conversation.Service, knowledgeBaseID, conversationID int64, key, requestHash string) (agentservice.Response, bool, error) {
+	if conversations == nil {
+		return agentservice.Response{}, false, errors.New("conversation service is unavailable")
+	}
+	data, err := conversations.GetIdempotentResponse(ctx, conversationID, knowledgeBaseID, key, requestHash)
+	if errors.Is(err, conversation.ErrNotFound) {
+		return agentservice.Response{}, false, nil
+	}
+	if err != nil {
+		return agentservice.Response{}, false, fmt.Errorf("load conversation idempotent response: %w", err)
+	}
+	var response agentservice.Response
+	if err := json.Unmarshal(data, &response); err != nil {
+		return agentservice.Response{}, false, fmt.Errorf("decode conversation idempotent response: %w", err)
+	}
+	return response, true, nil
+}
+
+func saveIdempotentResponse(ctx context.Context, conversations *conversation.Service, knowledgeBaseID, conversationID int64, key, requestHash string, response agentservice.Response) error {
+	if conversationID == 0 || conversations == nil {
+		return nil
+	}
+	data, err := json.Marshal(response)
+	if err != nil {
+		return fmt.Errorf("encode conversation idempotent response: %w", err)
+	}
+	if err := conversations.SaveIdempotentResponse(ctx, conversationID, knowledgeBaseID, key, requestHash, data); err != nil {
+		return fmt.Errorf("save conversation idempotent response: %w", err)
+	}
+	return nil
 }
 
 func loadConversationHistory(ctx context.Context, conversations *conversation.Service, knowledgeBaseID int64, request *agentservice.ChatRequest) error {

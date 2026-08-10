@@ -10,6 +10,7 @@ import (
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
+	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/handler"
 )
 
@@ -18,9 +19,11 @@ type agentAnswererStub struct {
 	request         agentservice.ChatRequest
 	response        agentservice.Response
 	err             error
+	calls           int
 }
 
 func (s *agentAnswererStub) Answer(_ context.Context, knowledgeBaseID int64, request agentservice.ChatRequest) (agentservice.Response, error) {
+	s.calls++
 	s.knowledgeBaseID = knowledgeBaseID
 	s.request = request
 	if s.err != nil {
@@ -144,5 +147,117 @@ func TestKnowledgeBaseAgentChatMapsServiceErrors(t *testing.T) {
 	endpoint.ServeHTTP(response, request)
 	if response.Code != http.StatusGatewayTimeout {
 		t.Fatalf("timeout status = %d, want %d", response.Code, http.StatusGatewayTimeout)
+	}
+}
+
+func TestKnowledgeBaseAgentChatReplaysIdempotentResponse(t *testing.T) {
+	store := &conversationStoreStub{records: []conversation.Conversation{{ID: 9, KnowledgeBaseID: 7}}}
+	conversations := conversation.NewService(store)
+	answerer := &agentAnswererStub{response: agentservice.Response{Answer: "五天", RunID: "run-1", Status: agent.RunSucceeded}}
+	endpoint := handler.NewKnowledgeBaseAgentChatWithConversation(answerer, conversations, 64*1024)
+
+	request := func() *httptest.ResponseRecorder {
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat", strings.NewReader(`{"conversation_id":9,"message":"年假有几天？"}`))
+		request.Header.Set("Idempotency-Key", "retry-1")
+		request.SetPathValue("id", "7")
+		endpoint.ServeHTTP(response, request)
+		return response
+	}
+
+	first := request()
+	second := request()
+	if first.Code != http.StatusOK || second.Code != http.StatusOK {
+		t.Fatalf("statuses = %d / %d, want 200", first.Code, second.Code)
+	}
+	if answerer.calls != 1 {
+		t.Fatalf("answerer calls = %d, want one model call", answerer.calls)
+	}
+	if first.Body.String() != second.Body.String() {
+		t.Fatalf("replayed response = %q, want %q", second.Body.String(), first.Body.String())
+	}
+}
+
+func TestKnowledgeBaseAgentChatRejectsInvalidIdempotencyKey(t *testing.T) {
+	store := &conversationStoreStub{records: []conversation.Conversation{{ID: 9, KnowledgeBaseID: 7}}}
+	answerer := &agentAnswererStub{response: agentservice.Response{Answer: "答案"}}
+	endpoint := handler.NewKnowledgeBaseAgentChatWithConversation(answerer, conversation.NewService(store), 64*1024)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat", strings.NewReader(`{"conversation_id":9,"message":"问题"}`))
+	request.Header.Set("Idempotency-Key", "bad key")
+	request.SetPathValue("id", "7")
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest || answerer.calls != 0 {
+		t.Fatalf("status=%d calls=%d, want 400 and no model call", response.Code, answerer.calls)
+	}
+}
+
+func TestKnowledgeBaseAgentChatRejectsIdempotencyKeyConflict(t *testing.T) {
+	store := &conversationStoreStub{records: []conversation.Conversation{{ID: 9, KnowledgeBaseID: 7}}}
+	answerer := &agentAnswererStub{response: agentservice.Response{Answer: "答案"}}
+	endpoint := handler.NewKnowledgeBaseAgentChatWithConversation(answerer, conversation.NewService(store), 64*1024)
+
+	first := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat", strings.NewReader(`{"conversation_id":9,"message":"第一个问题"}`))
+	request.Header.Set("Idempotency-Key", "same-key")
+	request.SetPathValue("id", "7")
+	endpoint.ServeHTTP(first, request)
+
+	second := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat", strings.NewReader(`{"conversation_id":9,"message":"另一个问题"}`))
+	request.Header.Set("Idempotency-Key", "same-key")
+	request.SetPathValue("id", "7")
+	endpoint.ServeHTTP(second, request)
+
+	if first.Code != http.StatusOK || second.Code != http.StatusConflict {
+		t.Fatalf("statuses = %d / %d, want 200 / 409", first.Code, second.Code)
+	}
+	if answerer.calls != 1 {
+		t.Fatalf("answerer calls = %d, want one model call", answerer.calls)
+	}
+}
+
+func TestKnowledgeBaseAgentChatIgnoresIdempotencyKeyWithoutConversation(t *testing.T) {
+	answerer := &agentAnswererStub{response: agentservice.Response{Answer: "答案"}}
+	endpoint := handler.NewKnowledgeBaseAgentChat(answerer)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat", strings.NewReader(`{"message":"问题"}`))
+	request.Header.Set("Idempotency-Key", "retry-without-conversation")
+	request.SetPathValue("id", "7")
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || answerer.calls != 1 {
+		t.Fatalf("status=%d calls=%d, want 200 and one model call", response.Code, answerer.calls)
+	}
+}
+
+func TestKnowledgeBaseAgentChatRejectsCorruptedIdempotentResponse(t *testing.T) {
+	store := &conversationStoreStub{records: []conversation.Conversation{{ID: 9, KnowledgeBaseID: 7}}}
+	answerer := &agentAnswererStub{response: agentservice.Response{Answer: "答案"}}
+	endpoint := handler.NewKnowledgeBaseAgentChatWithConversation(answerer, conversation.NewService(store), 64*1024)
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat", strings.NewReader(`{"conversation_id":9,"message":"问题"}`))
+	request.Header.Set("Idempotency-Key", "corrupted-response")
+	request.SetPathValue("id", "7")
+	first := httptest.NewRecorder()
+	endpoint.ServeHTTP(first, request)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want 200", first.Code)
+	}
+	store.idempotency["9:corrupted-response"] = conversation.IdempotentResponse{
+		RequestHash: store.idempotency["9:corrupted-response"].RequestHash,
+		Response:    []byte("{"),
+	}
+
+	second := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat", strings.NewReader(`{"conversation_id":9,"message":"问题"}`))
+	request.Header.Set("Idempotency-Key", "corrupted-response")
+	request.SetPathValue("id", "7")
+	endpoint.ServeHTTP(second, request)
+
+	if second.Code != http.StatusBadGateway || answerer.calls != 1 {
+		t.Fatalf("status=%d calls=%d, want 502 and no second model call", second.Code, answerer.calls)
 	}
 }

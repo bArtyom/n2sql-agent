@@ -3,6 +3,8 @@ package conversation_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +21,7 @@ type storeStub struct {
 	exchangeErr  error
 	summary      conversation.Summary
 	summaryErr   error
+	idempotency  map[string]conversation.IdempotentResponse
 }
 
 func (s *storeStub) Create(_ context.Context, input conversation.CreateInput) (conversation.Conversation, error) {
@@ -59,6 +62,22 @@ func (s *storeStub) UpdateTitle(_ context.Context, _ int64, title string) (conve
 }
 
 func (s *storeStub) Delete(context.Context, int64) error { return nil }
+
+func (s *storeStub) GetIdempotentResponse(_ context.Context, conversationID int64, key string) (conversation.IdempotentResponse, error) {
+	if response, ok := s.idempotency[fmt.Sprintf("%d:%s", conversationID, key)]; ok {
+		response.Response = append([]byte(nil), response.Response...)
+		return response, nil
+	}
+	return conversation.IdempotentResponse{}, conversation.ErrNotFound
+}
+
+func (s *storeStub) SaveIdempotentResponse(_ context.Context, conversationID int64, key, requestHash string, response []byte) error {
+	if s.idempotency == nil {
+		s.idempotency = make(map[string]conversation.IdempotentResponse)
+	}
+	s.idempotency[fmt.Sprintf("%d:%s", conversationID, key)] = conversation.IdempotentResponse{RequestHash: requestHash, Response: append([]byte(nil), response...)}
+	return nil
+}
 
 func TestServiceCreatesConversationWithTrimmedTitle(t *testing.T) {
 	store := &storeStub{conversation: conversation.Conversation{ID: 9, KnowledgeBaseID: 7, Title: "年假"}}
@@ -175,5 +194,31 @@ func TestServiceRejectsInvalidConversationInputs(t *testing.T) {
 	}
 	if err := service.SaveExchange(context.Background(), 0, "问题", "答案"); !errors.Is(err, conversation.ErrInvalidConversation) {
 		t.Fatalf("SaveExchange() error = %v, want invalid conversation", err)
+	}
+}
+
+func TestServiceStoresScopedIdempotentResponse(t *testing.T) {
+	store := &storeStub{conversation: conversation.Conversation{ID: 9, KnowledgeBaseID: 7}}
+	service := conversation.NewService(store)
+
+	requestHash := strings.Repeat("a", 64)
+	if err := service.SaveIdempotentResponse(context.Background(), 9, 7, "request-1", requestHash, []byte(`{"answer":"五天"}`)); err != nil {
+		t.Fatalf("SaveIdempotentResponse() error = %v", err)
+	}
+	response, err := service.GetIdempotentResponse(context.Background(), 9, 7, "request-1", requestHash)
+	if err != nil {
+		t.Fatalf("GetIdempotentResponse() error = %v", err)
+	}
+	if string(response) != `{"answer":"五天"}` {
+		t.Fatalf("response = %q, want stored JSON", response)
+	}
+}
+
+func TestServiceRejectsInvalidIdempotencyKey(t *testing.T) {
+	service := conversation.NewService(&storeStub{conversation: conversation.Conversation{ID: 9, KnowledgeBaseID: 7}})
+	for _, key := range []string{"", "bad key", strings.Repeat("a", 129)} {
+		if err := service.SaveIdempotentResponse(context.Background(), 9, 7, key, strings.Repeat("a", 64), []byte(`{"answer":"答案"}`)); !errors.Is(err, conversation.ErrInvalidIdempotencyKey) {
+			t.Fatalf("SaveIdempotentResponse(%q) error = %v, want invalid key", key, err)
+		}
 	}
 }

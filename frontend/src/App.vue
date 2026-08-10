@@ -439,7 +439,11 @@ async function askQuestion() {
   try {
     const response = await fetch(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/agent-chat/stream`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+        "Idempotency-Key": crypto.randomUUID(),
+      },
       body: JSON.stringify({ message: prompt, conversation_id: activeConversationID }),
     });
     if (!response.ok || !response.body) {
@@ -522,6 +526,16 @@ function consumeSSEBlock(block: string, answerIndex: number) {
       case "conversation_saved":
         answer.activity = "已保存到会话";
         break;
+      case "conversation_replayed": {
+        const replayed = eventData.response;
+        if (replayed && typeof replayed === "object") {
+          const replayedAnswer = replayed as Record<string, unknown>;
+          answer.content = typeof replayedAnswer.answer === "string" ? replayedAnswer.answer : answer.content;
+        }
+        answer.activity = "已恢复之前的回答";
+        answer.status = "done";
+        break;
+      }
       case "conversation_save_failed":
         answer.status = "error";
         answer.activity = "";

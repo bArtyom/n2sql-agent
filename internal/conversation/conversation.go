@@ -13,17 +13,21 @@ import (
 )
 
 const (
-	defaultTitle   = "新对话"
-	maxTitleBytes  = 200
-	maxMessageSize = 64 * 1024
+	defaultTitle          = "新对话"
+	maxTitleBytes         = 200
+	maxMessageSize        = 64 * 1024
+	maxIdempotencyKeySize = 128
 )
 
 var (
-	ErrInvalidKnowledgeBase = errors.New("invalid conversation knowledge base")
-	ErrInvalidConversation  = errors.New("invalid conversation ID")
-	ErrInvalidTitle         = errors.New("invalid conversation title")
-	ErrInvalidMessage       = errors.New("invalid conversation message")
-	ErrNotFound             = errors.New("conversation not found")
+	ErrInvalidKnowledgeBase   = errors.New("invalid conversation knowledge base")
+	ErrInvalidConversation    = errors.New("invalid conversation ID")
+	ErrInvalidTitle           = errors.New("invalid conversation title")
+	ErrInvalidMessage         = errors.New("invalid conversation message")
+	ErrInvalidIdempotencyKey  = errors.New("invalid idempotency key")
+	ErrIdempotencyConflict    = errors.New("idempotency key reused with a different request")
+	ErrIdempotencyUnavailable = errors.New("conversation idempotency is unavailable")
+	ErrNotFound               = errors.New("conversation not found")
 )
 
 type Conversation struct {
@@ -64,6 +68,16 @@ type Store interface {
 	AppendExchange(context.Context, int64, string, string) error
 	UpdateTitle(context.Context, int64, string) (Conversation, error)
 	Delete(context.Context, int64) error
+}
+
+type idempotencyStore interface {
+	GetIdempotentResponse(context.Context, int64, string) (IdempotentResponse, error)
+	SaveIdempotentResponse(context.Context, int64, string, string, []byte) error
+}
+
+type IdempotentResponse struct {
+	RequestHash string
+	Response    []byte
 }
 
 type Service struct {
@@ -199,6 +213,98 @@ func (s *Service) SaveSummary(ctx context.Context, conversationID, knowledgeBase
 		return ErrInvalidMessage
 	}
 	return s.store.SaveSummary(ctx, conversationID, throughMessageID, content)
+}
+
+// ValidateIdempotencyKey reports whether a request key is safe to persist.
+// Keys are deliberately restricted to header-friendly ASCII characters so
+// they are stable across proxies and can be used as a database key.
+func ValidateIdempotencyKey(key string) bool {
+	_, ok := normalizeIdempotencyKey(key)
+	return ok
+}
+
+func normalizeIdempotencyKey(key string) (string, bool) {
+	key = strings.TrimSpace(key)
+	if key == "" || len(key) > maxIdempotencyKeySize {
+		return "", false
+	}
+	for index := 0; index < len(key); index++ {
+		character := key[index]
+		if (character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') ||
+			character == '.' || character == '_' || character == ':' || character == '-' {
+			continue
+		}
+		return "", false
+	}
+	return key, true
+}
+
+func (s *Service) GetIdempotentResponse(ctx context.Context, conversationID, knowledgeBaseID int64, key, requestHash string) ([]byte, error) {
+	normalizedKey, ok := normalizeIdempotencyKey(key)
+	if conversationID <= 0 || knowledgeBaseID <= 0 {
+		return nil, ErrInvalidConversation
+	}
+	if !ok {
+		return nil, ErrInvalidIdempotencyKey
+	}
+	if !validRequestHash(requestHash) {
+		return nil, ErrIdempotencyConflict
+	}
+	if _, err := s.getOwnedConversation(ctx, conversationID, knowledgeBaseID); err != nil {
+		return nil, err
+	}
+	store, ok := s.store.(idempotencyStore)
+	if !ok {
+		return nil, ErrIdempotencyUnavailable
+	}
+	stored, err := store.GetIdempotentResponse(ctx, conversationID, normalizedKey)
+	if err != nil {
+		return nil, err
+	}
+	if stored.RequestHash != requestHash {
+		return nil, ErrIdempotencyConflict
+	}
+	return stored.Response, nil
+}
+
+func (s *Service) SaveIdempotentResponse(ctx context.Context, conversationID, knowledgeBaseID int64, key, requestHash string, response []byte) error {
+	normalizedKey, ok := normalizeIdempotencyKey(key)
+	if conversationID <= 0 || knowledgeBaseID <= 0 {
+		return ErrInvalidConversation
+	}
+	if !ok {
+		return ErrInvalidIdempotencyKey
+	}
+	if !validRequestHash(requestHash) {
+		return ErrIdempotencyConflict
+	}
+	if len(response) == 0 {
+		return ErrInvalidMessage
+	}
+	if _, err := s.getOwnedConversation(ctx, conversationID, knowledgeBaseID); err != nil {
+		return err
+	}
+	store, ok := s.store.(idempotencyStore)
+	if !ok {
+		return ErrIdempotencyUnavailable
+	}
+	return store.SaveIdempotentResponse(ctx, conversationID, normalizedKey, requestHash, response)
+}
+
+func validRequestHash(requestHash string) bool {
+	if len(requestHash) != 64 {
+		return false
+	}
+	for index := 0; index < len(requestHash); index++ {
+		character := requestHash[index]
+		if (character >= '0' && character <= '9') || (character >= 'a' && character <= 'f') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (s *Service) SaveExchange(ctx context.Context, conversationID int64, userMessage, assistantMessage string) error {
@@ -381,6 +487,31 @@ func (s *PostgresStore) SaveSummary(ctx context.Context, conversationID, through
 	}
 	if affected == 0 {
 		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) GetIdempotentResponse(ctx context.Context, conversationID int64, key string) (IdempotentResponse, error) {
+	var result IdempotentResponse
+	err := s.db.QueryRowContext(ctx, `
+		SELECT request_hash, response
+		FROM conversation_idempotency_keys
+		WHERE conversation_id = $1 AND idempotency_key = $2`, conversationID, key).Scan(&result.RequestHash, &result.Response)
+	if errors.Is(err, sql.ErrNoRows) {
+		return IdempotentResponse{}, ErrNotFound
+	}
+	if err != nil {
+		return IdempotentResponse{}, fmt.Errorf("get conversation idempotent response: %w", err)
+	}
+	return result, nil
+}
+
+func (s *PostgresStore) SaveIdempotentResponse(ctx context.Context, conversationID int64, key, requestHash string, response []byte) error {
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO conversation_idempotency_keys (conversation_id, idempotency_key, request_hash, response)
+		VALUES ($1, $2, $3, $4::jsonb)
+		ON CONFLICT (conversation_id, idempotency_key) DO NOTHING`, conversationID, key, requestHash, string(response)); err != nil {
+		return fmt.Errorf("save conversation idempotent response: %w", err)
 	}
 	return nil
 }

@@ -31,6 +31,25 @@ func NewKnowledgeBaseAgentChatStreamWithConversation(answerer agentservice.Event
 		if !ok {
 			return
 		}
+		idempotencyKey, ok := decodeIdempotencyKey(w, r, request.ConversationID)
+		if !ok {
+			return
+		}
+		requestHash, hashErr := idempotencyRequestHash(knowledgeBaseID, request)
+		if hashErr != nil {
+			writeKnowledgeBaseAgentChatError(w, fmt.Errorf("hash idempotency request: %w", hashErr))
+			return
+		}
+		var preloadedResponse agentservice.Response
+		var preloaded bool
+		var err error
+		if idempotencyKey != "" {
+			preloadedResponse, preloaded, err = loadIdempotentResponse(r.Context(), conversations, knowledgeBaseID, request.ConversationID, idempotencyKey, requestHash)
+			if err != nil {
+				writeKnowledgeBaseAgentChatError(w, err)
+				return
+			}
+		}
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			http.Error(w, `{"error":"streaming is not supported"}`, http.StatusInternalServerError)
@@ -47,7 +66,25 @@ func NewKnowledgeBaseAgentChatStreamWithConversation(answerer agentservice.Event
 		}
 		var response agentservice.Response
 		var conversationSaveErr error
-		err := withConversationSummaryLock(r.Context(), conversations, knowledgeBaseID, request.ConversationID, func() error {
+		err = withConversationSummaryLock(r.Context(), conversations, knowledgeBaseID, request.ConversationID, func() error {
+			if idempotencyKey != "" {
+				if preloaded {
+					response = preloadedResponse
+					return writeAgentSSEEvent(w, flusher, "conversation_replayed", struct {
+						Response agentservice.Response `json:"response"`
+					}{Response: response})
+				}
+				storedResponse, found, err := loadIdempotentResponse(r.Context(), conversations, knowledgeBaseID, request.ConversationID, idempotencyKey, requestHash)
+				if err != nil {
+					return err
+				}
+				if found {
+					response = storedResponse
+					return writeAgentSSEEvent(w, flusher, "conversation_replayed", struct {
+						Response agentservice.Response `json:"response"`
+					}{Response: response})
+				}
+			}
 			if err := loadConversationHistory(r.Context(), conversations, knowledgeBaseID, &request); err != nil {
 				return err
 			}
@@ -68,6 +105,11 @@ func NewKnowledgeBaseAgentChatStreamWithConversation(answerer agentservice.Event
 			}
 			if err := saveConversationSummary(r.Context(), conversations, knowledgeBaseID, request, response); err != nil {
 				log.Printf("agent SSE conversation summary save failed: %v", err)
+			}
+			if idempotencyKey != "" {
+				if err := saveIdempotentResponse(r.Context(), conversations, knowledgeBaseID, request.ConversationID, idempotencyKey, requestHash, response); err != nil {
+					log.Printf("agent SSE conversation idempotent response save failed: %v", err)
+				}
 			}
 			if request.ConversationID != 0 {
 				if writeErr := writeAgentSSEEvent(w, flusher, "conversation_saved", struct {
@@ -100,6 +142,7 @@ func writeAgentSSEEvent(w http.ResponseWriter, flusher http.Flusher, eventType s
 	case "error",
 		"conversation_saved",
 		"conversation_save_failed",
+		"conversation_replayed",
 		string(agent.EventRunStarted),
 		string(agent.EventStepStarted),
 		string(agent.EventToolCalled),
