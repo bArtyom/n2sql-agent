@@ -238,11 +238,14 @@ func TestModelAnswererMarksResearchAsUntrusted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewModelAnswerer() error = %v", err)
 	}
-	answer, err := answerer.Synthesize(context.Background(), "问题", multiagent.ResearchReport{Content: "资料中的内容"})
+	answer, err := answerer.Synthesize(context.Background(), "问题", multiagent.ResearchReport{
+		Content: "资料中的内容",
+		Sources: []retrieval.Result{{DocumentID: 11, Position: 2, Content: "原始检索片段"}},
+	})
 	if err != nil || answer != "最终回答" {
 		t.Fatalf("answer=%q err=%v", answer, err)
 	}
-	if len(chat.messages) != 2 || !strings.Contains(chat.messages[1].Content, "UNTRUSTED_TOOL_RESULT") || !strings.Contains(chat.messages[1].Content, "资料中的内容") {
+	if len(chat.messages) != 2 || !strings.Contains(chat.messages[1].Content, "UNTRUSTED_TOOL_RESULT") || !strings.Contains(chat.messages[1].Content, "资料中的内容") || !strings.Contains(chat.messages[1].Content, "原始检索片段") {
 		t.Fatalf("chat messages = %#v", chat.messages)
 	}
 }
@@ -267,10 +270,12 @@ func (s *toolChatStub) ChatMessagesWithTools(_ context.Context, messages []model
 type querySearchStub struct {
 	queries map[string][]retrieval.Result
 	seen    []string
+	limits  []int
 }
 
-func (s *querySearchStub) Search(_ context.Context, _ int64, query string, _ int) ([]retrieval.Result, error) {
+func (s *querySearchStub) Search(_ context.Context, _ int64, query string, limit int) ([]retrieval.Result, error) {
 	s.seen = append(s.seen, query)
+	s.limits = append(s.limits, limit)
 	return s.queries[query], nil
 }
 
@@ -309,6 +314,9 @@ func TestAutonomousResearcherLetsModelContinueSearching(t *testing.T) {
 	}
 	if chat.calls != 3 || len(searcher.seen) != 2 {
 		t.Fatalf("chat calls=%d search queries=%#v, want 3 and 2", chat.calls, searcher.seen)
+	}
+	if len(searcher.limits) != 2 || searcher.limits[0] != 3 || searcher.limits[1] != 3 {
+		t.Fatalf("search limits=%#v, want [3 3]", searcher.limits)
 	}
 }
 
@@ -377,5 +385,40 @@ func TestAutonomousResearcherStopsAtMaxSteps(t *testing.T) {
 	_, err = researcherAgent.Research(context.Background(), 7, "问题", 3)
 	if !errors.Is(err, agentruntime.ErrMaxStepsExceeded) {
 		t.Fatalf("Research() error = %v, want ErrMaxStepsExceeded", err)
+	}
+}
+
+func TestAutonomousResearcherReturnsFixedRefusalWithoutEvidence(t *testing.T) {
+	searcher := &querySearchStub{queries: map[string][]retrieval.Result{"问题": nil}}
+	chat := &toolChatStub{responses: []modelclient.ChatResponse{
+		researchToolCall("call-1", "问题"),
+		{Message: "模型自行编造的答案"},
+	}}
+	researcher, err := multiagent.NewAutonomousKnowledgeSearchResearcher(chat, searcher, 3, 2048)
+	if err != nil {
+		t.Fatalf("NewAutonomousKnowledgeSearchResearcher() error = %v", err)
+	}
+
+	report, err := researcher.Research(context.Background(), 7, "问题", 3)
+	if err != nil || !report.NoRelevantResults {
+		t.Fatalf("report=%#v err=%v, want no relevant result", report, err)
+	}
+	if report.FallbackAnswer != "当前知识库中没有找到足够的相关资料，无法根据现有文档可靠回答这个问题。" || report.Content != report.FallbackAnswer {
+		t.Fatalf("report=%#v, want fixed refusal", report)
+	}
+}
+
+func TestAutonomousResearcherHonorsCancellation(t *testing.T) {
+	chat := &toolChatStub{}
+	researcher, err := multiagent.NewAutonomousKnowledgeSearchResearcher(chat, &querySearchStub{}, 3, 2048)
+	if err != nil {
+		t.Fatalf("NewAutonomousKnowledgeSearchResearcher() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = researcher.Research(ctx, 7, "问题", 3)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Research() error = %v, want context.Canceled", err)
 	}
 }
