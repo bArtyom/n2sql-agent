@@ -79,7 +79,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	knowledgeResearcher, err := multiagent.NewKnowledgeSearchResearcher(searchService, cfg.AgentMaxToolResultBytes)
+	knowledgeResearcher, err := multiagent.NewAutonomousKnowledgeSearchResearcher(chatService, searchService, cfg.AgentMaxSteps, cfg.AgentMaxToolResultBytes)
 	if err != nil {
 		log.Fatal(err)
 	}

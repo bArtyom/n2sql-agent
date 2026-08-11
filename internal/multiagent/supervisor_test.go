@@ -3,10 +3,13 @@ package multiagent_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/bArtyom/n2sql-agent/internal/agent"
+	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/multiagent"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
@@ -241,5 +244,138 @@ func TestModelAnswererMarksResearchAsUntrusted(t *testing.T) {
 	}
 	if len(chat.messages) != 2 || !strings.Contains(chat.messages[1].Content, "UNTRUSTED_TOOL_RESULT") || !strings.Contains(chat.messages[1].Content, "资料中的内容") {
 		t.Fatalf("chat messages = %#v", chat.messages)
+	}
+}
+
+type toolChatStub struct {
+	responses []modelclient.ChatResponse
+	calls     int
+	messages  [][]modelclient.ChatMessage
+}
+
+func (s *toolChatStub) ChatMessagesWithTools(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+	s.calls++
+	s.messages = append(s.messages, append([]modelclient.ChatMessage(nil), messages...))
+	if len(s.responses) == 0 {
+		return modelclient.ChatResponse{Message: "研究摘要"}, nil
+	}
+	response := s.responses[0]
+	s.responses = s.responses[1:]
+	return response, nil
+}
+
+type querySearchStub struct {
+	queries map[string][]retrieval.Result
+	seen    []string
+}
+
+func (s *querySearchStub) Search(_ context.Context, _ int64, query string, _ int) ([]retrieval.Result, error) {
+	s.seen = append(s.seen, query)
+	return s.queries[query], nil
+}
+
+func researchToolCall(id, query string) modelclient.ChatResponse {
+	return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+		ID:   id,
+		Type: "function",
+		Function: modelclient.ToolCallFunction{
+			Name:      "knowledge_search",
+			Arguments: fmt.Sprintf(`{"query":%q}`, query),
+		},
+	}}}
+}
+
+func TestAutonomousResearcherLetsModelContinueSearching(t *testing.T) {
+	searcher := &querySearchStub{queries: map[string][]retrieval.Result{
+		"启动命令": {{DocumentID: 11, Position: 1, Distance: 0.2, Content: "go run ./cmd/server"}},
+		"开发环境": {{DocumentID: 12, Position: 2, Distance: 0.3, Content: "docker compose up -d"}},
+	}}
+	chat := &toolChatStub{responses: []modelclient.ChatResponse{
+		researchToolCall("call-1", "启动命令"),
+		researchToolCall("call-2", "开发环境"),
+		{Message: "研究摘要：项目需要 Go 和 Docker。"},
+	}}
+	researcher, err := multiagent.NewAutonomousKnowledgeSearchResearcher(chat, searcher, 3, 2048)
+	if err != nil {
+		t.Fatalf("NewAutonomousKnowledgeSearchResearcher() error = %v", err)
+	}
+
+	report, err := researcher.Research(context.Background(), 7, "如何启动项目？", 3)
+	if err != nil {
+		t.Fatalf("Research() error = %v", err)
+	}
+	if report.Content != "研究摘要：项目需要 Go 和 Docker。" || len(report.Sources) != 2 {
+		t.Fatalf("report = %#v", report)
+	}
+	if chat.calls != 3 || len(searcher.seen) != 2 {
+		t.Fatalf("chat calls=%d search queries=%#v, want 3 and 2", chat.calls, searcher.seen)
+	}
+}
+
+func TestAutonomousResearcherContinuesAfterNoRelevantResults(t *testing.T) {
+	searcher := &querySearchStub{queries: map[string][]retrieval.Result{
+		"原始问题":  nil,
+		"替代关键词": {{DocumentID: 13, Position: 1, Distance: 0.2, Content: "有用资料"}},
+	}}
+	chat := &toolChatStub{responses: []modelclient.ChatResponse{
+		researchToolCall("call-1", "原始问题"),
+		researchToolCall("call-2", "替代关键词"),
+		{Message: "找到资料了。"},
+	}}
+	researcher, err := multiagent.NewAutonomousKnowledgeSearchResearcher(chat, searcher, 3, 2048)
+	if err != nil {
+		t.Fatalf("NewAutonomousKnowledgeSearchResearcher() error = %v", err)
+	}
+
+	report, err := researcher.Research(context.Background(), 7, "问题", 3)
+	if err != nil || report.NoRelevantResults || len(report.Sources) != 1 {
+		t.Fatalf("report=%#v err=%v", report, err)
+	}
+	if len(searcher.seen) != 2 {
+		t.Fatalf("search queries=%#v, want retry with alternative query", searcher.seen)
+	}
+}
+
+func TestAutonomousResearcherDetectsDuplicateQuery(t *testing.T) {
+	searcher := &querySearchStub{queries: map[string][]retrieval.Result{
+		"相同问题": {{DocumentID: 14, Position: 1, Distance: 0.2, Content: "已有资料"}},
+	}}
+	chat := &toolChatStub{responses: []modelclient.ChatResponse{
+		researchToolCall("call-1", "相同问题"),
+		researchToolCall("call-2", "相同问题"),
+		{Message: "依据已有资料完成研究。"},
+	}}
+	researcher, err := multiagent.NewAutonomousKnowledgeSearchResearcher(chat, searcher, 3, 2048)
+	if err != nil {
+		t.Fatalf("NewAutonomousKnowledgeSearchResearcher() error = %v", err)
+	}
+
+	if _, err := researcher.Research(context.Background(), 7, "问题", 3); err != nil {
+		t.Fatalf("Research() error = %v", err)
+	}
+	if len(searcher.seen) != 1 {
+		t.Fatalf("search queries=%#v, duplicate query should not hit searcher", searcher.seen)
+	}
+	if len(chat.messages) < 3 || !strings.Contains(chat.messages[2][len(chat.messages[2])-1].Content, "duplicate_query") {
+		t.Fatalf("duplicate tool result was not returned to model: %#v", chat.messages)
+	}
+}
+
+func TestAutonomousResearcherStopsAtMaxSteps(t *testing.T) {
+	searcher := &querySearchStub{queries: map[string][]retrieval.Result{
+		"继续": {{DocumentID: 15, Position: 1, Distance: 0.2, Content: "资料"}},
+	}}
+	chat := &toolChatStub{responses: []modelclient.ChatResponse{
+		researchToolCall("call-1", "继续"),
+		researchToolCall("call-2", "继续二"),
+	}}
+	researcherAgent, err := multiagent.NewAutonomousKnowledgeSearchResearcher(chat, searcher, 2, 2048)
+	if err != nil {
+		t.Fatalf("NewAutonomousKnowledgeSearchResearcher() error = %v", err)
+	}
+
+	_, err = researcherAgent.Research(context.Background(), 7, "问题", 3)
+	if !errors.Is(err, agentruntime.ErrMaxStepsExceeded) {
+		t.Fatalf("Research() error = %v, want ErrMaxStepsExceeded", err)
 	}
 }

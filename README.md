@@ -128,7 +128,7 @@ go run ./cmd/retrieval-eval \
 
 ## 最小 Multi-Agent 协作
 
-`POST /api/knowledge-bases/{id}/multi-agent-chat` 提供一个非流式的进程内协作示例：`Supervisor` 先让只读 `Researcher` 调用知识库检索工具，再把带引用的研究资料交给无工具的 `Answerer` 生成最终回答。
+`POST /api/knowledge-bases/{id}/multi-agent-chat` 提供一个非流式的进程内协作示例：`Supervisor` 先让受最大步数限制的只读 `Researcher` 根据证据自主决定是否继续检索，再把带引用的研究资料交给无工具的 `Answerer` 生成最终回答。Researcher 只允许访问当前知识库的 `knowledge_search` 工具，并会阻止重复查询。
 
 ```sh
 curl -X POST http://localhost:8080/api/knowledge-bases/1/multi-agent-chat \

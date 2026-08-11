@@ -34,9 +34,18 @@ type untrustedToolResultEnvelope struct {
 
 // Engine runs a bounded, non-streaming Agent loop.
 type Engine struct {
-	chat     modelruntime.ToolChatRunner
-	registry *agent.ToolRegistry
-	maxSteps int
+	chat                    modelruntime.ToolChatRunner
+	registry                *agent.ToolRegistry
+	maxSteps                int
+	continueAfterNoRelevant bool
+}
+
+// EngineOptions controls bounded loop behavior without changing the default
+// refusal semantics used by the regular Agent endpoint.
+type EngineOptions struct {
+	// ContinueAfterNoRelevant lets a caller such as a research Agent ask the
+	// model for another query after a search returns no relevant evidence.
+	ContinueAfterNoRelevant bool
 }
 
 // EventSink receives lifecycle events emitted while an Agent run executes.
@@ -55,13 +64,22 @@ type Result struct {
 }
 
 func NewEngine(chat modelruntime.ToolChatRunner, registry *agent.ToolRegistry, maxSteps int) (*Engine, error) {
+	return NewEngineWithOptions(chat, registry, maxSteps, EngineOptions{})
+}
+
+func NewEngineWithOptions(chat modelruntime.ToolChatRunner, registry *agent.ToolRegistry, maxSteps int, options EngineOptions) (*Engine, error) {
 	if chat == nil || registry == nil {
 		return nil, ErrInvalidEngine
 	}
 	if maxSteps <= 0 {
 		return nil, ErrInvalidMaxSteps
 	}
-	return &Engine{chat: chat, registry: registry, maxSteps: maxSteps}, nil
+	return &Engine{
+		chat:                    chat,
+		registry:                registry,
+		maxSteps:                maxSteps,
+		continueAfterNoRelevant: options.ContinueAfterNoRelevant,
+	}, nil
 }
 
 func (e *Engine) Run(ctx context.Context, runID string, messages []modelclient.ChatMessage) (Result, error) {
@@ -210,6 +228,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			if truncated, ok := toolResult.Metadata["truncated"].(bool); ok {
 				toolFinishedData["truncated"] = truncated
 			}
+			toolFinishedData["no_relevant_results"] = toolResult.NoRelevantResults
 			if err := emitter.emit(agent.EventToolFinished, len(run.Steps()), toolFinishedData); err != nil {
 				return finishError(result, err)
 			}
@@ -223,7 +242,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				Content:    toolContent,
 			})
 		}
-		if fallbackAnswer != "" && !hasRelevantToolResult {
+		if fallbackAnswer != "" && !hasRelevantToolResult && !e.continueAfterNoRelevant {
 			return completeWithAnswer(result, emitter, fallbackAnswer)
 		}
 	}
