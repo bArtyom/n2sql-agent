@@ -17,6 +17,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
+	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
 	"github.com/bArtyom/n2sql-agent/internal/requestid"
@@ -31,6 +32,10 @@ func NewKnowledgeBaseAgentChatWithLimits(answerer agentservice.Answerer, maxHist
 }
 
 func NewKnowledgeBaseAgentChatWithConversation(answerer agentservice.Answerer, conversations *conversation.Service, maxHistoryBytes int) http.Handler {
+	return NewKnowledgeBaseAgentChatWithConversationAndMetrics(answerer, conversations, maxHistoryBytes, nil)
+}
+
+func NewKnowledgeBaseAgentChatWithConversationAndMetrics(answerer agentservice.Answerer, conversations *conversation.Service, maxHistoryBytes int, registry *metrics.Registry) http.Handler {
 	if maxHistoryBytes <= 0 {
 		maxHistoryBytes = agent.DefaultMaxHistoryBytes
 	}
@@ -54,6 +59,7 @@ func NewKnowledgeBaseAgentChatWithConversation(answerer agentservice.Answerer, c
 			return
 		}
 		var response agentservice.Response
+		replayed := false
 		err = withConversationSummaryLock(r.Context(), conversations, knowledgeBaseID, request.ConversationID, func() error {
 			if idempotencyKey != "" {
 				storedResponse, found, err := loadIdempotentResponse(r.Context(), conversations, knowledgeBaseID, request.ConversationID, idempotencyKey, requestHash)
@@ -61,6 +67,7 @@ func NewKnowledgeBaseAgentChatWithConversation(answerer agentservice.Answerer, c
 					return err
 				}
 				if found {
+					replayed = true
 					response = storedResponse
 					return nil
 				}
@@ -87,16 +94,16 @@ func NewKnowledgeBaseAgentChatWithConversation(answerer agentservice.Answerer, c
 			return nil
 		})
 		if err != nil {
-			logAgentRequest(r.Context(), started, request, response, err)
+			logAgentRequest(r.Context(), started, request, response, err, registry, !replayed)
 			writeKnowledgeBaseAgentChatError(w, err)
 			return
 		}
-		logAgentRequest(r.Context(), started, request, response, nil)
+		logAgentRequest(r.Context(), started, request, response, nil, registry, !replayed)
 		writeJSON(w, response)
 	})
 }
 
-func logAgentRequest(ctx context.Context, started time.Time, request agentservice.ChatRequest, response agentservice.Response, requestErr error) {
+func logAgentRequest(ctx context.Context, started time.Time, request agentservice.ChatRequest, response agentservice.Response, requestErr error, registry *metrics.Registry, countRun bool) {
 	fields := []any{
 		"request_id", requestid.FromContext(ctx),
 		"conversation_id", request.ConversationID,
@@ -107,9 +114,42 @@ func logAgentRequest(ctx context.Context, started time.Time, request agentservic
 	if requestErr != nil {
 		fields = append(fields, "error", requestErr)
 		slog.ErrorContext(ctx, "agent_request_failed", fields...)
+	} else {
+		slog.InfoContext(ctx, "agent_request_completed", fields...)
+	}
+	if registry == nil || !countRun {
 		return
 	}
-	slog.InfoContext(ctx, "agent_request_completed", fields...)
+	observation := metrics.AgentObservation{
+		Outcome:  agentOutcome(response, requestErr),
+		Duration: time.Since(started),
+	}
+	if response.Stats != nil {
+		observation.Steps = response.Stats.StepCount
+		observation.ToolCalls = response.Stats.ToolCalls
+		observation.ToolFailures = response.Stats.FailedToolCalls
+		observation.TotalTokens = response.Stats.TotalTokens
+	}
+	registry.ObserveAgent(observation)
+}
+
+func agentOutcome(response agentservice.Response, requestErr error) string {
+	switch response.Status {
+	case agent.RunSucceeded:
+		return metrics.AgentOutcomeSucceeded
+	case agent.RunCanceled:
+		return metrics.AgentOutcomeCanceled
+	case agent.RunFailed:
+		return metrics.AgentOutcomeFailed
+	}
+	switch {
+	case errors.Is(requestErr, context.DeadlineExceeded):
+		return metrics.AgentOutcomeTimeout
+	case errors.Is(requestErr, context.Canceled):
+		return metrics.AgentOutcomeCanceled
+	default:
+		return metrics.AgentOutcomeFailed
+	}
 }
 
 func decodeIdempotencyKey(w http.ResponseWriter, r *http.Request, conversationID int64) (string, bool) {

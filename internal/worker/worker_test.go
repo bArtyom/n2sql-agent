@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
+	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/worker"
 )
@@ -245,6 +248,21 @@ func TestRunnerLogsSuccessfulTask(t *testing.T) {
 		if !strings.Contains(output.String(), field) {
 			t.Fatalf("log output = %q, want field %q", output.String(), field)
 		}
+	}
+}
+
+func TestRunnerRecordsMetrics(t *testing.T) {
+	registry := metrics.New()
+	store := &taskStoreStub{task: worker.Task{ID: 13, DocumentID: 8}}
+	runner := worker.NewRunnerWithMetrics(store, func(context.Context, worker.Task) error { return nil }, registry)
+
+	if _, err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+	response := httptest.NewRecorder()
+	registry.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(response.Body.String(), "worker_tasks_started_total 1\n") || !strings.Contains(response.Body.String(), "worker_tasks_succeeded_total 1\n") {
+		t.Fatalf("metrics body = %q, want started and succeeded counters", response.Body.String())
 	}
 }
 

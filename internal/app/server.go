@@ -9,6 +9,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/handler"
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
+	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
@@ -32,11 +33,17 @@ type Dependencies struct {
 	Conversations         *conversation.Service
 	AgentMaxHistoryBytes  int
 	APIKeyEnvVar          string
+	Metrics               *metrics.Registry
 }
 
 func New(dependencies Dependencies) http.Handler {
+	registry := dependencies.Metrics
+	if registry == nil {
+		registry = metrics.New()
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handler.Health)
+	mux.Handle("GET /metrics", registry.Handler())
 
 	modelProviderHandler := handler.NewModelProvider(dependencies.Providers, dependencies.APIKeyEnvVar)
 	mux.Handle("GET /api/model-provider", modelProviderHandler)
@@ -78,11 +85,11 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("POST /api/knowledge-bases/{id}/chat/stream", handler.NewKnowledgeBaseChatStream(dependencies.StreamingAnswers))
 	}
 	if dependencies.AgentAnswers != nil {
-		mux.Handle("POST /api/knowledge-bases/{id}/agent-chat", handler.NewKnowledgeBaseAgentChatWithConversation(dependencies.AgentAnswers, dependencies.Conversations, dependencies.AgentMaxHistoryBytes))
+		mux.Handle("POST /api/knowledge-bases/{id}/agent-chat", handler.NewKnowledgeBaseAgentChatWithConversationAndMetrics(dependencies.AgentAnswers, dependencies.Conversations, dependencies.AgentMaxHistoryBytes, registry))
 	}
 	if dependencies.AgentStreamingAnswers != nil {
-		mux.Handle("POST /api/knowledge-bases/{id}/agent-chat/stream", handler.NewKnowledgeBaseAgentChatStreamWithConversation(dependencies.AgentStreamingAnswers, dependencies.Conversations, dependencies.AgentMaxHistoryBytes))
+		mux.Handle("POST /api/knowledge-bases/{id}/agent-chat/stream", handler.NewKnowledgeBaseAgentChatStreamWithConversationAndMetrics(dependencies.AgentStreamingAnswers, dependencies.Conversations, dependencies.AgentMaxHistoryBytes, registry))
 	}
 
-	return requestid.NewMiddleware(slog.Default(), mux)
+	return requestid.NewMiddleware(slog.Default(), registry.Middleware(mux))
 }

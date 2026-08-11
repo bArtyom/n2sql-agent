@@ -12,6 +12,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/handler"
+	"github.com/bArtyom/n2sql-agent/internal/metrics"
 )
 
 type agentAnswererStub struct {
@@ -54,6 +55,23 @@ func TestKnowledgeBaseAgentChatReturnsAnswer(t *testing.T) {
 	}
 	if answerer.knowledgeBaseID != 7 || answerer.request.Message != "年假怎么计算？" || len(answerer.request.History) != 0 {
 		t.Fatalf("answer arguments = %#v", answerer)
+	}
+}
+
+func TestKnowledgeBaseAgentChatRecordsMetrics(t *testing.T) {
+	registry := metrics.New()
+	answerer := &agentAnswererStub{response: agentservice.Response{Answer: "答案", RunID: "run-metrics", Status: agent.RunSucceeded}}
+	endpoint := handler.NewKnowledgeBaseAgentChatWithConversationAndMetrics(answerer, nil, 64*1024, registry)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat", strings.NewReader(`{"message":"问题"}`))
+	request.SetPathValue("id", "7")
+
+	endpoint.ServeHTTP(response, request)
+
+	metricsResponse := httptest.NewRecorder()
+	registry.Handler().ServeHTTP(metricsResponse, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(metricsResponse.Body.String(), "agent_runs_total 1\n") || !strings.Contains(metricsResponse.Body.String(), "agent_runs_succeeded_total 1\n") {
+		t.Fatalf("metrics body = %q, want successful Agent run counters", metricsResponse.Body.String())
 	}
 }
 
@@ -153,8 +171,9 @@ func TestKnowledgeBaseAgentChatMapsServiceErrors(t *testing.T) {
 func TestKnowledgeBaseAgentChatReplaysIdempotentResponse(t *testing.T) {
 	store := &conversationStoreStub{records: []conversation.Conversation{{ID: 9, KnowledgeBaseID: 7}}}
 	conversations := conversation.NewService(store)
+	registry := metrics.New()
 	answerer := &agentAnswererStub{response: agentservice.Response{Answer: "五天", RunID: "run-1", Status: agent.RunSucceeded}}
-	endpoint := handler.NewKnowledgeBaseAgentChatWithConversation(answerer, conversations, 64*1024)
+	endpoint := handler.NewKnowledgeBaseAgentChatWithConversationAndMetrics(answerer, conversations, 64*1024, registry)
 
 	request := func() *httptest.ResponseRecorder {
 		response := httptest.NewRecorder()
@@ -175,6 +194,11 @@ func TestKnowledgeBaseAgentChatReplaysIdempotentResponse(t *testing.T) {
 	}
 	if first.Body.String() != second.Body.String() {
 		t.Fatalf("replayed response = %q, want %q", second.Body.String(), first.Body.String())
+	}
+	metricsResponse := httptest.NewRecorder()
+	registry.Handler().ServeHTTP(metricsResponse, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(metricsResponse.Body.String(), "agent_runs_total 1\n") {
+		t.Fatalf("metrics body = %q, want replay excluded from Agent run count", metricsResponse.Body.String())
 	}
 }
 

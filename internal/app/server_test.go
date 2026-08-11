@@ -12,6 +12,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/app"
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
+	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/rag"
@@ -101,6 +102,27 @@ func TestServerServesHealthCheck(t *testing.T) {
 
 	if body := response.Body.String(); body != `{"status":"ok"}` {
 		t.Fatalf("response body = %q, want %q", body, `{"status":"ok"}`)
+	}
+}
+
+func TestServerExposesMetrics(t *testing.T) {
+	registry := metrics.New()
+	server := app.New(app.Dependencies{Metrics: registry})
+
+	healthResponse := httptest.NewRecorder()
+	server.ServeHTTP(healthResponse, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if healthResponse.Code != http.StatusOK {
+		t.Fatalf("health status code = %d, want %d", healthResponse.Code, http.StatusOK)
+	}
+
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("metrics status code = %d, want %d", response.Code, http.StatusOK)
+	}
+	if !strings.Contains(response.Body.String(), "http_requests_total 1\n") {
+		t.Fatalf("metrics body = %q, want one completed health request", response.Body.String())
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 )
 
@@ -109,10 +110,15 @@ func NewTextExtractionProcessor(extractor TextExtractor) Processor {
 type Runner struct {
 	store     Store
 	processor Processor
+	metrics   *metrics.Registry
 }
 
 func NewRunner(store Store, processor Processor) *Runner {
-	return &Runner{store: store, processor: processor}
+	return NewRunnerWithMetrics(store, processor, nil)
+}
+
+func NewRunnerWithMetrics(store Store, processor Processor, registry *metrics.Registry) *Runner {
+	return &Runner{store: store, processor: processor, metrics: registry}
 }
 
 func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
@@ -122,6 +128,9 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	if err != nil {
+		if r.metrics != nil {
+			r.metrics.ObserveWorker(metrics.WorkerObservation{Status: metrics.WorkerStatusClaimFailed, Duration: time.Since(claimStarted)})
+		}
 		slog.ErrorContext(ctx, "document_task_claim_failed",
 			"status", "claim_failed",
 			"duration_ms", time.Since(claimStarted).Milliseconds(),
@@ -130,29 +139,39 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("claim document processing task: %w", err)
 	}
 	started := time.Now()
-	logTask(ctx, slog.LevelInfo, "document_task_started", task, "processing", started)
+	r.recordTask(ctx, slog.LevelInfo, "document_task_started", task, metrics.WorkerStatusStarted, started)
 	if err := r.processor(ctx, task); err != nil {
 		if errors.Is(err, context.Canceled) && ctx.Err() != nil {
-			logTask(ctx, slog.LevelWarn, "document_task_canceled", task, "canceled", started)
+			r.recordTask(ctx, slog.LevelWarn, "document_task_canceled", task, metrics.WorkerStatusCanceled, started)
 			return true, nil
 		}
 		message := err.Error()
 		if len(message) > maxFailureMessageBytes {
 			message = message[:maxFailureMessageBytes]
 		}
-		logTask(ctx, slog.LevelError, "document_task_failed", task, "failed", started, "error", message)
+		r.recordTask(ctx, slog.LevelError, "document_task_failed", task, metrics.WorkerStatusFailed, started, "error", message)
 		if markErr := r.store.MarkFailed(context.WithoutCancel(ctx), task.ID, message); markErr != nil {
-			logTask(ctx, slog.LevelError, "document_task_status_update_failed", task, "status_update_failed", started, "target_status", "failed", "error", markErr)
+			r.recordTask(ctx, slog.LevelError, "document_task_status_update_failed", task, metrics.WorkerStatusStatusUpdateFailed, started, "target_status", "failed", "error", markErr)
 			return true, fmt.Errorf("mark document processing task failed: %w", markErr)
 		}
 		return true, nil
 	}
 	if err := r.store.MarkSucceeded(context.WithoutCancel(ctx), task.ID); err != nil {
-		logTask(ctx, slog.LevelError, "document_task_status_update_failed", task, "status_update_failed", started, "target_status", "succeeded", "error", err)
+		if r.metrics != nil {
+			r.metrics.ObserveWorkerDuration(time.Since(started))
+		}
+		r.recordTask(ctx, slog.LevelError, "document_task_status_update_failed", task, metrics.WorkerStatusStatusUpdateFailed, started, "target_status", "succeeded", "error", err)
 		return true, fmt.Errorf("mark document processing task succeeded: %w", err)
 	}
-	logTask(ctx, slog.LevelInfo, "document_task_succeeded", task, "succeeded", started)
+	r.recordTask(ctx, slog.LevelInfo, "document_task_succeeded", task, metrics.WorkerStatusSucceeded, started)
 	return true, nil
+}
+
+func (r *Runner) recordTask(ctx context.Context, level slog.Level, event string, task Task, status string, started time.Time, attrs ...any) {
+	logTask(ctx, level, event, task, status, started, attrs...)
+	if r.metrics != nil {
+		r.metrics.ObserveWorker(metrics.WorkerObservation{Status: status, Duration: time.Since(started)})
+	}
 }
 
 func logTask(ctx context.Context, level slog.Level, event string, task Task, status string, started time.Time, attrs ...any) {

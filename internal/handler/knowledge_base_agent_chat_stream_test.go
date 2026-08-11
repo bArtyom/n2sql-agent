@@ -14,6 +14,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/handler"
+	"github.com/bArtyom/n2sql-agent/internal/metrics"
 )
 
 type agentEventAnswererStub struct {
@@ -113,6 +114,22 @@ func TestKnowledgeBaseAgentChatStreamWritesToolSources(t *testing.T) {
 	body := response.Body.String()
 	if !strings.Contains(body, "event: tool_finished\n") || !strings.Contains(body, `"sources":[{"content":"工作满一年可享受五天年假。"`) {
 		t.Fatalf("body = %q, want tool sources", body)
+	}
+}
+
+func TestKnowledgeBaseAgentChatStreamRecordsMetrics(t *testing.T) {
+	registry := metrics.New()
+	endpoint := handler.NewKnowledgeBaseAgentChatStreamWithConversationAndMetrics(agentEventAnswererStub{answer: "答案"}, nil, 64*1024, registry)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat/stream", strings.NewReader(`{"message":"问题"}`))
+	request.SetPathValue("id", "7")
+
+	endpoint.ServeHTTP(response, request)
+
+	metricsResponse := httptest.NewRecorder()
+	registry.Handler().ServeHTTP(metricsResponse, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(metricsResponse.Body.String(), "agent_runs_total 1\n") || !strings.Contains(metricsResponse.Body.String(), "agent_runs_succeeded_total 1\n") {
+		t.Fatalf("metrics body = %q, want successful streaming Agent run counters", metricsResponse.Body.String())
 	}
 }
 

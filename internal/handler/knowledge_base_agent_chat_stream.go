@@ -9,6 +9,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
+	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/requestid"
 )
 
@@ -21,6 +22,10 @@ func NewKnowledgeBaseAgentChatStreamWithLimits(answerer agentservice.EventAnswer
 }
 
 func NewKnowledgeBaseAgentChatStreamWithConversation(answerer agentservice.EventAnswerer, conversations *conversation.Service, maxHistoryBytes int) http.Handler {
+	return NewKnowledgeBaseAgentChatStreamWithConversationAndMetrics(answerer, conversations, maxHistoryBytes, nil)
+}
+
+func NewKnowledgeBaseAgentChatStreamWithConversationAndMetrics(answerer agentservice.EventAnswerer, conversations *conversation.Service, maxHistoryBytes int, registry *metrics.Registry) http.Handler {
 	if maxHistoryBytes <= 0 {
 		maxHistoryBytes = agent.DefaultMaxHistoryBytes
 	}
@@ -45,6 +50,7 @@ func NewKnowledgeBaseAgentChatStreamWithConversation(answerer agentservice.Event
 		}
 		var preloadedResponse agentservice.Response
 		var preloaded bool
+		replayed := false
 		var err error
 		if idempotencyKey != "" {
 			preloadedResponse, preloaded, err = loadIdempotentResponse(r.Context(), conversations, knowledgeBaseID, request.ConversationID, idempotencyKey, requestHash)
@@ -72,6 +78,7 @@ func NewKnowledgeBaseAgentChatStreamWithConversation(answerer agentservice.Event
 		err = withConversationSummaryLock(r.Context(), conversations, knowledgeBaseID, request.ConversationID, func() error {
 			if idempotencyKey != "" {
 				if preloaded {
+					replayed = true
 					response = preloadedResponse
 					return writeAgentSSEEvent(w, flusher, "conversation_replayed", struct {
 						Response agentservice.Response `json:"response"`
@@ -82,6 +89,7 @@ func NewKnowledgeBaseAgentChatStreamWithConversation(answerer agentservice.Event
 					return err
 				}
 				if found {
+					replayed = true
 					response = storedResponse
 					return writeAgentSSEEvent(w, flusher, "conversation_replayed", struct {
 						Response agentservice.Response `json:"response"`
@@ -124,7 +132,7 @@ func NewKnowledgeBaseAgentChatStreamWithConversation(answerer agentservice.Event
 			return nil
 		})
 		if err != nil {
-			logAgentRequest(r.Context(), started, request, response, err)
+			logAgentRequest(r.Context(), started, request, response, err, registry, !replayed)
 			if r.Context().Err() != nil {
 				return
 			}
@@ -136,11 +144,11 @@ func NewKnowledgeBaseAgentChatStreamWithConversation(answerer agentservice.Event
 			}
 		}
 		if conversationSaveErr != nil {
-			logAgentRequest(r.Context(), started, request, response, conversationSaveErr)
+			logAgentRequest(r.Context(), started, request, response, conversationSaveErr, registry, !replayed)
 			return
 		}
 		if err == nil {
-			logAgentRequest(r.Context(), started, request, response, nil)
+			logAgentRequest(r.Context(), started, request, response, nil, registry, !replayed)
 		}
 	})
 }

@@ -23,6 +23,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
+	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/rag"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 	"github.com/bArtyom/n2sql-agent/internal/worker"
@@ -56,7 +57,8 @@ func main() {
 		log.Printf("scanned PDF OCR enabled: model=%s renderer=%s max_pages=%d concurrency=%d", cfg.OCRModel, cfg.OCRRendererBinary, cfg.OCRMaxPages, cfg.OCRConcurrency)
 	}
 	processor := worker.NewEmbeddingChunkingProcessor(extractor, documentchunk.NewSplitter(1000, 150), chunkStore, embeddingService)
-	runner := worker.NewRunner(worker.NewPostgresStore(db), processor)
+	metricsRegistry := metrics.New()
+	runner := worker.NewRunnerWithMetrics(worker.NewPostgresStore(db), processor, metricsRegistry)
 	searchService := retrieval.NewService(embeddingService, chunkStore)
 	answerService := rag.NewService(searchService, chatService)
 	var historySummarizer agentservice.HistorySummarizer
@@ -94,6 +96,7 @@ func main() {
 			Conversations:         conversationService,
 			AgentMaxHistoryBytes:  cfg.AgentMaxHistoryBytes,
 			APIKeyEnvVar:          cfg.ModelProviderAPIKeyEnvVar,
+			Metrics:               metricsRegistry,
 		}),
 	}
 	runContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
