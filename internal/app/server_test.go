@@ -284,6 +284,31 @@ func TestServerRoutesKnowledgeBaseMultiAgentChatStream(t *testing.T) {
 	}
 }
 
+func TestServerRoutesKnowledgeBaseMCP(t *testing.T) {
+	response := httptest.NewRecorder()
+	server := app.New(app.Dependencies{MCPKnowledgeSearch: searcherStub{}})
+
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"server/discover"}`)))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
+	}
+	if !strings.Contains(response.Body.String(), `"supportedVersions"`) {
+		t.Fatalf("response body = %q, want MCP discovery result", response.Body.String())
+	}
+}
+
+func TestServerDoesNotRegisterMCPRouteWithoutSearch(t *testing.T) {
+	response := httptest.NewRecorder()
+	server := app.New(app.Dependencies{})
+
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"server/discover"}`)))
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
 func TestServerRoutesKnowledgeBases(t *testing.T) {
 	response := httptest.NewRecorder()
 	server := app.New(app.Dependencies{KnowledgeBases: knowledgeBaseStoreStub{}})

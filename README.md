@@ -148,4 +148,33 @@ curl -N -X POST http://localhost:8080/api/knowledge-bases/1/multi-agent-chat/str
 
 事件包括 `research_tool_called`、`research_tool_finished`、`research_summary`、`answerer_finished` 和 `run_finished`；原有非流式接口保持不变。
 
-响应中的 `steps` 会标记 `researcher` 和 `answerer` 的执行状态。资料不足时会直接返回拒答，不再额外调用回答模型。该入口暂不保存会话，但已提供独立 SSE 路由；同时不引入 SQL/schema、Redis、MCP 或 A2A。已有的 `/agent-chat` 和 `/agent-chat/stream` 仍是带会话的主问答入口。
+响应中的 `steps` 会标记 `researcher` 和 `answerer` 的执行状态。资料不足时会直接返回拒答，不再额外调用回答模型。该入口暂不保存会话，但已提供独立 SSE 路由；同时不引入 SQL/schema、Redis 或 A2A。已有的 `/agent-chat` 和 `/agent-chat/stream` 仍是带会话的主问答入口。
+
+## 最小 MCP 只读适配
+
+每个知识库提供一个独立的 MCP HTTP JSON-RPC 入口：
+
+```text
+POST http://localhost:8080/api/knowledge-bases/{id}/mcp
+```
+
+当前只暴露只读的 `knowledge_search` 工具。MCP 客户端可以依次调用 `server/discover`、`tools/list` 和 `tools/call`；知识库 ID 固定来自 URL，工具参数只接受 `query` 和 `limit`，不会把跨知识库访问权交给调用方。适配器使用无会话的 `2026-07-28` 请求头，同时兼容旧版 `initialize` 握手，尚未实现 MCP 的资源、提示词、授权和任务扩展。
+
+示例调用：
+
+```sh
+curl -X POST http://localhost:8080/api/knowledge-bases/1/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: tools/list' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
+curl -X POST http://localhost:8080/api/knowledge-bases/1/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: tools/call' \
+  -H 'Mcp-Name: knowledge_search' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"knowledge_search","arguments":{"query":"这份资料如何启动服务？","limit":5}}}'
+```
+
+Go 侧的最小客户端位于 `internal/mcp`，可用于把同一个只读工具接入后续 Agent 编排；当前没有把 API Key 或模型调用移到浏览器。

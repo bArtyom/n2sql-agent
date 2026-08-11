@@ -9,6 +9,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/handler"
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
+	"github.com/bArtyom/n2sql-agent/internal/mcp"
 	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
@@ -33,7 +34,9 @@ type Dependencies struct {
 	AgentStreamingAnswers      agentservice.EventAnswerer
 	MultiAgentAnswers          multiagent.Answerer
 	MultiAgentStreamingAnswers multiagent.EventAnswerer
+	MCPKnowledgeSearch         retrieval.Searcher
 	Conversations              *conversation.Service
+	AgentMaxToolResultBytes    int
 	AgentMaxHistoryBytes       int
 	APIKeyEnvVar               string
 	Metrics                    *metrics.Registry
@@ -98,6 +101,9 @@ func New(dependencies Dependencies) http.Handler {
 	}
 	if dependencies.MultiAgentStreamingAnswers != nil {
 		mux.Handle("POST /api/knowledge-bases/{id}/multi-agent-chat/stream", handler.NewMultiAgentChatStream(dependencies.MultiAgentStreamingAnswers))
+	}
+	if dependencies.MCPKnowledgeSearch != nil {
+		mux.Handle("POST /api/knowledge-bases/{id}/mcp", mcp.NewKnowledgeBaseHandler(dependencies.MCPKnowledgeSearch, dependencies.AgentMaxToolResultBytes))
 	}
 
 	return requestid.NewMiddleware(slog.Default(), registry.Middleware(mux))
