@@ -101,6 +101,8 @@ npm run dev
 
 前端默认运行在 `http://localhost:5173`，并将后端请求代理到 `http://localhost:8080`。
 
+问答台可以切换“标准 Agent”和“协作研究”。标准 Agent 会写入当前会话；协作研究会展示 Researcher 的检索轨迹与引用，但结果只保留在当前页面，不写入会话历史。
+
 ## 检索阈值评测
 
 `retrieval-eval` 用一组带 `expected_relevant` 标签的问题比较多个 pgvector 距离阈值。它只调用 Embedding 和检索，不调用聊天模型。
