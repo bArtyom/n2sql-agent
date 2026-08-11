@@ -23,7 +23,10 @@ type ChatMessage = {
   sources?: Source[];
   status?: "streaming" | "done" | "error";
   activity?: string;
+  researchEvents?: ResearchEvent[];
 };
+type ResearchEvent = { type: string; round?: number; label: string; detail?: string };
+type ChatMode = "agent" | "research";
 type Conversation = { id: number; knowledgeBaseId: number; title: string; createdAt: string; updatedAt: string };
 type ConversationMessage = { id: number; conversationId: number; role: "user" | "assistant"; content: string; createdAt: string };
 type StreamPayload = {
@@ -33,6 +36,10 @@ type StreamPayload = {
   answer?: string;
   content?: string;
   data?: Record<string, unknown>;
+  run_id?: string;
+  type?: string;
+  role?: string;
+  round?: number;
 };
 type ModelProvider = {
   name: string;
@@ -76,6 +83,7 @@ const providerMessageKind = ref<"idle" | "success" | "error">("idle");
 const providerForm = ref<ModelProvider>(emptyModelProvider());
 const conversationsLoading = ref(false);
 const conversationCreating = ref(false);
+const chatMode = ref<ChatMode>("agent");
 let documentPollTimer: number | undefined;
 
 const selectedKnowledgeBase = computed(() =>
@@ -423,9 +431,10 @@ function scheduleDocumentPolling() {
 async function askQuestion() {
   const prompt = question.value.trim();
   if (!prompt || !selectedKnowledgeBaseId.value || streaming.value) return;
-  let activeConversationID: number;
+  const useResearchMode = chatMode.value === "research";
+  let activeConversationID: number | null = null;
   try {
-    activeConversationID = await ensureConversation(prompt);
+    if (!useResearchMode) activeConversationID = await ensureConversation(prompt);
   } catch (error) {
     showError(error);
     return;
@@ -437,14 +446,18 @@ async function askQuestion() {
   const answerIndex = messages.value.length - 1;
   streaming.value = true;
   try {
-    const response = await fetch(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/agent-chat/stream`, {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    };
+    if (!useResearchMode) headers["Idempotency-Key"] = crypto.randomUUID();
+    const streamPath = useResearchMode ? "multi-agent-chat/stream" : "agent-chat/stream";
+    const response = await fetch(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/${streamPath}`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-        "Idempotency-Key": crypto.randomUUID(),
-      },
-      body: JSON.stringify({ message: prompt, conversation_id: activeConversationID }),
+      headers,
+      body: JSON.stringify(useResearchMode
+        ? { message: prompt, topK: 5 }
+        : { message: prompt, conversation_id: activeConversationID }),
     });
     if (!response.ok || !response.body) {
       const payload = await response.json().catch(() => null);
@@ -458,10 +471,10 @@ async function askQuestion() {
       buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
       const blocks = buffer.split(/\r?\n\r?\n/);
       buffer = blocks.pop() ?? "";
-      blocks.forEach((block) => consumeSSEBlock(block, answerIndex));
+      blocks.forEach((block) => consumeSSEBlock(block, answerIndex, useResearchMode));
       if (done) break;
     }
-    if (buffer.trim()) consumeSSEBlock(buffer, answerIndex);
+    if (buffer.trim()) consumeSSEBlock(buffer, answerIndex, useResearchMode);
     const currentAnswer = messages.value[answerIndex];
     if (currentAnswer?.status === "streaming") {
       currentAnswer.status = "error";
@@ -480,7 +493,13 @@ async function askQuestion() {
   }
 }
 
-function consumeSSEBlock(block: string, answerIndex: number) {
+function recordResearchEvent(answer: ChatMessage, type: string, label: string, detail = "", round?: number) {
+  answer.researchEvents ??= [];
+  answer.researchEvents.push({ type, label, detail: detail.slice(0, 140), round });
+  if (answer.researchEvents.length > 12) answer.researchEvents.shift();
+}
+
+function consumeSSEBlock(block: string, answerIndex: number, researchMode = false) {
   const answer = messages.value[answerIndex];
   if (!answer) return;
   let event = "message";
@@ -503,7 +522,44 @@ function consumeSSEBlock(block: string, answerIndex: number) {
         answer.content += payload.delta ?? "";
         break;
       case "run_started":
-        answer.activity = "正在理解问题…";
+        answer.activity = researchMode ? "协作研究已启动…" : "正在理解问题…";
+        break;
+      case "research_started":
+        recordResearchEvent(answer, event, "研究员开始工作", "正在规划检索", payload.round);
+        answer.activity = "研究员正在查找资料…";
+        break;
+      case "research_tool_called":
+        recordResearchEvent(answer, event, "发起知识库检索", dataString("tool_name") || "knowledge_search", payload.round);
+        answer.activity = "研究员正在查找资料…";
+        break;
+      case "research_tool_finished": {
+        const sources = parseSources(eventData.sources);
+        answer.sources = mergeSources(answer.sources ?? [], sources);
+        recordResearchEvent(answer, event, "收到检索结果", sources.length ? `${sources.length} 条引用` : "没有命中相关资料", payload.round);
+        answer.activity = "研究员正在判断是否需要继续…";
+        break;
+      }
+      case "research_summary":
+        recordResearchEvent(answer, event, "研究员形成摘要", dataString("content") || payload.content || "已形成阶段性结论", payload.round);
+        answer.activity = "研究员已完成检索，准备交给回答者…";
+        break;
+      case "research_finished": {
+        const sources = parseSources(eventData.sources);
+        answer.sources = mergeSources(answer.sources ?? [], sources);
+        recordResearchEvent(answer, event, "研究员完成", eventData.no_relevant_results ? "资料不足，安全结束" : `${answer.sources?.length ?? 0} 条引用`, payload.round);
+        answer.activity = eventData.no_relevant_results ? "资料不足，正在结束…" : "回答者正在组织答案…";
+        break;
+      }
+      case "answerer_started":
+        recordResearchEvent(answer, event, "回答者开始组织答案", "基于研究摘要和原始片段", payload.round);
+        answer.activity = "回答者正在组织答案…";
+        break;
+      case "answerer_finished":
+        recordResearchEvent(answer, event, "回答者完成", "最终答案即将返回", payload.round);
+        break;
+      case "answerer_skipped":
+        recordResearchEvent(answer, event, "回答者跳过", "知识库没有足够证据", payload.round);
+        answer.activity = "资料不足，已安全结束。";
         break;
       case "tool_called":
         answer.activity = dataString("tool_name") === "knowledge_search" ? "正在查找资料…" : "正在调用工具…";
@@ -519,6 +575,7 @@ function consumeSSEBlock(block: string, answerIndex: number) {
         answer.activity = "正在组织答案…";
         break;
       case "run_finished":
+        if (researchMode) answer.sources = mergeSources(answer.sources ?? [], parseSources(eventData.sources));
         answer.content ||= dataString("answer") || payload.answer || "";
         answer.activity = "";
         answer.status = "done";
@@ -695,7 +752,15 @@ onUnmounted(() => window.clearInterval(documentPollTimer));
             <div><span class="section-index">02</span><h2>问答台</h2></div>
             <span class="panel-meta">STREAMING</span>
           </div>
-          <div class="chat-intro"><span class="chat-spark">✦</span><div><strong>从资料里找答案</strong><p>回答会标记它引用的原始段落。</p></div></div>
+          <div class="chat-intro">
+            <span class="chat-spark">✦</span>
+            <div class="chat-intro-copy"><strong>从资料里找答案</strong><p>回答会标记它引用的原始段落。</p></div>
+            <div class="chat-mode-switch" role="group" aria-label="问答模式">
+              <button type="button" :class="{ 'chat-mode--active': chatMode === 'agent' }" :aria-pressed="chatMode === 'agent'" :disabled="streaming" @click="chatMode = 'agent'">标准 Agent</button>
+              <button type="button" :class="{ 'chat-mode--active': chatMode === 'research' }" :aria-pressed="chatMode === 'research'" :disabled="streaming" @click="chatMode = 'research'">协作研究</button>
+            </div>
+          </div>
+          <p v-if="chatMode === 'research'" class="chat-mode-note">协作研究会根据证据多轮检索；本次结果只在当前页面展示，不写入会话历史。</p>
           <div class="conversation-bar">
             <div class="conversation-current">
               <span class="conversation-caption">当前会话</span>
@@ -728,6 +793,14 @@ onUnmounted(() => window.clearInterval(documentPollTimer));
               <div v-if="message.role === 'assistant' && message.status === 'streaming' && message.activity" class="message-activity">
                 <span class="message-activity-dot" />
                 <span>{{ message.activity }}</span>
+              </div>
+              <div v-if="message.role === 'assistant' && message.researchEvents?.length" class="research-trace">
+                <div class="research-trace-head"><span>研究轨迹</span><small>{{ message.researchEvents.length }} EVENTS</small></div>
+                <div v-for="trace in message.researchEvents" :key="`${trace.type}-${trace.round}-${trace.label}-${trace.detail}`" class="research-trace-row">
+                  <span class="research-trace-dot" />
+                  <span class="research-trace-label">{{ trace.label }}</span>
+                  <small v-if="trace.detail">{{ trace.detail }}</small>
+                </div>
               </div>
               <div class="message-bubble" :class="{ 'message-bubble--error': message.status === 'error' }">
                 <span v-if="message.role === 'assistant' && !message.content && message.status === 'streaming'" class="typing"><i /><i /><i /></span>
