@@ -8,16 +8,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
+	"github.com/bArtyom/n2sql-agent/internal/requestid"
 )
 
 func NewKnowledgeBaseAgentChat(answerer agentservice.Answerer) http.Handler {
@@ -41,6 +43,7 @@ func NewKnowledgeBaseAgentChatWithConversation(answerer agentservice.Answerer, c
 		if !ok {
 			return
 		}
+		started := time.Now()
 		idempotencyKey, ok := decodeIdempotencyKey(w, r, request.ConversationID)
 		if !ok {
 			return
@@ -74,21 +77,39 @@ func NewKnowledgeBaseAgentChatWithConversation(answerer agentservice.Answerer, c
 				return err
 			}
 			if err := saveConversationSummary(r.Context(), conversations, knowledgeBaseID, request, response); err != nil {
-				log.Printf("conversation summary save failed: %v", err)
+				slog.WarnContext(r.Context(), "conversation_summary_save_failed", "request_id", requestid.FromContext(r.Context()), "conversation_id", request.ConversationID, "error", err)
 			}
 			if idempotencyKey != "" {
 				if err := saveIdempotentResponse(r.Context(), conversations, knowledgeBaseID, request.ConversationID, idempotencyKey, requestHash, response); err != nil {
-					log.Printf("conversation idempotent response save failed: %v", err)
+					slog.WarnContext(r.Context(), "conversation_idempotent_response_save_failed", "request_id", requestid.FromContext(r.Context()), "conversation_id", request.ConversationID, "error", err)
 				}
 			}
 			return nil
 		})
 		if err != nil {
+			logAgentRequest(r.Context(), started, request, response, err)
 			writeKnowledgeBaseAgentChatError(w, err)
 			return
 		}
+		logAgentRequest(r.Context(), started, request, response, nil)
 		writeJSON(w, response)
 	})
+}
+
+func logAgentRequest(ctx context.Context, started time.Time, request agentservice.ChatRequest, response agentservice.Response, requestErr error) {
+	fields := []any{
+		"request_id", requestid.FromContext(ctx),
+		"conversation_id", request.ConversationID,
+		"run_id", response.RunID,
+		"status", response.Status,
+		"duration_ms", time.Since(started).Milliseconds(),
+	}
+	if requestErr != nil {
+		fields = append(fields, "error", requestErr)
+		slog.ErrorContext(ctx, "agent_request_failed", fields...)
+		return
+	}
+	slog.InfoContext(ctx, "agent_request_completed", fields...)
 }
 
 func decodeIdempotencyKey(w http.ResponseWriter, r *http.Request, conversationID int64) (string, bool) {

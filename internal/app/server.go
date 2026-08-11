@@ -1,6 +1,7 @@
 package app
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
@@ -12,6 +13,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
 	"github.com/bArtyom/n2sql-agent/internal/rag"
+	"github.com/bArtyom/n2sql-agent/internal/requestid"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 )
 
@@ -82,5 +84,5 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("POST /api/knowledge-bases/{id}/agent-chat/stream", handler.NewKnowledgeBaseAgentChatStreamWithConversation(dependencies.AgentStreamingAnswers, dependencies.Conversations, dependencies.AgentMaxHistoryBytes))
 	}
 
-	return mux
+	return requestid.NewMiddleware(slog.Default(), mux)
 }

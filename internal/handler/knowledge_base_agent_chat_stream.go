@@ -2,12 +2,14 @@ package handler
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
+	"github.com/bArtyom/n2sql-agent/internal/requestid"
 )
 
 func NewKnowledgeBaseAgentChatStream(answerer agentservice.EventAnswerer) http.Handler {
@@ -31,6 +33,7 @@ func NewKnowledgeBaseAgentChatStreamWithConversation(answerer agentservice.Event
 		if !ok {
 			return
 		}
+		started := time.Now()
 		idempotencyKey, ok := decodeIdempotencyKey(w, r, request.ConversationID)
 		if !ok {
 			return
@@ -99,28 +102,29 @@ func NewKnowledgeBaseAgentChatStreamWithConversation(answerer agentservice.Event
 				if writeErr := writeAgentSSEEvent(w, flusher, "conversation_save_failed", struct {
 					Error string `json:"error"`
 				}{Error: message}); writeErr != nil {
-					log.Printf("agent SSE conversation save error event write failed: %v", writeErr)
+					slog.ErrorContext(r.Context(), "agent_sse_conversation_save_error_event_write_failed", "request_id", requestid.FromContext(r.Context()), "conversation_id", request.ConversationID, "error", writeErr)
 				}
 				return nil
 			}
 			if err := saveConversationSummary(r.Context(), conversations, knowledgeBaseID, request, response); err != nil {
-				log.Printf("agent SSE conversation summary save failed: %v", err)
+				slog.WarnContext(r.Context(), "agent_sse_conversation_summary_save_failed", "request_id", requestid.FromContext(r.Context()), "conversation_id", request.ConversationID, "error", err)
 			}
 			if idempotencyKey != "" {
 				if err := saveIdempotentResponse(r.Context(), conversations, knowledgeBaseID, request.ConversationID, idempotencyKey, requestHash, response); err != nil {
-					log.Printf("agent SSE conversation idempotent response save failed: %v", err)
+					slog.WarnContext(r.Context(), "agent_sse_conversation_idempotent_response_save_failed", "request_id", requestid.FromContext(r.Context()), "conversation_id", request.ConversationID, "error", err)
 				}
 			}
 			if request.ConversationID != 0 {
 				if writeErr := writeAgentSSEEvent(w, flusher, "conversation_saved", struct {
 					ConversationID int64 `json:"conversation_id"`
 				}{ConversationID: request.ConversationID}); writeErr != nil {
-					log.Printf("agent SSE conversation saved event write failed: %v", writeErr)
+					slog.ErrorContext(r.Context(), "agent_sse_conversation_saved_event_write_failed", "request_id", requestid.FromContext(r.Context()), "conversation_id", request.ConversationID, "error", writeErr)
 				}
 			}
 			return nil
 		})
 		if err != nil {
+			logAgentRequest(r.Context(), started, request, response, err)
 			if r.Context().Err() != nil {
 				return
 			}
@@ -128,11 +132,15 @@ func NewKnowledgeBaseAgentChatStreamWithConversation(answerer agentservice.Event
 			if writeErr := writeAgentSSEEvent(w, flusher, "error", struct {
 				Error string `json:"error"`
 			}{Error: message}); writeErr != nil {
-				log.Printf("agent SSE error event write failed: %v", writeErr)
+				slog.ErrorContext(r.Context(), "agent_sse_error_event_write_failed", "request_id", requestid.FromContext(r.Context()), "conversation_id", request.ConversationID, "error", writeErr)
 			}
 		}
 		if conversationSaveErr != nil {
+			logAgentRequest(r.Context(), started, request, response, conversationSaveErr)
 			return
+		}
+		if err == nil {
+			logAgentRequest(r.Context(), started, request, response, nil)
 		}
 	})
 }
