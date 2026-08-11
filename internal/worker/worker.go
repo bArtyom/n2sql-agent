@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
@@ -116,34 +116,54 @@ func NewRunner(store Store, processor Processor) *Runner {
 }
 
 func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
+	claimStarted := time.Now()
 	task, err := r.store.ClaimNext(ctx)
 	if errors.Is(err, ErrNoTask) {
 		return false, nil
 	}
 	if err != nil {
+		slog.ErrorContext(ctx, "document_task_claim_failed",
+			"status", "claim_failed",
+			"duration_ms", time.Since(claimStarted).Milliseconds(),
+			"error", err,
+		)
 		return false, fmt.Errorf("claim document processing task: %w", err)
 	}
-	log.Printf("document processing started: task_id=%d document_id=%d", task.ID, task.DocumentID)
+	started := time.Now()
+	logTask(ctx, slog.LevelInfo, "document_task_started", task, "processing", started)
 	if err := r.processor(ctx, task); err != nil {
 		if errors.Is(err, context.Canceled) && ctx.Err() != nil {
-			log.Printf("document processing canceled: task_id=%d document_id=%d", task.ID, task.DocumentID)
+			logTask(ctx, slog.LevelWarn, "document_task_canceled", task, "canceled", started)
 			return true, nil
 		}
 		message := err.Error()
 		if len(message) > maxFailureMessageBytes {
 			message = message[:maxFailureMessageBytes]
 		}
-		log.Printf("document processing failed: task_id=%d document_id=%d error=%s", task.ID, task.DocumentID, message)
+		logTask(ctx, slog.LevelError, "document_task_failed", task, "failed", started, "error", message)
 		if markErr := r.store.MarkFailed(context.WithoutCancel(ctx), task.ID, message); markErr != nil {
+			logTask(ctx, slog.LevelError, "document_task_status_update_failed", task, "status_update_failed", started, "target_status", "failed", "error", markErr)
 			return true, fmt.Errorf("mark document processing task failed: %w", markErr)
 		}
 		return true, nil
 	}
-	log.Printf("document processing succeeded: task_id=%d document_id=%d", task.ID, task.DocumentID)
 	if err := r.store.MarkSucceeded(context.WithoutCancel(ctx), task.ID); err != nil {
+		logTask(ctx, slog.LevelError, "document_task_status_update_failed", task, "status_update_failed", started, "target_status", "succeeded", "error", err)
 		return true, fmt.Errorf("mark document processing task succeeded: %w", err)
 	}
+	logTask(ctx, slog.LevelInfo, "document_task_succeeded", task, "succeeded", started)
 	return true, nil
+}
+
+func logTask(ctx context.Context, level slog.Level, event string, task Task, status string, started time.Time, attrs ...any) {
+	fields := []any{
+		"task_id", task.ID,
+		"document_id", task.DocumentID,
+		"status", status,
+		"duration_ms", time.Since(started).Milliseconds(),
+	}
+	fields = append(fields, attrs...)
+	slog.Default().Log(ctx, level, event, fields...)
 }
 
 func (r *Runner) Run(ctx context.Context, interval time.Duration, report func(error)) {

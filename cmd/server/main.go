@@ -101,7 +101,9 @@ func main() {
 	workerDone := make(chan struct{})
 	go func() {
 		defer close(workerDone)
-		runner.Run(runContext, cfg.WorkerPollInterval, func(err error) { log.Printf("document worker: %v", err) })
+		runner.Run(runContext, cfg.WorkerPollInterval, func(err error) {
+			slog.ErrorContext(runContext, "document_worker_loop_error", "error", err)
+		})
 	}()
 
 	log.Printf("server listening on %s", cfg.Address)

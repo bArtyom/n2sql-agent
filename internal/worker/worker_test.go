@@ -1,11 +1,10 @@
 package worker_test
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,14 +18,25 @@ import (
 )
 
 type taskStoreStub struct {
-	task      worker.Task
-	claimErr  error
-	claims    int
-	succeeded int64
-	failed    struct {
+	task         worker.Task
+	claimErr     error
+	claims       int
+	succeeded    int64
+	succeededErr error
+	failed       struct {
 		id      int64
 		message string
 	}
+	failedErr error
+}
+
+func captureLogs(t *testing.T) *strings.Builder {
+	t.Helper()
+	var output strings.Builder
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&output, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+	return &output
 }
 
 type extractorStub struct{}
@@ -195,10 +205,16 @@ func (s *taskStoreStub) ClaimNext(context.Context) (worker.Task, error) {
 	return s.task, s.claimErr
 }
 func (s *taskStoreStub) MarkSucceeded(_ context.Context, id int64) error {
+	if s.succeededErr != nil {
+		return s.succeededErr
+	}
 	s.succeeded = id
 	return nil
 }
 func (s *taskStoreStub) MarkFailed(_ context.Context, id int64, message string) error {
+	if s.failedErr != nil {
+		return s.failedErr
+	}
 	s.failed.id, s.failed.message = id, message
 	return nil
 }
@@ -218,6 +234,20 @@ func TestRunnerMarksSuccessfulTask(t *testing.T) {
 	}
 }
 
+func TestRunnerLogsSuccessfulTask(t *testing.T) {
+	output := captureLogs(t)
+	store := &taskStoreStub{task: worker.Task{ID: 9, DocumentID: 4}}
+
+	if _, err := worker.NewRunner(store, func(context.Context, worker.Task) error { return nil }).RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+	for _, field := range []string{"msg=document_task_started", "msg=document_task_succeeded", "status=succeeded", "task_id=9", "document_id=4", "duration_ms="} {
+		if !strings.Contains(output.String(), field) {
+			t.Fatalf("log output = %q, want field %q", output.String(), field)
+		}
+	}
+}
+
 func TestRunnerMarksFailedTask(t *testing.T) {
 	store := &taskStoreStub{task: worker.Task{ID: 9}}
 	runner := worker.NewRunner(store, func(context.Context, worker.Task) error { return errors.New("invalid PDF") })
@@ -229,10 +259,7 @@ func TestRunnerMarksFailedTask(t *testing.T) {
 }
 
 func TestRunnerLogsFailedTask(t *testing.T) {
-	var output bytes.Buffer
-	previousWriter := log.Writer()
-	log.SetOutput(&output)
-	defer log.SetOutput(previousWriter)
+	output := captureLogs(t)
 
 	store := &taskStoreStub{task: worker.Task{ID: 9, DocumentID: 4}}
 	runner := worker.NewRunner(store, func(context.Context, worker.Task) error {
@@ -242,8 +269,87 @@ func TestRunnerLogsFailedTask(t *testing.T) {
 	if _, err := runner.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce() error = %v", err)
 	}
-	if !strings.Contains(output.String(), "document processing failed: task_id=9 document_id=4 error=embedding service unavailable") {
+	for _, field := range []string{
+		"msg=document_task_failed",
+		"task_id=9",
+		"document_id=4",
+		"status=failed",
+		"error=\"embedding service unavailable\"",
+		"duration_ms=",
+	} {
+		if !strings.Contains(output.String(), field) {
+			t.Fatalf("log output = %q, want field %q", output.String(), field)
+		}
+	}
+	if strings.Contains(output.String(), "document processing failed:") {
 		t.Fatalf("log output = %q", output.String())
+	}
+}
+
+func TestRunnerLogsCanceledTask(t *testing.T) {
+	output := captureLogs(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	store := &taskStoreStub{task: worker.Task{ID: 10, DocumentID: 5}}
+
+	processed, err := worker.NewRunner(store, func(context.Context, worker.Task) error { return context.Canceled }).RunOnce(ctx)
+	if err != nil || !processed {
+		t.Fatalf("processed=%v err=%v, want handled cancellation", processed, err)
+	}
+	for _, field := range []string{"msg=document_task_canceled", "status=canceled", "task_id=10", "document_id=5", "duration_ms="} {
+		if !strings.Contains(output.String(), field) {
+			t.Fatalf("log output = %q, want field %q", output.String(), field)
+		}
+	}
+}
+
+func TestRunnerLogsClaimFailure(t *testing.T) {
+	output := captureLogs(t)
+	store := &taskStoreStub{claimErr: errors.New("database unavailable")}
+
+	if _, err := worker.NewRunner(store, func(context.Context, worker.Task) error { return nil }).RunOnce(context.Background()); err == nil {
+		t.Fatal("RunOnce() error = nil, want claim error")
+	}
+	for _, field := range []string{"msg=document_task_claim_failed", "status=claim_failed", "error=\"database unavailable\"", "duration_ms="} {
+		if !strings.Contains(output.String(), field) {
+			t.Fatalf("log output = %q, want field %q", output.String(), field)
+		}
+	}
+}
+
+func TestRunnerLogsStatusUpdateFailure(t *testing.T) {
+	output := captureLogs(t)
+	store := &taskStoreStub{
+		task:         worker.Task{ID: 11, DocumentID: 6},
+		succeededErr: errors.New("database write failed"),
+	}
+
+	if _, err := worker.NewRunner(store, func(context.Context, worker.Task) error { return nil }).RunOnce(context.Background()); err == nil {
+		t.Fatal("RunOnce() error = nil, want status update error")
+	}
+	for _, field := range []string{"msg=document_task_status_update_failed", "status=status_update_failed", "target_status=succeeded", "task_id=11", "document_id=6", "error=\"database write failed\""} {
+		if !strings.Contains(output.String(), field) {
+			t.Fatalf("log output = %q, want field %q", output.String(), field)
+		}
+	}
+}
+
+func TestRunnerLogsFailedStatusUpdateFailure(t *testing.T) {
+	output := captureLogs(t)
+	store := &taskStoreStub{
+		task:      worker.Task{ID: 12, DocumentID: 7},
+		failedErr: errors.New("failed state write"),
+	}
+
+	if _, err := worker.NewRunner(store, func(context.Context, worker.Task) error {
+		return errors.New("invalid PDF")
+	}).RunOnce(context.Background()); err == nil {
+		t.Fatal("RunOnce() error = nil, want failed status update error")
+	}
+	for _, field := range []string{"msg=document_task_status_update_failed", "status=status_update_failed", "target_status=failed", "task_id=12", "document_id=7", "error=\"failed state write\""} {
+		if !strings.Contains(output.String(), field) {
+			t.Fatalf("log output = %q, want field %q", output.String(), field)
+		}
 	}
 }
 
