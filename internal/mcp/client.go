@@ -76,7 +76,11 @@ func (c *Client) call(ctx context.Context, method, toolName string, params any, 
 		return errors.New("MCP client is unavailable")
 	}
 	requestID := c.nextID.Add(1)
-	paramsRaw, err := marshalParams(params)
+	paramsWithMetadata, err := addRequestMetadata(params)
+	if err != nil {
+		return fmt.Errorf("prepare MCP params: %w", err)
+	}
+	paramsRaw, err := marshalParams(paramsWithMetadata)
 	if err != nil {
 		return fmt.Errorf("encode MCP params: %w", err)
 	}
@@ -122,6 +126,25 @@ func (c *Client) call(ctx context.Context, method, toolName string, params any, 
 		return nil
 	}
 	return json.Unmarshal(envelope.Result, destination)
+}
+
+func addRequestMetadata(params any) (map[string]any, error) {
+	result := make(map[string]any)
+	if params != nil {
+		provided, ok := params.(map[string]any)
+		if !ok {
+			return nil, errors.New("MCP params must be an object")
+		}
+		for key, value := range provided {
+			result[key] = value
+		}
+	}
+	result["_meta"] = map[string]any{
+		protocolVersionMeta:    ProtocolVersion,
+		clientInfoMeta:         map[string]string{"name": defaultServerName + "-client", "version": defaultServerVersion},
+		clientCapabilitiesMeta: map[string]any{},
+	}
+	return result, nil
 }
 
 func marshalParams(params any) (json.RawMessage, error) {

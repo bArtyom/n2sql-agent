@@ -9,15 +9,19 @@ const ProtocolVersion = "2026-07-28"
 const legacyProtocolVersion = "2025-06-18"
 
 const (
-	jsonRPCVersion       = "2.0"
-	parseErrorCode       = -32700
-	invalidRequestCode   = -32600
-	methodNotFoundCode   = -32601
-	invalidParamsCode    = -32602
-	internalErrorCode    = -32603
-	maxRequestBodyBytes  = 64 * 1024
-	defaultServerName    = "n2sql-agent"
-	defaultServerVersion = "0.1.0"
+	jsonRPCVersion         = "2.0"
+	parseErrorCode         = -32700
+	invalidRequestCode     = -32600
+	methodNotFoundCode     = -32601
+	invalidParamsCode      = -32602
+	internalErrorCode      = -32603
+	maxRequestBodyBytes    = 64 * 1024
+	defaultServerName      = "n2sql-agent"
+	defaultServerVersion   = "0.1.0"
+	protocolVersionMeta    = "io.modelcontextprotocol/protocolVersion"
+	clientInfoMeta         = "io.modelcontextprotocol/clientInfo"
+	clientCapabilitiesMeta = "io.modelcontextprotocol/clientCapabilities"
+	serverInfoMeta         = "io.modelcontextprotocol/serverInfo"
 )
 
 type rpcRequest struct {
@@ -56,6 +60,7 @@ type ContentBlock struct {
 
 // ToolCallResult is the normalized result returned by an MCP tool call.
 type ToolCallResult struct {
+	ResultType        string         `json:"resultType,omitempty"`
 	Content           []ContentBlock `json:"content"`
 	StructuredContent map[string]any `json:"structuredContent,omitempty"`
 	IsError           bool           `json:"isError,omitempty"`
@@ -68,6 +73,7 @@ type Discovery struct {
 	Capabilities      map[string]any `json:"capabilities"`
 	ServerInfo        ServerInfo     `json:"serverInfo"`
 	Instructions      string         `json:"instructions,omitempty"`
+	Meta              map[string]any `json:"_meta,omitempty"`
 }
 
 type ServerInfo struct {

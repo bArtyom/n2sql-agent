@@ -52,6 +52,9 @@ func TestKnowledgeBaseHandlerDiscoversAndListsScopedTool(t *testing.T) {
 	if len(discovery.SupportedVersions) == 0 || discovery.SupportedVersions[0] != ProtocolVersion {
 		t.Fatalf("supported versions = %#v, want %q", discovery.SupportedVersions, ProtocolVersion)
 	}
+	if _, ok := discovery.Meta[serverInfoMeta]; !ok {
+		t.Fatalf("discovery metadata = %#v, want server info", discovery.Meta)
+	}
 
 	tools, err := client.ListTools(context.Background())
 	if err != nil {
@@ -171,6 +174,28 @@ func TestKnowledgeBaseHandlerSupportsLegacyInitialize(t *testing.T) {
 	}
 	if envelope.Result.ProtocolVersion != legacyProtocolVersion {
 		t.Fatalf("protocol version = %q, want %q", envelope.Result.ProtocolVersion, legacyProtocolVersion)
+	}
+}
+
+func TestKnowledgeBaseHandlerRejectsMismatchedBodyMetadata(t *testing.T) {
+	server := newTestServer(&searcherStub{})
+	defer server.Close()
+
+	requestBody := `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2025-06-18"}}}`
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/knowledge-bases/7/mcp", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("MCP-Protocol-Version", ProtocolVersion)
+	request.Header.Set("Mcp-Method", "tools/list")
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatalf("Do() error = %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusBadRequest)
 	}
 }
 

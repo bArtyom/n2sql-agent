@@ -72,6 +72,7 @@ func (h *knowledgeBaseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			Capabilities:      map[string]any{"tools": map[string]any{}},
 			ServerInfo:        ServerInfo{Name: defaultServerName, Version: defaultServerVersion},
 			Instructions:      "This server exposes a read-only, knowledge-base-scoped knowledge_search tool.",
+			Meta:              map[string]any{serverInfoMeta: ServerInfo{Name: defaultServerName, Version: defaultServerVersion}},
 		}
 	case "initialize":
 		result, err = initializeResult(request.Params)
@@ -139,6 +140,9 @@ func validateRoutingHeaders(r *http.Request, request rpcRequest) error {
 	if version != ProtocolVersion {
 		return fmt.Errorf("unsupported MCP protocol version %q", version)
 	}
+	if bodyVersion := requestMetaVersion(request.Params); bodyVersion != "" && bodyVersion != version {
+		return errors.New("MCP request metadata does not match protocol header")
+	}
 	if method := strings.TrimSpace(r.Header.Get("Mcp-Method")); method == "" || method != request.Method {
 		return errors.New("Mcp-Method header does not match JSON-RPC method")
 	}
@@ -184,6 +188,7 @@ func (h *knowledgeBaseHandler) listTools(request *http.Request) (map[string]any,
 		return nil, err
 	}
 	return map[string]any{
+		"resultType": "complete",
 		"tools": []ToolDefinition{{
 			Name:        tool.Name(),
 			Description: tool.Description(),
@@ -222,17 +227,32 @@ func (h *knowledgeBaseHandler) callTool(ctx context.Context, request *http.Reque
 		if errors.Is(err, agent.ErrInvalidKnowledgeSearchInput) {
 			message = "invalid knowledge search arguments"
 		}
-		return ToolCallResult{Content: []ContentBlock{{Type: "text", Text: message}}, IsError: true}, nil
+		return ToolCallResult{ResultType: "complete", Content: []ContentBlock{{Type: "text", Text: message}}, IsError: true}, nil
 	}
 	structured := make(map[string]any, len(toolResult.Metadata))
 	for key, value := range toolResult.Metadata {
 		structured[key] = value
 	}
 	return ToolCallResult{
+		ResultType:        "complete",
 		Content:           []ContentBlock{{Type: "text", Text: toolResult.Content}},
 		StructuredContent: structured,
 		IsError:           false,
 	}, nil
+}
+
+func requestMetaVersion(raw json.RawMessage) string {
+	var params struct {
+		Meta map[string]json.RawMessage `json:"_meta"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &params) != nil {
+		return ""
+	}
+	var version string
+	if err := json.Unmarshal(params.Meta[protocolVersionMeta], &version); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(version)
 }
 
 func routeKnowledgeBaseID(r *http.Request) (int64, error) {
