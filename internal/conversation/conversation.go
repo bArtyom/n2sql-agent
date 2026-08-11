@@ -13,10 +13,11 @@ import (
 )
 
 const (
-	defaultTitle          = "新对话"
-	maxTitleBytes         = 200
-	maxMessageSize        = 64 * 1024
-	maxIdempotencyKeySize = 128
+	defaultTitle                    = "新对话"
+	maxTitleBytes                   = 200
+	maxMessageSize                  = 64 * 1024
+	maxIdempotencyKeySize           = 128
+	conversationLockNamespace int64 = 0x6e327361
 )
 
 var (
@@ -75,6 +76,10 @@ type idempotencyStore interface {
 	SaveIdempotentResponse(context.Context, int64, string, string, []byte) error
 }
 
+type distributedConversationLocker interface {
+	WithConversationLock(context.Context, int64, func() error) error
+}
+
 type IdempotentResponse struct {
 	RequestHash string
 	Response    []byte
@@ -87,6 +92,9 @@ type Service struct {
 
 func NewService(store Store) *Service { return &Service{store: store} }
 
+// WithSummaryLock serializes all work that reads or writes conversation context.
+// The historical name is kept for callers; PostgreSQL-backed stores also add a
+// cross-process advisory lock while the callback is running.
 func (s *Service) WithSummaryLock(ctx context.Context, conversationID, knowledgeBaseID int64, fn func() error) error {
 	if fn == nil {
 		return ErrInvalidConversation
@@ -98,6 +106,9 @@ func (s *Service) WithSummaryLock(ctx context.Context, conversationID, knowledge
 	select {
 	case lock <- struct{}{}:
 		defer func() { <-lock }()
+		if locker, ok := s.store.(distributedConversationLocker); ok {
+			return locker.WithConversationLock(ctx, conversationID, fn)
+		}
 		return fn()
 	case <-ctx.Done():
 		return ctx.Err()
@@ -322,6 +333,42 @@ func (s *Service) SaveExchange(ctx context.Context, conversationID int64, userMe
 type PostgresStore struct{ db *sql.DB }
 
 func NewPostgresStore(db *sql.DB) *PostgresStore { return &PostgresStore{db: db} }
+
+func (s *PostgresStore) WithConversationLock(ctx context.Context, conversationID int64, fn func() error) (resultErr error) {
+	if conversationID <= 0 || fn == nil {
+		return ErrInvalidConversation
+	}
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire conversation lock connection: %w", err)
+	}
+	lockKey := conversationLockKey(conversationID)
+	var ignored any
+	if err := conn.QueryRowContext(ctx, `SELECT pg_advisory_lock($1)`, lockKey).Scan(&ignored); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("acquire conversation advisory lock: %w", err)
+	}
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		var unlocked bool
+		releaseErr := conn.QueryRowContext(releaseCtx, `SELECT pg_advisory_unlock($1)`, lockKey).Scan(&unlocked)
+		cancel()
+		if releaseErr == nil && !unlocked {
+			releaseErr = errors.New("conversation advisory lock was not held")
+		}
+		if releaseErr != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("release conversation advisory lock: %w", releaseErr))
+		}
+		if closeErr := conn.Close(); closeErr != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close conversation lock connection: %w", closeErr))
+		}
+	}()
+	return fn()
+}
+
+func conversationLockKey(conversationID int64) int64 {
+	return (conversationLockNamespace << 32) ^ conversationID
+}
 
 func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Conversation, error) {
 	var result Conversation

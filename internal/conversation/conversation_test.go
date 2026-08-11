@@ -24,6 +24,23 @@ type storeStub struct {
 	idempotency  map[string]conversation.IdempotentResponse
 }
 
+type distributedLockStoreStub struct {
+	*storeStub
+	lockCalls int
+	lockErr   error
+}
+
+func (s *distributedLockStoreStub) WithConversationLock(_ context.Context, conversationID int64, fn func() error) error {
+	s.lockCalls++
+	if conversationID != 9 {
+		return errors.New("unexpected conversation ID")
+	}
+	if s.lockErr != nil {
+		return s.lockErr
+	}
+	return fn()
+}
+
 func (s *storeStub) Create(_ context.Context, input conversation.CreateInput) (conversation.Conversation, error) {
 	s.createdInput = input
 	return s.conversation, nil
@@ -184,6 +201,33 @@ func TestServiceSerializesSummaryWorkPerConversation(t *testing.T) {
 	case <-secondStarted:
 	case <-time.After(time.Second):
 		t.Fatal("second summary callback did not start")
+	}
+}
+
+func TestServiceUsesDistributedConversationLockWhenStoreProvidesIt(t *testing.T) {
+	store := &distributedLockStoreStub{storeStub: &storeStub{conversation: conversation.Conversation{ID: 9, KnowledgeBaseID: 7}}}
+	service := conversation.NewService(store)
+	called := false
+	if err := service.WithSummaryLock(context.Background(), 9, 7, func() error {
+		called = true
+		return nil
+	}); err != nil {
+		t.Fatalf("WithSummaryLock() error = %v", err)
+	}
+	if !called || store.lockCalls != 1 {
+		t.Fatalf("callback=%t distributed lock calls=%d, want callback and one external lock", called, store.lockCalls)
+	}
+}
+
+func TestServicePropagatesDistributedLockFailure(t *testing.T) {
+	wantErr := errors.New("database lock unavailable")
+	store := &distributedLockStoreStub{
+		storeStub: &storeStub{conversation: conversation.Conversation{ID: 9, KnowledgeBaseID: 7}},
+		lockErr:   wantErr,
+	}
+	service := conversation.NewService(store)
+	if err := service.WithSummaryLock(context.Background(), 9, 7, func() error { return nil }); !errors.Is(err, wantErr) {
+		t.Fatalf("WithSummaryLock() error = %v, want distributed lock failure", err)
 	}
 }
 
