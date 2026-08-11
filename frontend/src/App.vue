@@ -535,7 +535,7 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
       case "research_tool_finished": {
         const sources = parseSources(eventData.sources);
         answer.sources = mergeSources(answer.sources ?? [], sources);
-        recordResearchEvent(answer, event, "收到检索结果", sources.length ? `${sources.length} 条引用` : "没有命中相关资料", payload.round);
+        recordResearchEvent(answer, event, "检索完成", sources.length ? `${sources.length} 条引用` : "继续评估当前证据", payload.round);
         answer.activity = "研究员正在判断是否需要继续…";
         break;
       }
