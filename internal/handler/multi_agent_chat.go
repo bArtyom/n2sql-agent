@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -11,9 +12,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/multiagent"
 )
 
-// NewMultiAgentChat exposes the minimal in-process Supervisor workflow. It is
-// intentionally non-streaming; the existing Agent SSE endpoint remains the
-// primary interactive chat path.
+// NewMultiAgentChat exposes the non-streaming in-process Supervisor workflow.
 func NewMultiAgentChat(answerer multiagent.Answerer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if answerer == nil {
@@ -35,6 +34,69 @@ func NewMultiAgentChat(answerer multiagent.Answerer) http.Handler {
 		}
 		writeJSON(w, response)
 	})
+}
+
+// NewMultiAgentChatStream exposes the same Supervisor workflow as SSE. The
+// non-streaming endpoint remains available for callers that only need the
+// final structured response.
+func NewMultiAgentChatStream(answerer multiagent.EventAnswerer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerer == nil {
+			http.Error(w, `{"error":"multi-agent service unavailable"}`, http.StatusInternalServerError)
+			return
+		}
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		knowledgeBaseID, request, ok := decodeKnowledgeBaseChatRequest(w, r)
+		if !ok {
+			return
+		}
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, `{"error":"streaming is not supported"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+
+		emit := func(event multiagent.Event) error {
+			return writeMultiAgentSSEEvent(w, flusher, event)
+		}
+		_, err := answerer.AnswerWithEvents(r.Context(), knowledgeBaseID, request.Message, request.TopK, emit)
+		if err == nil || r.Context().Err() != nil {
+			return
+		}
+		message, _ := multiAgentChatError(err)
+		if writeErr := writeSSEMessage(w, flusher, "error", struct {
+			Error string `json:"error"`
+		}{Error: message}); writeErr != nil {
+			slog.ErrorContext(r.Context(), "multi_agent_sse_error_event_write_failed", "error", writeErr)
+		}
+	})
+}
+
+func writeMultiAgentSSEEvent(w http.ResponseWriter, flusher http.Flusher, event multiagent.Event) error {
+	switch event.Type {
+	case multiagent.EventRunStarted,
+		multiagent.EventResearchStarted,
+		multiagent.EventResearchToolCalled,
+		multiagent.EventResearchToolFinished,
+		multiagent.EventResearchSummary,
+		multiagent.EventResearchFinished,
+		multiagent.EventAnswererStarted,
+		multiagent.EventAnswererFinished,
+		multiagent.EventAnswererSkipped,
+		multiagent.EventRunFinished,
+		multiagent.EventRunFailed,
+		multiagent.EventRunCanceled:
+		return writeSSEMessage(w, flusher, string(event.Type), event)
+	default:
+		return errors.New("invalid multi-agent SSE event type")
+	}
 }
 
 func writeMultiAgentChatError(w http.ResponseWriter, err error) {

@@ -136,4 +136,14 @@ curl -X POST http://localhost:8080/api/knowledge-bases/1/multi-agent-chat \
   -d '{"message":"这份资料如何启动服务？","topK":5}'
 ```
 
+需要观察研究轮次时使用 SSE：
+
+```sh
+curl -N -X POST http://localhost:8080/api/knowledge-bases/1/multi-agent-chat/stream \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"这份资料如何启动服务？","topK":5}'
+```
+
+事件包括 `research_tool_called`、`research_tool_finished`、`research_summary`、`answerer_finished` 和 `run_finished`；原有非流式接口保持不变。
+
 响应中的 `steps` 会标记 `researcher` 和 `answerer` 的执行状态。资料不足时会直接返回拒答，不再额外调用回答模型。该入口暂不保存会话、不提供 SSE，也不引入 SQL/schema、Redis、MCP 或 A2A；已有的 `/agent-chat` 和 `/agent-chat/stream` 仍是带会话的主问答入口。

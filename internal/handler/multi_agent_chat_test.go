@@ -18,6 +18,28 @@ type multiAgentAnswererStub struct {
 	calls    int
 }
 
+type multiAgentEventAnswererStub struct {
+	response multiagent.Response
+	err      error
+}
+
+func (s *multiAgentEventAnswererStub) Answer(_ context.Context, _ int64, _ string, _ int) (multiagent.Response, error) {
+	return s.response, s.err
+}
+
+func (s *multiAgentEventAnswererStub) AnswerWithEvents(_ context.Context, _ int64, _ string, _ int, sink multiagent.EventSink) (multiagent.Response, error) {
+	if err := sink(multiagent.Event{Type: multiagent.EventRunStarted}); err != nil {
+		return multiagent.Response{}, err
+	}
+	if s.err != nil {
+		return multiagent.Response{}, s.err
+	}
+	if err := sink(multiagent.Event{Type: multiagent.EventRunFinished, Data: s.response}); err != nil {
+		return multiagent.Response{}, err
+	}
+	return s.response, nil
+}
+
 func (s *multiAgentAnswererStub) Answer(_ context.Context, knowledgeBaseID int64, question string, topK int) (multiagent.Response, error) {
 	s.calls++
 	if knowledgeBaseID != 7 || question != "如何启动？" || topK != 3 {
@@ -83,6 +105,32 @@ func TestMultiAgentChatHandlesMissingService(t *testing.T) {
 	handler.ServeHTTP(response, request)
 
 	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+func TestMultiAgentChatStreamWritesWorkflowEvents(t *testing.T) {
+	streamHandler := handler.NewMultiAgentChatStream(&multiAgentEventAnswererStub{response: multiagent.Response{Answer: "完成"}})
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/multi-agent-chat/stream", strings.NewReader(`{"message":"问题","topK":3}`))
+	request.SetPathValue("id", "7")
+	response := httptest.NewRecorder()
+
+	streamHandler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "text/event-stream" || !strings.Contains(response.Body.String(), "event: run_started\n") || !strings.Contains(response.Body.String(), "event: run_finished\n") {
+		t.Fatalf("status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
+	}
+}
+
+func TestMultiAgentChatStreamWritesErrorEvent(t *testing.T) {
+	streamHandler := handler.NewMultiAgentChatStream(&multiAgentEventAnswererStub{err: errors.New("research failed")})
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/multi-agent-chat/stream", strings.NewReader(`{"message":"问题"}`))
+	request.SetPathValue("id", "7")
+	response := httptest.NewRecorder()
+
+	streamHandler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "event: error\n") {
 		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
 	}
 }

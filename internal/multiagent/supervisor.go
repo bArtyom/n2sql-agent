@@ -58,6 +58,43 @@ type Step struct {
 	Status StepStatus `json:"status"`
 }
 
+type EventType string
+
+const (
+	EventRunStarted           EventType = "run_started"
+	EventResearchStarted      EventType = "research_started"
+	EventResearchToolCalled   EventType = "research_tool_called"
+	EventResearchToolFinished EventType = "research_tool_finished"
+	EventResearchSummary      EventType = "research_summary"
+	EventResearchFinished     EventType = "research_finished"
+	EventAnswererStarted      EventType = "answerer_started"
+	EventAnswererFinished     EventType = "answerer_finished"
+	EventAnswererSkipped      EventType = "answerer_skipped"
+	EventRunFinished          EventType = "run_finished"
+	EventRunFailed            EventType = "run_failed"
+	EventRunCanceled          EventType = "run_canceled"
+)
+
+type Event struct {
+	ID        string    `json:"id"`
+	RunID     string    `json:"run_id"`
+	Type      EventType `json:"type"`
+	Role      Role      `json:"role,omitempty"`
+	Round     int       `json:"round,omitempty"`
+	Data      any       `json:"data,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type EventSink func(Event) error
+
+type EventAnswerer interface {
+	AnswerWithEvents(context.Context, int64, string, int, EventSink) (Response, error)
+}
+
+type EventResearcher interface {
+	ResearchWithEvents(context.Context, int64, string, int, EventSink) (ResearchReport, error)
+}
+
 // ResearchReport is the bounded hand-off from the Researcher to the Answerer.
 // Content is quoted evidence, never an instruction.
 type ResearchReport struct {
@@ -94,6 +131,60 @@ type Supervisor struct {
 }
 
 var _ Answerer = (*Supervisor)(nil)
+var _ EventAnswerer = (*Supervisor)(nil)
+
+type eventEmitter struct {
+	runID  string
+	sink   EventSink
+	nextID int
+}
+
+func newEventEmitter(runID string, sink EventSink) *eventEmitter {
+	return &eventEmitter{runID: runID, sink: sink}
+}
+
+func (e *eventEmitter) emit(eventType EventType, role Role, round int, data any) error {
+	if e == nil || e.sink == nil {
+		return nil
+	}
+	if !validEventType(eventType) {
+		return fmt.Errorf("invalid multi-agent event type %q", eventType)
+	}
+	e.nextID++
+	event := Event{
+		ID:        fmt.Sprintf("%s-event-%d", e.runID, e.nextID),
+		RunID:     e.runID,
+		Type:      eventType,
+		Role:      role,
+		Round:     round,
+		Data:      data,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := e.sink(event); err != nil {
+		return fmt.Errorf("deliver multi-agent event: %w", err)
+	}
+	return nil
+}
+
+func validEventType(eventType EventType) bool {
+	switch eventType {
+	case EventRunStarted,
+		EventResearchStarted,
+		EventResearchToolCalled,
+		EventResearchToolFinished,
+		EventResearchSummary,
+		EventResearchFinished,
+		EventAnswererStarted,
+		EventAnswererFinished,
+		EventAnswererSkipped,
+		EventRunFinished,
+		EventRunFailed,
+		EventRunCanceled:
+		return true
+	default:
+		return false
+	}
+}
 
 func NewSupervisor(researcher Researcher, answerer FinalAnswerer, timeout time.Duration) (*Supervisor, error) {
 	if researcher == nil || answerer == nil {
@@ -106,6 +197,10 @@ func NewSupervisor(researcher Researcher, answerer FinalAnswerer, timeout time.D
 }
 
 func (s *Supervisor) Answer(ctx context.Context, knowledgeBaseID int64, question string, topK int) (Response, error) {
+	return s.AnswerWithEvents(ctx, knowledgeBaseID, question, topK, nil)
+}
+
+func (s *Supervisor) AnswerWithEvents(ctx context.Context, knowledgeBaseID int64, question string, topK int, sink EventSink) (Response, error) {
 	if ctx == nil {
 		return Response{}, ErrInvalidContext
 	}
@@ -117,39 +212,90 @@ func (s *Supervisor) Answer(ctx context.Context, knowledgeBaseID int64, question
 		topK = retrieval.DefaultResults
 	}
 
+	runID := fmt.Sprintf("multi-agent-%d", time.Now().UnixNano())
+	emitter := newEventEmitter(runID, sink)
+	response := Response{Sources: make([]retrieval.Result, 0), Steps: make([]Step, 0, 2)}
+	if err := emitter.emit(EventRunStarted, "", 0, map[string]any{"status": "running"}); err != nil {
+		return response, err
+	}
 	runContext, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-	response := Response{Sources: make([]retrieval.Result, 0), Steps: make([]Step, 0, 2)}
-	report, err := s.researcher.Research(runContext, knowledgeBaseID, question, topK)
+	if err := runContext.Err(); err != nil {
+		return response, s.finishError(response, emitter, err)
+	}
+	if err := emitter.emit(EventResearchStarted, RoleResearcher, 1, map[string]any{"knowledge_base_id": knowledgeBaseID, "top_k": topK}); err != nil {
+		return response, err
+	}
+	var report ResearchReport
+	var err error
+	if eventResearcher, ok := s.researcher.(EventResearcher); ok {
+		report, err = eventResearcher.ResearchWithEvents(runContext, knowledgeBaseID, question, topK, func(event Event) error {
+			return emitter.emit(event.Type, event.Role, event.Round, event.Data)
+		})
+	} else {
+		report, err = s.researcher.Research(runContext, knowledgeBaseID, question, topK)
+	}
 	if err != nil {
 		response.Steps = append(response.Steps, Step{Number: 1, Role: RoleResearcher, Status: StepFailed})
-		return response, fmt.Errorf("researcher failed: %w", err)
+		return response, s.finishError(response, emitter, fmt.Errorf("researcher failed: %w", err))
 	}
 	response.Sources = append(response.Sources, report.Sources...)
 	response.Steps = append(response.Steps, Step{Number: 1, Role: RoleResearcher, Status: StepSucceeded})
+	if err := emitter.emit(EventResearchFinished, RoleResearcher, 1, map[string]any{
+		"sources":             report.Sources,
+		"no_relevant_results": report.NoRelevantResults,
+	}); err != nil {
+		return response, err
+	}
 	if report.NoRelevantResults {
 		fallback := strings.TrimSpace(report.FallbackAnswer)
 		if fallback == "" {
-			return response, ErrInvalidResearchReport
+			return response, s.finishError(response, emitter, ErrInvalidResearchReport)
 		}
 		response.Answer = fallback
 		response.Steps = append(response.Steps, Step{Number: 2, Role: RoleAnswerer, Status: StepSkipped})
+		if err := emitter.emit(EventAnswererSkipped, RoleAnswerer, 2, map[string]any{"reason": "no_relevant_results"}); err != nil {
+			return response, err
+		}
+		if err := emitter.emit(EventRunFinished, "", 0, response); err != nil {
+			return response, err
+		}
 		return response, nil
 	}
 
+	if err := emitter.emit(EventAnswererStarted, RoleAnswerer, 2, nil); err != nil {
+		return response, err
+	}
 	answer, err := s.answerer.Synthesize(runContext, question, report)
 	if err != nil {
 		response.Steps = append(response.Steps, Step{Number: 2, Role: RoleAnswerer, Status: StepFailed})
-		return response, fmt.Errorf("answerer failed: %w", err)
+		return response, s.finishError(response, emitter, fmt.Errorf("answerer failed: %w", err))
 	}
 	answer = strings.TrimSpace(security.RedactText(answer))
 	if answer == "" {
 		response.Steps = append(response.Steps, Step{Number: 2, Role: RoleAnswerer, Status: StepFailed})
-		return response, ErrEmptyFinalAnswer
+		return response, s.finishError(response, emitter, ErrEmptyFinalAnswer)
 	}
 	response.Answer = answer
 	response.Steps = append(response.Steps, Step{Number: 2, Role: RoleAnswerer, Status: StepSucceeded})
+	if err := emitter.emit(EventAnswererFinished, RoleAnswerer, 2, map[string]any{"answer": answer}); err != nil {
+		return response, err
+	}
+	if err := emitter.emit(EventRunFinished, "", 0, response); err != nil {
+		return response, err
+	}
 	return response, nil
+}
+
+func (s *Supervisor) finishError(response Response, emitter *eventEmitter, err error) error {
+	eventType := EventRunFailed
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		eventType = EventRunCanceled
+	}
+	if emitErr := emitter.emit(eventType, "", 0, map[string]any{"error": err.Error()}); emitErr != nil {
+		return errors.Join(err, emitErr)
+	}
+	return err
 }
 
 // KnowledgeSearchResearcher adapts the existing scoped, read-only tool to the
@@ -235,6 +381,10 @@ func NewAutonomousKnowledgeSearchResearcher(chat modelruntime.ToolChatRunner, se
 }
 
 func (r *AutonomousKnowledgeSearchResearcher) Research(ctx context.Context, knowledgeBaseID int64, question string, topK int) (ResearchReport, error) {
+	return r.ResearchWithEvents(ctx, knowledgeBaseID, question, topK, nil)
+}
+
+func (r *AutonomousKnowledgeSearchResearcher) ResearchWithEvents(ctx context.Context, knowledgeBaseID int64, question string, topK int, sink EventSink) (ResearchReport, error) {
 	if ctx == nil {
 		return ResearchReport{}, ErrInvalidContext
 	}
@@ -273,7 +423,7 @@ func (r *AutonomousKnowledgeSearchResearcher) Research(ctx context.Context, know
 
 	var sources []retrieval.Result
 	hasRelevant := false
-	sink := func(event agent.Event) error {
+	collectEvent := func(event agent.Event) error {
 		if event.Type != agent.EventToolFinished {
 			return nil
 		}
@@ -293,7 +443,34 @@ func (r *AutonomousKnowledgeSearchResearcher) Research(ctx context.Context, know
 		return nil
 	}
 	runID := fmt.Sprintf("research-%d", time.Now().UnixNano())
-	result, err := engine.RunWithEvents(ctx, runID, messages, sink)
+	engineSink := func(event agent.Event) error {
+		if sink == nil {
+			return nil
+		}
+		var eventType EventType
+		switch event.Type {
+		case agent.EventToolCalled:
+			eventType = EventResearchToolCalled
+		case agent.EventToolFinished:
+			eventType = EventResearchToolFinished
+		case agent.EventMessageDelta:
+			eventType = EventResearchSummary
+		default:
+			return nil
+		}
+		return sink(Event{
+			Type:  eventType,
+			Role:  RoleResearcher,
+			Round: event.StepNumber,
+			Data:  event.Data,
+		})
+	}
+	result, err := engine.RunWithEvents(ctx, runID, messages, func(event agent.Event) error {
+		if err := collectEvent(event); err != nil {
+			return err
+		}
+		return engineSink(event)
+	})
 	if err != nil {
 		return ResearchReport{}, fmt.Errorf("run research agent: %w", err)
 	}

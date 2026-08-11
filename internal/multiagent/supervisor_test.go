@@ -320,6 +320,36 @@ func TestAutonomousResearcherLetsModelContinueSearching(t *testing.T) {
 	}
 }
 
+func TestAutonomousResearcherMapsAgentEvents(t *testing.T) {
+	searcher := &querySearchStub{queries: map[string][]retrieval.Result{
+		"问题": {{DocumentID: 16, Position: 1, Distance: 0.2, Content: "资料"}},
+	}}
+	chat := &toolChatStub{responses: []modelclient.ChatResponse{
+		researchToolCall("call-1", "问题"),
+		{Message: "研究摘要"},
+	}}
+	researcher, err := multiagent.NewAutonomousKnowledgeSearchResearcher(chat, searcher, 3, 2048)
+	if err != nil {
+		t.Fatalf("NewAutonomousKnowledgeSearchResearcher() error = %v", err)
+	}
+	var events []multiagent.Event
+	if _, err := researcher.ResearchWithEvents(context.Background(), 7, "问题", 3, func(event multiagent.Event) error {
+		events = append(events, event)
+		return nil
+	}); err != nil {
+		t.Fatalf("ResearchWithEvents() error = %v", err)
+	}
+	wantTypes := []multiagent.EventType{multiagent.EventResearchToolCalled, multiagent.EventResearchToolFinished, multiagent.EventResearchSummary}
+	if len(events) != len(wantTypes) {
+		t.Fatalf("events=%#v, want %d events", events, len(wantTypes))
+	}
+	for index, want := range wantTypes {
+		if events[index].Type != want || events[index].Role != multiagent.RoleResearcher {
+			t.Fatalf("event[%d]=%#v, want %q researcher event", index, events[index], want)
+		}
+	}
+}
+
 func TestAutonomousResearcherContinuesAfterNoRelevantResults(t *testing.T) {
 	searcher := &querySearchStub{queries: map[string][]retrieval.Result{
 		"原始问题":  nil,
@@ -420,5 +450,94 @@ func TestAutonomousResearcherHonorsCancellation(t *testing.T) {
 	_, err = researcher.Research(ctx, 7, "问题", 3)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Research() error = %v, want context.Canceled", err)
+	}
+}
+
+type eventResearcherStub struct {
+	report multiagent.ResearchReport
+	events []multiagent.Event
+}
+
+func (s *eventResearcherStub) Research(_ context.Context, _ int64, _ string, _ int) (multiagent.ResearchReport, error) {
+	return s.report, nil
+}
+
+func (s *eventResearcherStub) ResearchWithEvents(_ context.Context, _ int64, _ string, _ int, sink multiagent.EventSink) (multiagent.ResearchReport, error) {
+	for _, event := range s.events {
+		if err := sink(event); err != nil {
+			return multiagent.ResearchReport{}, err
+		}
+	}
+	return s.report, nil
+}
+
+func TestSupervisorAnswerWithEventsEmitsWorkflow(t *testing.T) {
+	researcher := &eventResearcherStub{
+		report: multiagent.ResearchReport{
+			Content: "研究资料",
+			Sources: []retrieval.Result{{DocumentID: 11, Position: 1, Content: "资料"}},
+		},
+		events: []multiagent.Event{{
+			Type:  multiagent.EventResearchToolCalled,
+			Role:  multiagent.RoleResearcher,
+			Round: 1,
+		}},
+	}
+	answerer := &finalAnswererStub{answer: "最终回答"}
+	supervisor, err := multiagent.NewSupervisor(researcher, answerer, time.Second)
+	if err != nil {
+		t.Fatalf("NewSupervisor() error = %v", err)
+	}
+	var events []multiagent.Event
+	response, err := supervisor.AnswerWithEvents(context.Background(), 7, "如何启动？", 3, func(event multiagent.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil || response.Answer != "最终回答" {
+		t.Fatalf("response=%#v err=%v", response, err)
+	}
+	wantTypes := []multiagent.EventType{
+		multiagent.EventRunStarted,
+		multiagent.EventResearchStarted,
+		multiagent.EventResearchToolCalled,
+		multiagent.EventResearchFinished,
+		multiagent.EventAnswererStarted,
+		multiagent.EventAnswererFinished,
+		multiagent.EventRunFinished,
+	}
+	if len(events) != len(wantTypes) {
+		t.Fatalf("events=%#v, want %d events", events, len(wantTypes))
+	}
+	for index, want := range wantTypes {
+		if events[index].Type != want {
+			t.Fatalf("event[%d]=%#v, want type %q", index, events[index], want)
+		}
+	}
+}
+
+func TestSupervisorAnswerWithEventsEmitsFailureAndCancellation(t *testing.T) {
+	researcher := &researcherStub{err: errors.New("research failed")}
+	supervisor, err := multiagent.NewSupervisor(researcher, &finalAnswererStub{}, time.Second)
+	if err != nil {
+		t.Fatalf("NewSupervisor() error = %v", err)
+	}
+	var events []multiagent.Event
+	_, err = supervisor.AnswerWithEvents(context.Background(), 7, "如何启动？", 3, func(event multiagent.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if err == nil || len(events) != 3 || events[2].Type != multiagent.EventRunFailed {
+		t.Fatalf("err=%v events=%#v, want run_failed", err, events)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	events = nil
+	_, err = supervisor.AnswerWithEvents(ctx, 7, "如何启动？", 3, func(event multiagent.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) || len(events) != 2 || events[1].Type != multiagent.EventRunCanceled {
+		t.Fatalf("err=%v events=%#v, want run_canceled", err, events)
 	}
 }

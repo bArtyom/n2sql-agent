@@ -80,6 +80,13 @@ func (multiAgentAnswererStub) Answer(context.Context, int64, string, int) (multi
 	return multiagent.Response{Answer: "OK"}, nil
 }
 
+func (multiAgentAnswererStub) AnswerWithEvents(_ context.Context, _ int64, _ string, _ int, emit multiagent.EventSink) (multiagent.Response, error) {
+	if err := emit(multiagent.Event{Type: multiagent.EventRunStarted}); err != nil {
+		return multiagent.Response{}, err
+	}
+	return multiagent.Response{Answer: "OK"}, nil
+}
+
 type knowledgeBaseStoreStub struct{}
 
 func (knowledgeBaseStoreStub) Create(context.Context, knowledgebase.CreateInput) (knowledgebase.KnowledgeBase, error) {
@@ -260,6 +267,20 @@ func TestServerRoutesKnowledgeBaseMultiAgentChat(t *testing.T) {
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
+	}
+}
+
+func TestServerRoutesKnowledgeBaseMultiAgentChatStream(t *testing.T) {
+	response := httptest.NewRecorder()
+	server := app.New(app.Dependencies{MultiAgentStreamingAnswers: multiAgentAnswererStub{}})
+
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/multi-agent-chat/stream", strings.NewReader(`{"message":"问题"}`)))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
+	}
+	if contentType := response.Header().Get("Content-Type"); contentType != "text/event-stream" {
+		t.Fatalf("content type = %q, want text/event-stream", contentType)
 	}
 }
 
