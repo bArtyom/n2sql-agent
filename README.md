@@ -125,3 +125,15 @@ go run ./cmd/retrieval-eval \
 ```
 
 输出中的 `recall` 表示文档内问题被命中的比例，`refusal_rate` 表示文档外问题被正确拒答的比例，`false_refusals` 和 `unsupported_accepts` 分别表示误拒答和漏拒答。新增问题时复制 JSON 中的字段，并明确标注 `expected_relevant`，不要用模型自动生成标签。
+
+## 最小 Multi-Agent 协作
+
+`POST /api/knowledge-bases/{id}/multi-agent-chat` 提供一个非流式的进程内协作示例：`Supervisor` 先让只读 `Researcher` 调用知识库检索工具，再把带引用的研究资料交给无工具的 `Answerer` 生成最终回答。
+
+```sh
+curl -X POST http://localhost:8080/api/knowledge-bases/1/multi-agent-chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"这份资料如何启动服务？","topK":5}'
+```
+
+响应中的 `steps` 会标记 `researcher` 和 `answerer` 的执行状态。资料不足时会直接返回拒答，不再额外调用回答模型。该入口暂不保存会话、不提供 SSE，也不引入 SQL/schema、Redis、MCP 或 A2A；已有的 `/agent-chat` 和 `/agent-chat/stream` 仍是带会话的主问答入口。

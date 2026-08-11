@@ -13,6 +13,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
+	"github.com/bArtyom/n2sql-agent/internal/multiagent"
 	"github.com/bArtyom/n2sql-agent/internal/rag"
 	"github.com/bArtyom/n2sql-agent/internal/requestid"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
@@ -30,6 +31,7 @@ type Dependencies struct {
 	StreamingAnswers      rag.StreamAnswerer
 	AgentAnswers          agentservice.Answerer
 	AgentStreamingAnswers agentservice.EventAnswerer
+	MultiAgentAnswers     multiagent.Answerer
 	Conversations         *conversation.Service
 	AgentMaxHistoryBytes  int
 	APIKeyEnvVar          string
@@ -89,6 +91,9 @@ func New(dependencies Dependencies) http.Handler {
 	}
 	if dependencies.AgentStreamingAnswers != nil {
 		mux.Handle("POST /api/knowledge-bases/{id}/agent-chat/stream", handler.NewKnowledgeBaseAgentChatStreamWithConversationAndMetrics(dependencies.AgentStreamingAnswers, dependencies.Conversations, dependencies.AgentMaxHistoryBytes, registry))
+	}
+	if dependencies.MultiAgentAnswers != nil {
+		mux.Handle("POST /api/knowledge-bases/{id}/multi-agent-chat", handler.NewMultiAgentChat(dependencies.MultiAgentAnswers))
 	}
 
 	return requestid.NewMiddleware(slog.Default(), registry.Middleware(mux))

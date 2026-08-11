@@ -15,6 +15,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
+	"github.com/bArtyom/n2sql-agent/internal/multiagent"
 	"github.com/bArtyom/n2sql-agent/internal/rag"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 )
@@ -71,6 +72,12 @@ func (agentAnswererStub) Answer(context.Context, int64, agentservice.ChatRequest
 
 func (agentAnswererStub) AnswerWithEvents(context.Context, int64, agentservice.ChatRequest, agentruntime.EventSink) (agentservice.Response, error) {
 	return agentservice.Response{Answer: "OK"}, nil
+}
+
+type multiAgentAnswererStub struct{}
+
+func (multiAgentAnswererStub) Answer(context.Context, int64, string, int) (multiagent.Response, error) {
+	return multiagent.Response{Answer: "OK"}, nil
 }
 
 type knowledgeBaseStoreStub struct{}
@@ -242,6 +249,17 @@ func TestServerRoutesKnowledgeBaseAgentChatStream(t *testing.T) {
 	}
 	if contentType := response.Header().Get("Content-Type"); contentType != "text/event-stream" {
 		t.Fatalf("content type = %q, want text/event-stream", contentType)
+	}
+}
+
+func TestServerRoutesKnowledgeBaseMultiAgentChat(t *testing.T) {
+	response := httptest.NewRecorder()
+	server := app.New(app.Dependencies{MultiAgentAnswers: multiAgentAnswererStub{}})
+
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/multi-agent-chat", strings.NewReader(`{"message":"问题"}`)))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
 	}
 }
 

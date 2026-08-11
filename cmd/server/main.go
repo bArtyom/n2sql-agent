@@ -20,10 +20,11 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 	"github.com/bArtyom/n2sql-agent/internal/documentocr"
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
+	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
-	"github.com/bArtyom/n2sql-agent/internal/metrics"
+	"github.com/bArtyom/n2sql-agent/internal/multiagent"
 	"github.com/bArtyom/n2sql-agent/internal/rag"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 	"github.com/bArtyom/n2sql-agent/internal/worker"
@@ -78,6 +79,18 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	knowledgeResearcher, err := multiagent.NewKnowledgeSearchResearcher(searchService, cfg.AgentMaxToolResultBytes)
+	if err != nil {
+		log.Fatal(err)
+	}
+	modelAnswerer, err := multiagent.NewModelAnswerer(chatService)
+	if err != nil {
+		log.Fatal(err)
+	}
+	multiAgentAnswers, err := multiagent.NewSupervisor(knowledgeResearcher, modelAnswerer, cfg.AgentTimeout)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	server := &http.Server{
 		Addr: cfg.Address,
@@ -93,6 +106,7 @@ func main() {
 			StreamingAnswers:      answerService,
 			AgentAnswers:          agentAnswerService,
 			AgentStreamingAnswers: agentAnswerService,
+			MultiAgentAnswers:     multiAgentAnswers,
 			Conversations:         conversationService,
 			AgentMaxHistoryBytes:  cfg.AgentMaxHistoryBytes,
 			APIKeyEnvVar:          cfg.ModelProviderAPIKeyEnvVar,
