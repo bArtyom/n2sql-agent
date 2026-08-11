@@ -35,6 +35,8 @@ func TestRegistryExposesHTTPAgentAndWorkerMetrics(t *testing.T) {
 	registry.ObserveWorker(metrics.WorkerObservation{Status: metrics.WorkerStatusSucceeded, Duration: 50 * time.Millisecond})
 	registry.ObserveWorker(metrics.WorkerObservation{Status: metrics.WorkerStatusFailed, Duration: 20 * time.Millisecond})
 	registry.ObserveWorker(metrics.WorkerObservation{Status: metrics.WorkerStatusClaimFailed})
+	registry.ObserveWorker(metrics.WorkerObservation{Status: metrics.WorkerStatusRetryScheduled})
+	registry.ObserveWorker(metrics.WorkerObservation{Status: metrics.WorkerStatusDeadLetter})
 
 	response := httptest.NewRecorder()
 	registry.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
@@ -62,6 +64,8 @@ func TestRegistryExposesHTTPAgentAndWorkerMetrics(t *testing.T) {
 		"worker_tasks_succeeded_total 1",
 		"worker_tasks_failed_total 1",
 		"worker_task_claim_failures_total 1",
+		"worker_retries_total 1",
+		"worker_dead_letters_total 1",
 		"worker_task_duration_ms_total 70",
 	} {
 		if !strings.Contains(response.Body.String(), line+"\n") {

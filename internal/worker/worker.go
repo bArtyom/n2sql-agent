@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"time"
 
+	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 )
@@ -20,16 +22,22 @@ const (
 var ErrNoTask = errors.New("no pending document processing task")
 
 type Task struct {
-	ID          int64
-	DocumentID  int64
-	StoragePath string
-	ContentType string
+	ID           int64
+	DocumentID   int64
+	AttemptCount int
+	StoragePath  string
+	ContentType  string
 }
 
 type Store interface {
 	ClaimNext(context.Context) (Task, error)
 	MarkSucceeded(context.Context, int64) error
 	MarkFailed(context.Context, int64, string) error
+}
+
+type RetryStore interface {
+	Requeue(context.Context, int64, string, time.Time) error
+	MarkDeadLetter(context.Context, int64, string) error
 }
 
 type Processor func(context.Context, Task) error
@@ -54,7 +62,7 @@ func NewChunkingProcessor(extractor TextExtractor, splitter TextSplitter, chunks
 		}
 		parts := splitter.Split(text)
 		if len(parts) == 0 {
-			return errors.New("document contains no chunks")
+			return Permanent(errors.New("document contains no chunks"))
 		}
 		return chunks.Replace(ctx, task.DocumentID, parts, nil)
 	}
@@ -68,7 +76,7 @@ func NewEmbeddingChunkingProcessor(extractor TextExtractor, splitter TextSplitte
 		}
 		parts := splitter.Split(text)
 		if len(parts) == 0 {
-			return errors.New("document contains no chunks")
+			return Permanent(errors.New("document contains no chunks"))
 		}
 		embeddings, err := embedChunks(ctx, embedder, parts)
 		if err != nil {
@@ -108,17 +116,29 @@ func NewTextExtractionProcessor(extractor TextExtractor) Processor {
 }
 
 type Runner struct {
-	store     Store
-	processor Processor
-	metrics   *metrics.Registry
+	store       Store
+	processor   Processor
+	metrics     *metrics.Registry
+	retryPolicy RetryPolicy
 }
 
 func NewRunner(store Store, processor Processor) *Runner {
-	return NewRunnerWithMetrics(store, processor, nil)
+	return NewRunnerWithMetricsAndPolicy(store, processor, nil, DefaultRetryPolicy)
 }
 
 func NewRunnerWithMetrics(store Store, processor Processor, registry *metrics.Registry) *Runner {
-	return &Runner{store: store, processor: processor, metrics: registry}
+	return NewRunnerWithMetricsAndPolicy(store, processor, registry, DefaultRetryPolicy)
+}
+
+func NewRunnerWithPolicy(store Store, processor Processor, policy RetryPolicy) *Runner {
+	return NewRunnerWithMetricsAndPolicy(store, processor, nil, policy)
+}
+
+func NewRunnerWithMetricsAndPolicy(store Store, processor Processor, registry *metrics.Registry, policy RetryPolicy) *Runner {
+	if policy.MaxAttempts <= 0 {
+		policy = DefaultRetryPolicy
+	}
+	return &Runner{store: store, processor: processor, metrics: registry, retryPolicy: policy}
 }
 
 func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
@@ -150,9 +170,8 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 			message = message[:maxFailureMessageBytes]
 		}
 		r.recordTask(ctx, slog.LevelError, "document_task_failed", task, metrics.WorkerStatusFailed, started, "error", message)
-		if markErr := r.store.MarkFailed(context.WithoutCancel(ctx), task.ID, message); markErr != nil {
-			r.recordTask(ctx, slog.LevelError, "document_task_status_update_failed", task, metrics.WorkerStatusStatusUpdateFailed, started, "target_status", "failed", "error", markErr)
-			return true, fmt.Errorf("mark document processing task failed: %w", markErr)
+		if markErr := r.finishFailedTask(context.WithoutCancel(ctx), task, message, err, started); markErr != nil {
+			return true, markErr
 		}
 		return true, nil
 	}
@@ -165,6 +184,56 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 	}
 	r.recordTask(ctx, slog.LevelInfo, "document_task_succeeded", task, metrics.WorkerStatusSucceeded, started)
 	return true, nil
+}
+
+func (r *Runner) finishFailedTask(ctx context.Context, task Task, message string, processingErr error, started time.Time) error {
+	retryStore, supportsRetry := r.store.(RetryStore)
+	if !supportsRetry {
+		if err := r.store.MarkFailed(ctx, task.ID, message); err != nil {
+			r.recordTask(ctx, slog.LevelError, "document_task_status_update_failed", task, metrics.WorkerStatusStatusUpdateFailed, started, "target_status", "failed", "error", err)
+			return fmt.Errorf("mark document processing task failed: %w", err)
+		}
+		return nil
+	}
+
+	attempt := task.AttemptCount
+	if attempt < 1 {
+		attempt = 1
+	}
+	if isRetryable(processingErr) {
+		if retryAt, ok := r.retryPolicy.NextRetryAt(time.Now(), attempt); ok {
+			if err := retryStore.Requeue(ctx, task.ID, message, retryAt); err != nil {
+				r.recordTask(ctx, slog.LevelError, "document_task_status_update_failed", task, metrics.WorkerStatusStatusUpdateFailed, started, "target_status", "pending", "error", err)
+				return fmt.Errorf("requeue document processing task: %w", err)
+			}
+			r.recordTask(ctx, slog.LevelWarn, "document_task_requeued", task, metrics.WorkerStatusRetryScheduled, started, "attempt", attempt, "retry_at", retryAt)
+			return nil
+		}
+	}
+	if err := retryStore.MarkDeadLetter(ctx, task.ID, message); err != nil {
+		r.recordTask(ctx, slog.LevelError, "document_task_status_update_failed", task, metrics.WorkerStatusStatusUpdateFailed, started, "target_status", "dead_letter", "error", err)
+		return fmt.Errorf("mark document processing task dead letter: %w", err)
+	}
+	r.recordTask(ctx, slog.LevelError, "document_task_dead_letter", task, metrics.WorkerStatusDeadLetter, started, "attempt", attempt)
+	return nil
+}
+
+func isRetryable(err error) bool {
+	if err == nil || errors.Is(err, ErrPermanent) {
+		return false
+	}
+	for _, permanentErr := range []error{
+		documentextractor.ErrInvalidStoragePath,
+		documentextractor.ErrUnsupportedType,
+		documentextractor.ErrInvalidPDF,
+		documentextractor.ErrEmptyText,
+		fs.ErrNotExist,
+	} {
+		if errors.Is(err, permanentErr) {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *Runner) recordTask(ctx context.Context, level slog.Level, event string, task Task, status string, started time.Time, attrs ...any) {
@@ -216,18 +285,20 @@ func (s *PostgresStore) ClaimNext(ctx context.Context) (Task, error) {
 			SELECT id
 			FROM document_processing_tasks
 			WHERE status = 'pending'
+			  AND next_attempt_at <= CURRENT_TIMESTAMP
 			ORDER BY created_at, id
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
 		)
 		UPDATE document_processing_tasks AS task
 		SET status = 'processing', attempt_count = attempt_count + 1,
-			started_at = CURRENT_TIMESTAMP, completed_at = NULL, error_message = NULL
+			started_at = CURRENT_TIMESTAMP, completed_at = NULL, error_message = NULL,
+			next_attempt_at = CURRENT_TIMESTAMP
 		FROM next_task, documents AS document
 		WHERE task.id = next_task.id
 		  AND document.id = task.document_id
-		RETURNING task.id, document.id, document.storage_path, document.content_type`).Scan(
-		&task.ID, &task.DocumentID, &task.StoragePath, &task.ContentType,
+			RETURNING task.id, document.id, task.attempt_count, document.storage_path, document.content_type`).Scan(
+		&task.ID, &task.DocumentID, &task.AttemptCount, &task.StoragePath, &task.ContentType,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, ErrNoTask
@@ -244,6 +315,36 @@ func (s *PostgresStore) MarkSucceeded(ctx context.Context, id int64) error {
 
 func (s *PostgresStore) MarkFailed(ctx context.Context, id int64, message string) error {
 	return s.mark(ctx, id, "failed", message)
+}
+
+func (s *PostgresStore) Requeue(ctx context.Context, id int64, message string, retryAt time.Time) error {
+	return s.updateRetryState(ctx, id, "pending", message, &retryAt)
+}
+
+func (s *PostgresStore) MarkDeadLetter(ctx context.Context, id int64, message string) error {
+	return s.updateRetryState(ctx, id, "dead_letter", message, nil)
+}
+
+func (s *PostgresStore) updateRetryState(ctx context.Context, id int64, status, message string, retryAt *time.Time) error {
+	var retryAtValue any
+	if retryAt != nil {
+		retryAtValue = *retryAt
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE document_processing_tasks
+		SET status = $2, error_message = NULLIF($3, ''), next_attempt_at = COALESCE($4, CURRENT_TIMESTAMP), completed_at = CASE WHEN $2 = 'pending' THEN NULL ELSE CURRENT_TIMESTAMP END
+		WHERE id = $1 AND status = 'processing'`, id, status, message, retryAtValue)
+	if err != nil {
+		return fmt.Errorf("update retried document processing task: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("count updated retried document processing tasks: %w", err)
+	}
+	if affected == 0 {
+		return errors.New("document processing task is not processing")
+	}
+	return nil
 }
 
 func (s *PostgresStore) mark(ctx context.Context, id int64, status, message string) error {

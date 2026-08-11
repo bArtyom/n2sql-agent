@@ -21,6 +21,8 @@ const (
 	WorkerStatusCanceled           = "canceled"
 	WorkerStatusClaimFailed        = "claim_failed"
 	WorkerStatusStatusUpdateFailed = "status_update_failed"
+	WorkerStatusRetryScheduled     = "retry_scheduled"
+	WorkerStatusDeadLetter         = "dead_letter"
 )
 
 type HTTPObservation struct {
@@ -65,6 +67,8 @@ type Registry struct {
 	workerTasksCanceled     atomic.Uint64
 	workerClaimFailures     atomic.Uint64
 	workerStatusUpdateFails atomic.Uint64
+	workerRetries           atomic.Uint64
+	workerDeadLetters       atomic.Uint64
 	workerDurationMSTotal   atomic.Uint64
 }
 
@@ -126,6 +130,10 @@ func (r *Registry) ObserveWorker(observation WorkerObservation) {
 		r.workerClaimFailures.Add(1)
 	case WorkerStatusStatusUpdateFailed:
 		r.workerStatusUpdateFails.Add(1)
+	case WorkerStatusRetryScheduled:
+		r.workerRetries.Add(1)
+	case WorkerStatusDeadLetter:
+		r.workerDeadLetters.Add(1)
 	}
 }
 
@@ -171,6 +179,8 @@ func (r *Registry) write(w io.Writer) error {
 		{"worker_tasks_canceled_total", r.workerTasksCanceled.Load()},
 		{"worker_task_claim_failures_total", r.workerClaimFailures.Load()},
 		{"worker_task_status_update_failures_total", r.workerStatusUpdateFails.Load()},
+		{"worker_retries_total", r.workerRetries.Load()},
+		{"worker_dead_letters_total", r.workerDeadLetters.Load()},
 		{"worker_task_duration_ms_total", r.workerDurationMSTotal.Load()},
 	}
 	for _, line := range lines {
