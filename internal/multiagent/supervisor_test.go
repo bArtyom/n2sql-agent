@@ -515,6 +515,40 @@ func TestSupervisorAnswerWithEventsEmitsWorkflow(t *testing.T) {
 	}
 }
 
+func TestSupervisorAnswerWithEventsSkipsAnswererWithoutResearchEvidence(t *testing.T) {
+	researcher := &eventResearcherStub{report: multiagent.ResearchReport{
+		NoRelevantResults: true,
+		FallbackAnswer:    "没有足够资料。",
+	}}
+	supervisor, err := multiagent.NewSupervisor(researcher, &finalAnswererStub{answer: "不应调用"}, time.Second)
+	if err != nil {
+		t.Fatalf("NewSupervisor() error = %v", err)
+	}
+	var events []multiagent.Event
+	response, err := supervisor.AnswerWithEvents(context.Background(), 7, "问题", 3, func(event multiagent.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil || response.Answer != "没有足够资料。" {
+		t.Fatalf("response=%#v err=%v", response, err)
+	}
+	wantTypes := []multiagent.EventType{
+		multiagent.EventRunStarted,
+		multiagent.EventResearchStarted,
+		multiagent.EventResearchFinished,
+		multiagent.EventAnswererSkipped,
+		multiagent.EventRunFinished,
+	}
+	if len(events) != len(wantTypes) {
+		t.Fatalf("events=%#v, want %d events", events, len(wantTypes))
+	}
+	for index, want := range wantTypes {
+		if events[index].Type != want {
+			t.Fatalf("event[%d]=%#v, want type %q", index, events[index], want)
+		}
+	}
+}
+
 func TestSupervisorAnswerWithEventsEmitsFailureAndCancellation(t *testing.T) {
 	researcher := &researcherStub{err: errors.New("research failed")}
 	supervisor, err := multiagent.NewSupervisor(researcher, &finalAnswererStub{}, time.Second)
@@ -539,5 +573,20 @@ func TestSupervisorAnswerWithEventsEmitsFailureAndCancellation(t *testing.T) {
 	})
 	if !errors.Is(err, context.Canceled) || len(events) != 2 || events[1].Type != multiagent.EventRunCanceled {
 		t.Fatalf("err=%v events=%#v, want run_canceled", err, events)
+	}
+}
+
+func TestSupervisorAnswerWithEventsHonorsTimeout(t *testing.T) {
+	supervisor, err := multiagent.NewSupervisor(blockingResearcher{}, &finalAnswererStub{}, 10*time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewSupervisor() error = %v", err)
+	}
+	var events []multiagent.Event
+	_, err = supervisor.AnswerWithEvents(context.Background(), 7, "问题", 3, func(event multiagent.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) || len(events) == 0 || events[len(events)-1].Type != multiagent.EventRunCanceled {
+		t.Fatalf("err=%v events=%#v, want timeout and run_canceled", err, events)
 	}
 }
