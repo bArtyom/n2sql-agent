@@ -15,6 +15,8 @@ const (
 	defaultModelProviderAllowedHost   = "api.openai.com"
 	defaultUploadDir                  = "./.data/uploads"
 	defaultWorkerPollInterval         = 2 * time.Second
+	defaultA2ATaskRetention           = 7 * 24 * time.Hour
+	defaultA2ACleanupInterval         = time.Hour
 	defaultOCRPrompt                  = "请只转写图片中清晰可见的文字，保留原有段落和表格结构，不要解释或补充内容。"
 	defaultOCRRendererBinary          = "pdftoppm"
 	defaultOCRRenderDPI               = 150
@@ -34,6 +36,8 @@ type Config struct {
 	ModelProviderAllowedHosts  []string
 	UploadDir                  string
 	WorkerPollInterval         time.Duration
+	A2ATaskRetention           time.Duration
+	A2ACleanupInterval         time.Duration
 	OCRModel                   string
 	OCRPrompt                  string
 	OCRRendererBinary          string
@@ -70,6 +74,8 @@ func Load() Config {
 		ModelProviderAllowedHosts:  allowedHosts,
 		UploadDir:                  uploadDir(),
 		WorkerPollInterval:         workerPollInterval(),
+		A2ATaskRetention:           durationEnv("A2A_TASK_RETENTION", defaultA2ATaskRetention),
+		A2ACleanupInterval:         durationEnv("A2A_CLEANUP_INTERVAL", defaultA2ACleanupInterval),
 		OCRModel:                   strings.TrimSpace(os.Getenv("OCR_MODEL")),
 		OCRPrompt:                  valueOrDefault("OCR_PROMPT", defaultOCRPrompt),
 		OCRRendererBinary:          valueOrDefault("OCR_RENDERER_BIN", defaultOCRRendererBinary),
@@ -103,9 +109,13 @@ func agentMaxToolResultBytes() int {
 }
 
 func workerPollInterval() time.Duration {
-	value, err := time.ParseDuration(os.Getenv("WORKER_POLL_INTERVAL"))
+	return durationEnv("WORKER_POLL_INTERVAL", defaultWorkerPollInterval)
+}
+
+func durationEnv(name string, fallback time.Duration) time.Duration {
+	value, err := time.ParseDuration(strings.TrimSpace(os.Getenv(name)))
 	if err != nil || value <= 0 {
-		return defaultWorkerPollInterval
+		return fallback
 	}
 	return value
 }

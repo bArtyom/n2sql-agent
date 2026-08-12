@@ -11,18 +11,28 @@ import (
 )
 
 type Runner struct {
-	store    TaskStore
-	answerer multiagent.Answerer
-	metrics  *metrics.Registry
-	lease    time.Duration
-	timeout  time.Duration
+	store           TaskStore
+	answerer        multiagent.Answerer
+	metrics         *metrics.Registry
+	lease           time.Duration
+	timeout         time.Duration
+	retention       time.Duration
+	cleanupInterval time.Duration
 }
 
 func NewRunner(store TaskStore, answerer multiagent.Answerer, timeout time.Duration, registry *metrics.Registry) *Runner {
+	return newRunner(store, answerer, timeout, registry, 0, 0)
+}
+
+func NewRunnerWithCleanup(store TaskStore, answerer multiagent.Answerer, timeout, retention, cleanupInterval time.Duration, registry *metrics.Registry) *Runner {
+	return newRunner(store, answerer, timeout, registry, retention, cleanupInterval)
+}
+
+func newRunner(store TaskStore, answerer multiagent.Answerer, timeout time.Duration, registry *metrics.Registry, retention, cleanupInterval time.Duration) *Runner {
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
-	return &Runner{store: store, answerer: answerer, lease: timeout * 2, timeout: timeout, metrics: registry}
+	return &Runner{store: store, answerer: answerer, lease: timeout * 2, timeout: timeout, metrics: registry, retention: retention, cleanupInterval: cleanupInterval}
 }
 
 func (r *Runner) Run(ctx context.Context, interval time.Duration, report func(error)) {
@@ -31,9 +41,19 @@ func (r *Runner) Run(ctx context.Context, interval time.Duration, report func(er
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	var nextCleanup time.Time
+	if r != nil && r.retention > 0 && r.cleanupInterval > 0 {
+		nextCleanup = time.Now().Add(r.cleanupInterval)
+	}
 	for {
 		if _, err := r.RunOnce(ctx); err != nil && report != nil {
 			report(err)
+		}
+		if !nextCleanup.IsZero() && !time.Now().Before(nextCleanup) {
+			if _, err := r.CleanupOnce(ctx); err != nil && report != nil {
+				report(err)
+			}
+			nextCleanup = time.Now().Add(r.cleanupInterval)
 		}
 		select {
 		case <-ctx.Done():
@@ -41,6 +61,27 @@ func (r *Runner) Run(ctx context.Context, interval time.Duration, report func(er
 		case <-ticker.C:
 		}
 	}
+}
+
+func (r *Runner) CleanupOnce(ctx context.Context) (int, error) {
+	if r == nil || r.store == nil {
+		return 0, errors.New("A2A runner is unavailable")
+	}
+	if r.retention <= 0 {
+		return 0, nil
+	}
+	cleaner, ok := r.store.(TaskCleaner)
+	if !ok {
+		return 0, errors.New("A2A task cleanup is unavailable")
+	}
+	deleted, err := cleaner.DeleteTerminalBefore(ctx, time.Now().UTC().Add(-r.retention))
+	if err != nil {
+		return 0, err
+	}
+	if deleted > 0 {
+		slog.InfoContext(ctx, "a2a_task_cleanup_completed", "deleted_count", deleted, "retention", r.retention.String())
+	}
+	return deleted, nil
 }
 
 func (r *Runner) RunOnce(ctx context.Context) (bool, error) {

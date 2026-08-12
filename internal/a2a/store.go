@@ -22,6 +22,11 @@ type TaskStore interface {
 	MarkFailed(context.Context, string, string) error
 }
 
+// TaskCleaner is optional so a simple task store does not need cleanup logic.
+type TaskCleaner interface {
+	DeleteTerminalBefore(context.Context, time.Time) (int, error)
+}
+
 type CreateInput struct {
 	ID              string
 	KnowledgeBaseID int64
@@ -117,6 +122,20 @@ func (s *MemoryStore) MarkFailed(_ context.Context, id string, message string) e
 	task.UpdatedAt = task.CompletedAt
 	s.tasks[id] = task
 	return nil
+}
+
+func (s *MemoryStore) DeleteTerminalBefore(_ context.Context, cutoff time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	deleted := 0
+	for id, task := range s.tasks {
+		if (task.Status != StatusCompleted && task.Status != StatusFailed) || task.CompletedAt.IsZero() || !task.CompletedAt.Before(cutoff) {
+			continue
+		}
+		delete(s.tasks, id)
+		deleted++
+	}
+	return deleted, nil
 }
 
 type PostgresStore struct{ db *sql.DB }
@@ -226,6 +245,23 @@ func (s *PostgresStore) MarkCompleted(ctx context.Context, id string, response m
 
 func (s *PostgresStore) MarkFailed(ctx context.Context, id string, message string) error {
 	return s.markTerminal(ctx, id, "failed", []byte("null"), message)
+}
+
+func (s *PostgresStore) DeleteTerminalBefore(ctx context.Context, cutoff time.Time) (int, error) {
+	result, err := s.db.ExecContext(ctx, `
+		DELETE FROM a2a_tasks
+		WHERE administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
+		  AND status IN ('completed', 'failed')
+		  AND completed_at IS NOT NULL
+		  AND completed_at < $1`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("delete old A2A tasks: %w", err)
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count deleted A2A tasks: %w", err)
+	}
+	return int(deleted), nil
 }
 
 func (s *PostgresStore) markTerminal(ctx context.Context, id, status string, response []byte, errorMessage ...string) error {

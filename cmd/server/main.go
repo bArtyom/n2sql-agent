@@ -126,7 +126,7 @@ func main() {
 	runContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	workerDone := make(chan struct{})
-	a2aRunner := a2a.NewRunner(a2aStore, multiAgentAnswers, cfg.AgentTimeout, metricsRegistry)
+	a2aRunner := a2a.NewRunnerWithCleanup(a2aStore, multiAgentAnswers, cfg.AgentTimeout, cfg.A2ATaskRetention, cfg.A2ACleanupInterval, metricsRegistry)
 	a2aDone := make(chan struct{})
 	go func() {
 		defer close(a2aDone)

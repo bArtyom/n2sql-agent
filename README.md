@@ -198,4 +198,4 @@ curl -X POST http://localhost:8080/api/a2a/tasks \
   -d '{"knowledge_base_id":1,"message":"这份资料如何启动服务？","top_k":5}'
 ```
 
-任务会经历 `submitted → working → completed`，失败时进入 `failed`。服务启动时使用 PostgreSQL 保存任务，后台 A2A Runner 负责领取和执行；任务结果在服务重启后仍可查询。已有 `/metrics` 会记录 `a2a_tasks_submitted_total`、`a2a_tasks_started_total`、`a2a_tasks_completed_total`、`a2a_tasks_failed_total` 和总耗时。内存 Store 仅用于单元测试和本地简化示例。
+任务会经历 `submitted → working → completed`，失败时进入 `failed`。服务启动时使用 PostgreSQL 保存任务，后台 A2A Runner 负责领取、执行和定期清理过期终态任务；任务结果在服务重启后仍可查询。默认保留 7 天，可通过 `A2A_TASK_RETENTION` 和 `A2A_CLEANUP_INTERVAL` 调整。已有 `/metrics` 会记录 `a2a_tasks_submitted_total`、`a2a_tasks_started_total`、`a2a_tasks_completed_total`、`a2a_tasks_failed_total` 和总耗时。内存 Store 仅用于单元测试和本地简化示例。

@@ -201,3 +201,58 @@ func TestPostgresStoreDoesNotClaimTaskTwiceConcurrently(t *testing.T) {
 		t.Fatalf("claimedCount=%d noTaskCount=%d, want 1 and 1", claimedCount, noTaskCount)
 	}
 }
+
+func TestPostgresStoreDeletesOnlyOldTerminalTasks(t *testing.T) {
+	db := openA2AIntegrationDB(t)
+	kbID := createIntegrationKnowledgeBase(t, db)
+	store := a2a.NewPostgresStore(db)
+	completed := createIntegrationTask(t, store, kbID)
+	failed := createIntegrationTask(t, store, kbID)
+	working := createIntegrationTask(t, store, kbID)
+	submitted := createIntegrationTask(t, store, kbID)
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM a2a_tasks WHERE id IN ($1, $2, $3, $4)`, completed.ID, failed.ID, working.ID, submitted.ID)
+	})
+
+	claimed, err := store.ClaimNext(context.Background(), time.Minute)
+	if err != nil || claimed.ID != completed.ID {
+		t.Fatalf("claim completed task = %#v, error = %v", claimed, err)
+	}
+	if err := store.MarkCompleted(context.Background(), completed.ID, multiagent.Response{Answer: "完成"}); err != nil {
+		t.Fatalf("MarkCompleted() error = %v", err)
+	}
+	claimed, err = store.ClaimNext(context.Background(), time.Minute)
+	if err != nil || claimed.ID != failed.ID {
+		t.Fatalf("claim failed task = %#v, error = %v", claimed, err)
+	}
+	if err := store.MarkFailed(context.Background(), failed.ID, "task execution failed"); err != nil {
+		t.Fatalf("MarkFailed() error = %v", err)
+	}
+	claimed, err = store.ClaimNext(context.Background(), time.Minute)
+	if err != nil || claimed.ID != working.ID {
+		t.Fatalf("claim working task = %#v, error = %v", claimed, err)
+	}
+	if _, err := db.ExecContext(context.Background(), `
+		UPDATE a2a_tasks
+		SET completed_at = CURRENT_TIMESTAMP - INTERVAL '2 hours'
+		WHERE id IN ($1, $2)`, completed.ID, failed.ID); err != nil {
+		t.Fatalf("age terminal tasks: %v", err)
+	}
+
+	deleted, err := store.DeleteTerminalBefore(context.Background(), time.Now().Add(-time.Hour))
+	if err != nil || deleted != 2 {
+		t.Fatalf("DeleteTerminalBefore() = (%d, %v), want 2 deletions", deleted, err)
+	}
+	if _, err := store.Get(context.Background(), completed.ID); !errors.Is(err, a2a.ErrTaskNotFound) {
+		t.Fatalf("completed task error = %v, want ErrTaskNotFound", err)
+	}
+	if _, err := store.Get(context.Background(), failed.ID); !errors.Is(err, a2a.ErrTaskNotFound) {
+		t.Fatalf("failed task error = %v, want ErrTaskNotFound", err)
+	}
+	if _, err := store.Get(context.Background(), working.ID); err != nil {
+		t.Fatalf("working task should remain: %v", err)
+	}
+	if _, err := store.Get(context.Background(), submitted.ID); err != nil {
+		t.Fatalf("submitted task should remain: %v", err)
+	}
+}
