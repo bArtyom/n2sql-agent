@@ -31,7 +31,18 @@ func NewKnowledgeBaseChatStream(answerer rag.StreamAnswerer) http.Handler {
 		emit := func(event rag.StreamEvent) error {
 			return writeSSEEvent(w, flusher, event.Type, event)
 		}
-		if err := answerer.Stream(r.Context(), knowledgeBaseID, request.Message, request.TopK, emit); err != nil {
+		var err error
+		if request.SimilarityThreshold != 0 {
+			thresholdAnswerer, ok := answerer.(rag.ThresholdStreamAnswerer)
+			if !ok {
+				err = rag.ErrThresholdUnavailable
+			} else {
+				err = thresholdAnswerer.StreamWithThreshold(r.Context(), knowledgeBaseID, request.Message, request.TopK, request.SimilarityThreshold, emit)
+			}
+		} else {
+			err = answerer.Stream(r.Context(), knowledgeBaseID, request.Message, request.TopK, emit)
+		}
+		if err != nil {
 			if r.Context().Err() != nil {
 				return
 			}

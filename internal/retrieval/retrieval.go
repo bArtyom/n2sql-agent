@@ -15,11 +15,13 @@ var (
 	ErrInvalidKnowledgeBase = errors.New("invalid knowledge base ID")
 	ErrInvalidQuery         = errors.New("invalid search query")
 	ErrInvalidLimit         = errors.New("invalid search result limit")
+	ErrInvalidMaxDistance   = errors.New("search distance threshold must be greater than 0 and at most 1")
 )
 
 const (
-	DefaultResults = 5
-	MaxResults     = 20
+	DefaultResults     = 5
+	MaxResults         = 20
+	DefaultMaxDistance = 0.65
 )
 
 type Result = documentchunk.SearchResult
@@ -34,6 +36,31 @@ type ChunkSearcher interface {
 
 type Searcher interface {
 	Search(context.Context, int64, string, int) ([]Result, error)
+}
+
+func ValidateMaxDistance(maxDistance float64) error {
+	if maxDistance <= 0 || maxDistance > 1 {
+		return ErrInvalidMaxDistance
+	}
+	return nil
+}
+
+// FilterByMaxDistance keeps only results close enough to the query. pgvector
+// cosine distance is lower for more similar vectors, so this is an upper bound.
+func FilterByMaxDistance(results []Result, maxDistance float64) ([]Result, error) {
+	if maxDistance == 0 {
+		maxDistance = DefaultMaxDistance
+	}
+	if maxDistance <= 0 || maxDistance > 1 {
+		return nil, ErrInvalidMaxDistance
+	}
+	filtered := make([]Result, 0, len(results))
+	for _, result := range results {
+		if result.Distance <= maxDistance {
+			filtered = append(filtered, result)
+		}
+	}
+	return filtered, nil
 }
 
 type Service struct {

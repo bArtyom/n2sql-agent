@@ -122,6 +122,26 @@ func TestServiceRejectsEmptyQueryVector(t *testing.T) {
 	}
 }
 
+func TestFilterByMaxDistanceKeepsOnlyCloseResults(t *testing.T) {
+	results, err := retrieval.FilterByMaxDistance([]retrieval.Result{
+		{DocumentID: 1, Distance: 0.20},
+		{DocumentID: 2, Distance: 0.65},
+		{DocumentID: 3, Distance: 0.66},
+	}, 0.65)
+	if err != nil {
+		t.Fatalf("FilterByMaxDistance() error = %v", err)
+	}
+	if len(results) != 2 || results[0].DocumentID != 1 || results[1].DocumentID != 2 {
+		t.Fatalf("filtered results = %#v, want IDs 1 and 2", results)
+	}
+}
+
+func TestFilterByMaxDistanceRejectsInvalidThreshold(t *testing.T) {
+	if _, err := retrieval.FilterByMaxDistance(nil, 1.01); !errors.Is(err, retrieval.ErrInvalidMaxDistance) {
+		t.Fatalf("FilterByMaxDistance() error = %v, want ErrInvalidMaxDistance", err)
+	}
+}
+
 type embeddingErrorStub struct{ err error }
 
 func (s embeddingErrorStub) Embed(context.Context, []string) (modelclient.EmbeddingResponse, error) {

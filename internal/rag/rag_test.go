@@ -71,6 +71,31 @@ func TestServiceRejectsQuestionsWithoutSources(t *testing.T) {
 	}
 }
 
+type mixedDistanceSearcherStub struct{}
+
+func (mixedDistanceSearcherStub) Search(context.Context, int64, string, int) ([]retrieval.Result, error) {
+	return []retrieval.Result{
+		{DocumentID: 1, Content: "近资料", Distance: 0.20},
+		{DocumentID: 2, Content: "远资料", Distance: 0.90},
+	}, nil
+}
+
+func TestServiceAppliesDistanceThresholdBeforeGrounding(t *testing.T) {
+	chat := &chatStub{}
+	service := rag.NewService(mixedDistanceSearcherStub{}, chat)
+
+	response, err := service.AnswerWithThreshold(context.Background(), 7, "问题", 5, 0.65)
+	if err != nil {
+		t.Fatalf("AnswerWithThreshold() error = %v", err)
+	}
+	if len(response.Sources) != 1 || response.Sources[0].DocumentID != 1 {
+		t.Fatalf("sources = %#v, want only close source", response.Sources)
+	}
+	if strings.Contains(chat.messages[1].Content, "远资料") {
+		t.Fatalf("grounded prompt contains filtered source: %q", chat.messages[1].Content)
+	}
+}
+
 type failingSearcherStub struct{ err error }
 
 func (s failingSearcherStub) Search(context.Context, int64, string, int) ([]retrieval.Result, error) {

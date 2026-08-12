@@ -11,6 +11,7 @@ import (
 )
 
 var ErrNoSources = errors.New("no relevant document sources found")
+var ErrThresholdUnavailable = errors.New("similarity threshold is unavailable")
 var ErrStreamingUnavailable = errors.New("streaming chat is unavailable")
 var ErrStreamEmitterRequired = errors.New("stream event emitter is required")
 
@@ -41,6 +42,12 @@ type Answerer interface {
 	Answer(context.Context, int64, string, int) (Response, error)
 }
 
+// ThresholdAnswerer is an optional extension for callers that expose a
+// per-request vector distance threshold without changing the old interface.
+type ThresholdAnswerer interface {
+	AnswerWithThreshold(context.Context, int64, string, int, float64) (Response, error)
+}
+
 type StreamEvent struct {
 	Type    string             `json:"type"`
 	Delta   string             `json:"delta,omitempty"`
@@ -49,6 +56,10 @@ type StreamEvent struct {
 
 type StreamAnswerer interface {
 	Stream(context.Context, int64, string, int, func(StreamEvent) error) error
+}
+
+type ThresholdStreamAnswerer interface {
+	StreamWithThreshold(context.Context, int64, string, int, float64, func(StreamEvent) error) error
 }
 
 type Service struct {
@@ -61,10 +72,18 @@ func NewService(search Searcher, chat ChatRunner) *Service {
 }
 
 func (s *Service) Answer(ctx context.Context, knowledgeBaseID int64, question string, topK int) (Response, error) {
+	return s.answer(ctx, knowledgeBaseID, question, topK, retrieval.DefaultMaxDistance)
+}
+
+func (s *Service) AnswerWithThreshold(ctx context.Context, knowledgeBaseID int64, question string, topK int, maxDistance float64) (Response, error) {
+	return s.answer(ctx, knowledgeBaseID, question, topK, maxDistance)
+}
+
+func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, question string, topK int, maxDistance float64) (Response, error) {
 	if len(question) > MaxQuestionBytes {
 		return Response{}, errors.New("chat question is too large")
 	}
-	sources, err := s.retrieveSources(ctx, knowledgeBaseID, question, topK)
+	sources, err := s.retrieveSources(ctx, knowledgeBaseID, question, topK, maxDistance)
 	if err != nil {
 		return Response{}, err
 	}
@@ -80,6 +99,14 @@ func (s *Service) Answer(ctx context.Context, knowledgeBaseID int64, question st
 }
 
 func (s *Service) Stream(ctx context.Context, knowledgeBaseID int64, question string, topK int, emit func(StreamEvent) error) error {
+	return s.stream(ctx, knowledgeBaseID, question, topK, retrieval.DefaultMaxDistance, emit)
+}
+
+func (s *Service) StreamWithThreshold(ctx context.Context, knowledgeBaseID int64, question string, topK int, maxDistance float64, emit func(StreamEvent) error) error {
+	return s.stream(ctx, knowledgeBaseID, question, topK, maxDistance, emit)
+}
+
+func (s *Service) stream(ctx context.Context, knowledgeBaseID int64, question string, topK int, maxDistance float64, emit func(StreamEvent) error) error {
 	if len(question) > MaxQuestionBytes {
 		return errors.New("chat question is too large")
 	}
@@ -90,7 +117,7 @@ func (s *Service) Stream(ctx context.Context, knowledgeBaseID int64, question st
 	if !ok {
 		return ErrStreamingUnavailable
 	}
-	sources, err := s.retrieveSources(ctx, knowledgeBaseID, question, topK)
+	sources, err := s.retrieveSources(ctx, knowledgeBaseID, question, topK, maxDistance)
 	if err != nil {
 		return err
 	}
@@ -105,10 +132,14 @@ func (s *Service) Stream(ctx context.Context, knowledgeBaseID int64, question st
 	return nil
 }
 
-func (s *Service) retrieveSources(ctx context.Context, knowledgeBaseID int64, question string, topK int) ([]retrieval.Result, error) {
+func (s *Service) retrieveSources(ctx context.Context, knowledgeBaseID int64, question string, topK int, maxDistance float64) ([]retrieval.Result, error) {
 	sources, err := s.search.Search(ctx, knowledgeBaseID, question, topK)
 	if err != nil {
 		return nil, fmt.Errorf("retrieve answer sources: %w", err)
+	}
+	sources, err = retrieval.FilterByMaxDistance(sources, maxDistance)
+	if err != nil {
+		return nil, fmt.Errorf("filter answer sources: %w", err)
 	}
 	if len(sources) == 0 {
 		return nil, ErrNoSources

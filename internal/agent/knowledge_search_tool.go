@@ -18,7 +18,7 @@ var (
 	ErrKnowledgeSearcherUnavailable = errors.New("knowledge searcher unavailable")
 	ErrInvalidMaxResultBytes        = errors.New("knowledge search result byte limit must be at least 2")
 	ErrInvalidMaxResults            = errors.New("knowledge search result limit must be between 1 and 20")
-	ErrInvalidMaxKnowledgeDistance  = errors.New("knowledge search distance threshold must be greater than 0 and at most 1")
+	ErrInvalidMaxKnowledgeDistance  = retrieval.ErrInvalidMaxDistance
 )
 
 const (
@@ -26,7 +26,7 @@ const (
 	// DefaultMaxKnowledgeDistance is the largest pgvector cosine distance
 	// accepted as evidence for an Agent answer. Larger values are treated as
 	// unrelated search hits rather than being passed to the model as facts.
-	DefaultMaxKnowledgeDistance = 0.65
+	DefaultMaxKnowledgeDistance = retrieval.DefaultMaxDistance
 )
 
 const noRelevantKnowledgeAnswer = "当前知识库中没有找到足够相关的资料，无法根据现有文档可靠回答这个问题。"
@@ -139,10 +139,10 @@ func NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistance(searcher retrie
 }
 
 func ValidateMaxKnowledgeDistance(maxDistance float64) error {
-	if maxDistance <= 0 || maxDistance > 1 {
-		return ErrInvalidMaxKnowledgeDistance
+	if maxDistance == 0 {
+		return nil
 	}
-	return nil
+	return retrieval.ValidateMaxDistance(maxDistance)
 }
 
 func (t *KnowledgeSearchTool) Name() string {
@@ -206,7 +206,10 @@ func (t *KnowledgeSearchTool) Call(ctx context.Context, raw json.RawMessage) (To
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("knowledge search: %w", err)
 	}
-	relevantResults := filterRelevantKnowledgeResults(results, t.maxDistance)
+	relevantResults, err := retrieval.FilterByMaxDistance(results, t.maxDistance)
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("filter knowledge search results: %w", err)
+	}
 	content, visibleResults, truncated, err := limitKnowledgeSearchResults(relevantResults, t.maxResultBytes)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("encode knowledge search results: %w", err)
@@ -228,19 +231,6 @@ func (t *KnowledgeSearchTool) Call(ctx context.Context, raw json.RawMessage) (To
 		Content:  string(content),
 		Metadata: metadata,
 	}, nil
-}
-
-func filterRelevantKnowledgeResults(results []retrieval.Result, maxDistance float64) []retrieval.Result {
-	if maxDistance == 0 {
-		maxDistance = DefaultMaxKnowledgeDistance
-	}
-	relevant := make([]retrieval.Result, 0, len(results))
-	for _, result := range results {
-		if result.Distance <= maxDistance {
-			relevant = append(relevant, result)
-		}
-	}
-	return relevant
 }
 
 func limitKnowledgeSearchResults(results []retrieval.Result, maxBytes int) ([]byte, []retrieval.Result, bool, error) {

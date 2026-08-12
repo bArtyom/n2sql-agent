@@ -21,8 +21,9 @@ const (
 )
 
 type knowledgeBaseChatRequest struct {
-	Message string `json:"message"`
-	TopK    int    `json:"topK"`
+	Message             string  `json:"message"`
+	TopK                int     `json:"topK"`
+	SimilarityThreshold float64 `json:"similarity_threshold,omitempty"`
 }
 
 func NewKnowledgeBaseChat(answerer rag.Answerer) http.Handler {
@@ -36,7 +37,18 @@ func NewKnowledgeBaseChat(answerer rag.Answerer) http.Handler {
 			return
 		}
 
-		response, err := answerer.Answer(r.Context(), knowledgeBaseID, request.Message, request.TopK)
+		var response rag.Response
+		var err error
+		if request.SimilarityThreshold != 0 {
+			thresholdAnswerer, ok := answerer.(rag.ThresholdAnswerer)
+			if !ok {
+				writeKnowledgeBaseChatError(w, rag.ErrThresholdUnavailable)
+				return
+			}
+			response, err = thresholdAnswerer.AnswerWithThreshold(r.Context(), knowledgeBaseID, request.Message, request.TopK, request.SimilarityThreshold)
+		} else {
+			response, err = answerer.Answer(r.Context(), knowledgeBaseID, request.Message, request.TopK)
+		}
 		if err != nil {
 			writeKnowledgeBaseChatError(w, err)
 			return
@@ -56,6 +68,10 @@ func knowledgeBaseChatError(err error) (string, int) {
 		return "no relevant document sources found", http.StatusNotFound
 	case errors.Is(err, retrieval.ErrInvalidKnowledgeBase), errors.Is(err, retrieval.ErrInvalidQuery), errors.Is(err, retrieval.ErrInvalidLimit):
 		return "invalid chat request", http.StatusBadRequest
+	case errors.Is(err, retrieval.ErrInvalidMaxDistance):
+		return "invalid similarity threshold", http.StatusBadRequest
+	case errors.Is(err, rag.ErrThresholdUnavailable):
+		return "similarity threshold is unavailable", http.StatusInternalServerError
 	case errors.Is(err, modelprovider.ErrNotFound):
 		return "model provider not configured", http.StatusNotFound
 	case errors.Is(err, modelruntime.ErrAPIKeyEnvironmentMismatch), errors.Is(err, modelruntime.ErrAPIKeyNotConfigured):
@@ -99,6 +115,12 @@ func decodeKnowledgeBaseChatRequest(w http.ResponseWriter, r *http.Request) (int
 	if request.TopK < 1 || request.TopK > retrieval.MaxResults {
 		http.Error(w, `{"error":"invalid chat topK"}`, http.StatusBadRequest)
 		return 0, knowledgeBaseChatRequest{}, false
+	}
+	if request.SimilarityThreshold != 0 {
+		if err := retrieval.ValidateMaxDistance(request.SimilarityThreshold); err != nil {
+			http.Error(w, `{"error":"invalid chat similarity_threshold"}`, http.StatusBadRequest)
+			return 0, knowledgeBaseChatRequest{}, false
+		}
 	}
 	return knowledgeBaseID, request, true
 }
