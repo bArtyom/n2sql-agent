@@ -42,6 +42,17 @@ type chunkStoreStub struct {
 
 type hybridChunkStoreStub struct{}
 
+type rerankerStub struct {
+	candidates []retrieval.Result
+	query      string
+	topN       int
+}
+
+func (s *rerankerStub) Rerank(_ context.Context, query string, candidates []retrieval.Result, topN int) ([]retrieval.Result, error) {
+	s.query, s.candidates, s.topN = query, candidates, topN
+	return []retrieval.Result{{DocumentID: 2, Content: "重排第一"}, {DocumentID: 1, Content: "重排第二"}}, nil
+}
+
 func (hybridChunkStoreStub) Search(context.Context, int64, []float32, int) ([]documentchunk.SearchResult, error) {
 	return []documentchunk.SearchResult{{DocumentID: 1, Position: 0, Content: "向量命中", Distance: 0.2}}, nil
 }
@@ -90,6 +101,31 @@ func TestHybridServiceMergesVectorAndKeywordResultsWithoutDuplicates(t *testing.
 	if len(results) != 2 || results[0].DocumentID != 1 || results[1].DocumentID != 2 || results[0].MatchType != "hybrid" || results[1].MatchType != "keyword" {
 		t.Fatalf("hybrid results = %#v, want vector ID 1 and keyword ID 2", results)
 	}
+}
+
+func TestHybridServiceExpandsCandidatesBeforeReranking(t *testing.T) {
+	store := &candidateChunkStoreStub{}
+	reranker := &rerankerStub{}
+	service := retrieval.NewHybridServiceWithReranker(&embeddingStub{}, store, nil, reranker)
+
+	results, err := service.Search(context.Background(), 7, "服务", 2)
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(results) != 2 || results[0].DocumentID != 2 || store.limit != 6 || reranker.query != "服务" || reranker.topN != 2 {
+		t.Fatalf("results=%#v store=%#v reranker=%#v", results, store, reranker)
+	}
+}
+
+type candidateChunkStoreStub struct{ limit int }
+
+func (s *candidateChunkStoreStub) Search(_ context.Context, _ int64, _ []float32, limit int) ([]retrieval.Result, error) {
+	s.limit = limit
+	return []retrieval.Result{
+		{DocumentID: 1, Position: 1, Content: "候选一", Distance: 0.1},
+		{DocumentID: 2, Position: 2, Content: "候选二", Distance: 0.2},
+		{DocumentID: 3, Position: 3, Content: "候选三", Distance: 0.3},
+	}, nil
 }
 
 func TestServiceReportsEmbeddingUsageToContextObserver(t *testing.T) {

@@ -31,7 +31,7 @@ func NewModelProvider(store modelprovider.Store, apiKeyEnvVar string) http.Handl
 			var provider modelprovider.Provider
 			decoder := json.NewDecoder(r.Body)
 			decoder.DisallowUnknownFields()
-			if err := decoder.Decode(&provider); err != nil || provider.Name == "" || provider.BaseURL == "" || provider.APIKeyEnvVar != apiKeyEnvVar || provider.ChatModel == "" || provider.EmbeddingModel == "" {
+			if err := decoder.Decode(&provider); err != nil || provider.Name == "" || provider.BaseURL == "" || provider.APIKeyEnvVar != apiKeyEnvVar || provider.ChatModel == "" || provider.EmbeddingModel == "" || ((provider.RerankBaseURL == "") != (provider.RerankModel == "")) {
 				http.Error(w, `{"error":"invalid model provider"}`, http.StatusBadRequest)
 				return
 			}

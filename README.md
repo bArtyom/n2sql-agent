@@ -47,7 +47,7 @@ curl -X POST http://localhost:8080/api/knowledge-bases/1/documents \
 
 前端工作台会调用 `GET /api/knowledge-bases/{id}/documents` 刷新文档列表和最新处理状态。启动前端后，打开 `http://localhost:5173` 即可完成“创建知识库 → 上传资料 → 查看处理状态 → 流式提问”的操作；问答结果中的引用可以展开查看原始文本片段。
 
-工作台左侧底部的“模型服务设置”可以读取和保存 Provider 的服务名称、Base URL、聊天模型与嵌入模型，并发起连接测试。API Key 不在页面输入，仍只需要写入后端 `.env` 的 `OPENAI_API_KEY`。
+工作台左侧底部的“模型服务设置”可以读取和保存 Provider 的服务名称、Base URL、聊天模型、嵌入模型，以及可选的 Rerank Base URL 和 Rerank 模型，并发起连接测试。API Key 不在页面输入，仍只需要写入后端 `.env` 的 `OPENAI_API_KEY`。Rerank 两项同时填写时，混合召回会先扩大候选集，再调用 `qwen3-rerank` 重排；留空则不调用第二个模型。
 
 模型服务配置保存后，可调用 `POST http://localhost:8080/api/model-provider/connection-test` 检查连通性。该请求会从 `.env` 指定的环境变量（默认示例为 `OPENAI_API_KEY`）读取密钥，并向模型服务的 `{baseUrl}/models` 发起认证请求；密钥不会写入 PostgreSQL 或接口响应。
 
@@ -69,7 +69,7 @@ curl -X POST http://localhost:8080/api/knowledge-bases/1/search \
   -d '{"query":"这份资料如何启动服务？","limit":5}'
 ```
 
-接口会将问题向量化，并在指定知识库内按 pgvector 距离返回最相似的文本块。目前它只返回检索结果，还没有生成最终回答。
+接口会将问题向量化，并在指定知识库内执行向量 + 关键词混合召回；如果配置了 Rerank，还会对候选片段重新排序。目前它只返回检索结果，还没有生成最终回答。
 
 知识库问答使用 `POST http://localhost:8080/api/knowledge-bases/{id}/chat`，请求体示例：
 

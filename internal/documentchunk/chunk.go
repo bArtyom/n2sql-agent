@@ -58,6 +58,8 @@ type SearchResult struct {
 	Content          string  `json:"content"`
 	Distance         float64 `json:"distance"`
 	MatchType        string  `json:"matchType,omitempty"`
+	KeywordScore     float64 `json:"keywordScore,omitempty"`
+	RerankScore      float64 `json:"rerankScore,omitempty"`
 }
 
 type PostgresStore struct{ db *sql.DB }
@@ -126,13 +128,18 @@ func (s *PostgresStore) Search(ctx context.Context, knowledgeBaseID int64, embed
 // lexical companion to vector search for exact names, codes and commands.
 func (s *PostgresStore) SearchKeyword(ctx context.Context, knowledgeBaseID int64, query string, limit int) ([]SearchResult, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT chunks.document_id, documents.original_filename, chunks.position, chunks.content,
-		       0::float8 AS distance
-		FROM document_chunks AS chunks
-		JOIN documents AS documents ON documents.id = chunks.document_id
-		WHERE documents.knowledge_base_id = $1
-		  AND strpos(lower(chunks.content), lower($2)) > 0
-		ORDER BY chunks.position, chunks.document_id
+		WITH scored AS (
+			SELECT chunks.document_id, documents.original_filename, chunks.position, chunks.content,
+			       ts_rank_cd(to_tsvector('simple', chunks.content), plainto_tsquery('simple', $2)) AS keyword_score,
+			       CASE WHEN strpos(lower(chunks.content), lower($2)) > 0 THEN 1.0 ELSE 0.0 END AS exact_score
+			FROM document_chunks AS chunks
+			JOIN documents AS documents ON documents.id = chunks.document_id
+			WHERE documents.knowledge_base_id = $1
+		)
+		SELECT document_id, original_filename, position, content, 0::float8 AS distance, keyword_score
+		FROM scored
+		WHERE exact_score > 0 OR keyword_score > 0
+		ORDER BY exact_score DESC, keyword_score DESC, position, document_id
 		LIMIT $3`, knowledgeBaseID, query, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query keyword document chunks: %w", err)
@@ -142,7 +149,7 @@ func (s *PostgresStore) SearchKeyword(ctx context.Context, knowledgeBaseID int64
 	results := make([]SearchResult, 0, limit)
 	for rows.Next() {
 		var result SearchResult
-		if err := rows.Scan(&result.DocumentID, &result.OriginalFilename, &result.Position, &result.Content, &result.Distance); err != nil {
+		if err := rows.Scan(&result.DocumentID, &result.OriginalFilename, &result.Position, &result.Content, &result.Distance, &result.KeywordScore); err != nil {
 			return nil, fmt.Errorf("scan keyword document chunk: %w", err)
 		}
 		result.MatchType = "keyword"

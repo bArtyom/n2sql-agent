@@ -121,6 +121,44 @@ func TestHTTPClientEmbedsTexts(t *testing.T) {
 	}
 }
 
+func TestHTTPClientReranksDocuments(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/reranks" {
+			t.Fatalf("request = %s %s, want POST /v1/reranks", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer test-secret" {
+			t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		var request modelclient.RerankRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if request.Model != "qwen3-rerank" || request.Query != "如何启动服务" || request.TopN != 2 || len(request.Documents) != 3 {
+			t.Fatalf("request = %#v", request)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[{"index":2,"relevance_score":0.91},{"index":0,"relevance_score":0.42}],"usage":{"total_tokens":18}}`))
+	}))
+	defer server.Close()
+
+	client := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
+	response, err := client.Rerank(context.Background(), server.URL+"/v1", "test-secret", modelclient.RerankRequest{
+		Model:     "qwen3-rerank",
+		Query:     "如何启动服务",
+		Documents: []string{"先安装依赖", "无关片段", "运行 go run ./cmd/server"},
+		TopN:      2,
+	})
+	if err != nil {
+		t.Fatalf("Rerank() error = %v", err)
+	}
+	if len(response.Results) != 2 || response.Results[0].Index != 2 || response.Results[1].RelevanceScore != 0.42 {
+		t.Fatalf("results = %#v", response.Results)
+	}
+	if response.Usage == nil || response.Usage.TotalTokens != 18 {
+		t.Fatalf("usage = %#v", response.Usage)
+	}
+}
+
 func TestHTTPClientCompletesChat(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

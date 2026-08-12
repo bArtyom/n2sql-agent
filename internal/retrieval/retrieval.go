@@ -42,6 +42,11 @@ type KeywordSearcher interface {
 	SearchKeyword(context.Context, int64, string, int) ([]Result, error)
 }
 
+// Reranker re-scores a small candidate set after the cheap recall stages.
+type Reranker interface {
+	Rerank(context.Context, string, []Result, int) ([]Result, error)
+}
+
 func ValidateMaxDistance(maxDistance float64) error {
 	if maxDistance <= 0 || maxDistance > 1 {
 		return ErrInvalidMaxDistance
@@ -60,6 +65,13 @@ func FilterByMaxDistance(results []Result, maxDistance float64) ([]Result, error
 	}
 	filtered := make([]Result, 0, len(results))
 	for _, result := range results {
+		// Keyword-only results use KeywordScore, not a pgvector distance. A
+		// zero distance there means "not a vector result", so do not discard
+		// an exact lexical hit because of the semantic threshold.
+		if result.MatchType == "keyword" {
+			filtered = append(filtered, result)
+			continue
+		}
 		if result.Distance <= maxDistance {
 			filtered = append(filtered, result)
 		}
@@ -71,6 +83,7 @@ type Service struct {
 	embedder Embedder
 	chunks   ChunkSearcher
 	keyword  KeywordSearcher
+	reranker Reranker
 }
 
 func NewService(embedder Embedder, chunks ChunkSearcher) *Service {
@@ -79,6 +92,10 @@ func NewService(embedder Embedder, chunks ChunkSearcher) *Service {
 
 func NewHybridService(embedder Embedder, chunks ChunkSearcher, keyword KeywordSearcher) *Service {
 	return &Service{embedder: embedder, chunks: chunks, keyword: keyword}
+}
+
+func NewHybridServiceWithReranker(embedder Embedder, chunks ChunkSearcher, keyword KeywordSearcher, reranker Reranker) *Service {
+	return &Service{embedder: embedder, chunks: chunks, keyword: keyword, reranker: reranker}
 }
 
 func (s *Service) Search(ctx context.Context, knowledgeBaseID int64, query string, limit int) ([]Result, error) {
@@ -102,18 +119,47 @@ func (s *Service) Search(ctx context.Context, knowledgeBaseID int64, query strin
 	if len(response.Data) != 1 || len(response.Data[0].Vector) == 0 {
 		return nil, errors.New("embedding response does not contain one non-empty query vector")
 	}
-	results, err := s.chunks.Search(ctx, knowledgeBaseID, response.Data[0].Vector, limit)
+	candidateLimit := limit
+	if s.reranker != nil && candidateLimit < MaxResults {
+		candidateLimit *= 3
+		if candidateLimit > MaxResults {
+			candidateLimit = MaxResults
+		}
+	}
+	results, err := s.chunks.Search(ctx, knowledgeBaseID, response.Data[0].Vector, candidateLimit)
 	if err != nil {
 		return nil, fmt.Errorf("search document chunks: %w", err)
 	}
-	if s.keyword == nil {
-		return results, nil
+	merged := results
+	if s.keyword != nil {
+		keywordResults, err := s.keyword.SearchKeyword(ctx, knowledgeBaseID, query, candidateLimit)
+		if err != nil {
+			return nil, fmt.Errorf("search keyword document chunks: %w", err)
+		}
+		merged = mergeResults(results, keywordResults, candidateLimit)
 	}
-	keywordResults, err := s.keyword.SearchKeyword(ctx, knowledgeBaseID, query, limit)
+	if s.reranker == nil {
+		return merged[:min(len(merged), limit)], nil
+	}
+	if len(merged) == 0 {
+		return nil, nil
+	}
+	rankLimit := min(len(merged), limit)
+	ranked, err := s.reranker.Rerank(ctx, query, merged, rankLimit)
 	if err != nil {
-		return nil, fmt.Errorf("search keyword document chunks: %w", err)
+		return nil, fmt.Errorf("rerank search results: %w", err)
 	}
-	return mergeResults(results, keywordResults, limit), nil
+	if len(ranked) > rankLimit {
+		return ranked[:rankLimit], nil
+	}
+	return ranked, nil
+}
+
+func min(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 func mergeResults(vectorResults, keywordResults []Result, limit int) []Result {

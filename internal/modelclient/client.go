@@ -20,6 +20,7 @@ const (
 	maxChatResponseBytes      = 1 << 20
 	maxChatStreamBytes        = 8 << 20
 	maxOCRResponseBytes       = 4 << 20
+	maxRerankResponseBytes    = 2 << 20
 )
 
 // ConnectionChecker verifies that an API endpoint accepts the configured key.
@@ -43,6 +44,10 @@ type OCRer interface {
 	OCR(context.Context, string, string, OCRRequest) (OCRResponse, error)
 }
 
+type Reranker interface {
+	Rerank(context.Context, string, string, RerankRequest) (RerankResponse, error)
+}
+
 type EmbeddingRequest struct {
 	Model string   `json:"model"`
 	Input []string `json:"input"`
@@ -56,6 +61,23 @@ type Embedding struct {
 type EmbeddingResponse struct {
 	Data  []Embedding `json:"data"`
 	Usage *TokenUsage `json:"usage,omitempty"`
+}
+
+type RerankRequest struct {
+	Model     string   `json:"model"`
+	Query     string   `json:"query"`
+	Documents []string `json:"documents"`
+	TopN      int      `json:"top_n"`
+}
+
+type RerankResult struct {
+	Index          int     `json:"index"`
+	RelevanceScore float64 `json:"relevance_score"`
+}
+
+type RerankResponse struct {
+	Results []RerankResult `json:"results"`
+	Usage   *TokenUsage    `json:"usage,omitempty"`
 }
 
 type TokenUsage = usage.TokenUsage
@@ -263,6 +285,73 @@ func (c *HTTPClient) Embed(ctx context.Context, baseURL, apiKey string, embeddin
 		result.Data[embedding.Index] = Embedding{Index: embedding.Index, Vector: embedding.Embedding}
 	}
 	return result, nil
+}
+
+// Rerank asks a rerank model to score the already-recalled candidate chunks.
+// The qwen3-rerank endpoint is OpenAI-compatible and returns candidate indexes
+// in descending relevance order.
+func (c *HTTPClient) Rerank(ctx context.Context, baseURL, apiKey string, rerankRequest RerankRequest) (RerankResponse, error) {
+	if strings.TrimSpace(rerankRequest.Model) == "" || strings.TrimSpace(rerankRequest.Query) == "" || len(rerankRequest.Documents) == 0 {
+		return RerankResponse{}, fmt.Errorf("rerank model, query, and documents are required")
+	}
+	if len(rerankRequest.Documents) > 500 {
+		return RerankResponse{}, fmt.Errorf("rerank documents exceed 500 candidates")
+	}
+	if rerankRequest.TopN <= 0 || rerankRequest.TopN > len(rerankRequest.Documents) {
+		return RerankResponse{}, fmt.Errorf("rerank top_n must be between 1 and document count")
+	}
+
+	endpoint, err := apiEndpoint(baseURL, "reranks", c.allowedHosts)
+	if err != nil {
+		return RerankResponse{}, err
+	}
+	body, err := json.Marshal(rerankRequest)
+	if err != nil {
+		return RerankResponse{}, fmt.Errorf("encode rerank request: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return RerankResponse{}, fmt.Errorf("create rerank request: %w", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+apiKey)
+	request.Header.Set("Content-Type", "application/json")
+
+	response, err := c.client.Do(request)
+	if err != nil {
+		return RerankResponse{}, fmt.Errorf("request rerank endpoint: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return RerankResponse{}, fmt.Errorf("rerank endpoint returned HTTP %d", response.StatusCode)
+	}
+	body, err = io.ReadAll(io.LimitReader(response.Body, maxRerankResponseBytes+1))
+	if err != nil {
+		return RerankResponse{}, fmt.Errorf("read rerank response: %w", err)
+	}
+	if len(body) > maxRerankResponseBytes {
+		return RerankResponse{}, fmt.Errorf("rerank response is too large")
+	}
+	var payload struct {
+		Results []RerankResult `json:"results"`
+		Usage   *TokenUsage    `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return RerankResponse{}, fmt.Errorf("decode rerank response: %w", err)
+	}
+	if len(payload.Results) == 0 {
+		return RerankResponse{}, fmt.Errorf("rerank response does not contain results")
+	}
+	seen := make(map[int]struct{}, len(payload.Results))
+	for _, result := range payload.Results {
+		if result.Index < 0 || result.Index >= len(rerankRequest.Documents) {
+			return RerankResponse{}, fmt.Errorf("rerank response index %d is out of range", result.Index)
+		}
+		if _, ok := seen[result.Index]; ok {
+			return RerankResponse{}, fmt.Errorf("rerank response contains duplicate index %d", result.Index)
+		}
+		seen[result.Index] = struct{}{}
+	}
+	return RerankResponse{Results: payload.Results, Usage: payload.Usage}, nil
 }
 
 func (c *HTTPClient) Chat(ctx context.Context, baseURL, apiKey string, chatRequest ChatRequest) (ChatResponse, error) {

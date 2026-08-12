@@ -51,6 +51,7 @@ func main() {
 	embeddingService := modelruntime.NewEmbeddingService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
 	chatService := modelruntime.NewChatService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
 	chunkStore := documentchunk.NewPostgresStore(db)
+	rerankService := modelruntime.NewRerankService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
 	extractor := documentextractor.New(cfg.UploadDir)
 	if cfg.OCRModel != "" {
 		ocrService := modelruntime.NewOCRService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv, cfg.OCRModel, cfg.OCRPrompt)
@@ -63,7 +64,7 @@ func main() {
 	metricsRegistry := metrics.New()
 	a2aStore := a2a.NewPostgresStore(db)
 	runner := worker.NewRunnerWithMetrics(worker.NewPostgresStore(db), processor, metricsRegistry)
-	searchService := retrieval.NewHybridService(embeddingService, chunkStore, chunkStore)
+	searchService := retrieval.NewHybridServiceWithReranker(embeddingService, chunkStore, chunkStore, rerankService)
 	answerService := rag.NewService(searchService, chatService)
 	var historySummarizer agentservice.HistorySummarizer
 	if cfg.AgentHistorySummaryEnabled {

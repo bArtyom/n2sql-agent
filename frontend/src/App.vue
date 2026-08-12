@@ -17,6 +17,8 @@ type Source = {
   content: string;
   distance: number;
   matchType?: "vector" | "keyword" | "hybrid" | string;
+  keywordScore?: number;
+  rerankScore?: number;
 };
 type ChatMessage = {
   role: "user" | "assistant";
@@ -58,6 +60,8 @@ type ModelProvider = {
   apiKeyEnvVar: string;
   chatModel: string;
   embeddingModel: string;
+  rerankBaseUrl: string;
+  rerankModel: string;
   enabled: boolean;
 };
 
@@ -133,6 +137,8 @@ function emptyModelProvider(): ModelProvider {
     apiKeyEnvVar: "OPENAI_API_KEY",
     chatModel: "",
     embeddingModel: "",
+    rerankBaseUrl: "",
+    rerankModel: "",
     enabled: true,
   };
 }
@@ -165,6 +171,12 @@ function sourcePreview(content: string): string {
 
 function matchTypeLabel(matchType?: string): string {
   return ({ vector: "语义命中", keyword: "关键词命中", hybrid: "双路命中" }[matchType || ""] || "检索命中");
+}
+
+function sourceScoreLabel(source: Source): string {
+  if (typeof source.rerankScore === "number") return `重排 ${source.rerankScore.toFixed(2)}`;
+  if (typeof source.keywordScore === "number" && source.keywordScore > 0) return `关键词 ${source.keywordScore.toFixed(2)}`;
+  return `距离 ${source.distance.toFixed(2)}`;
 }
 
 function openSource(source: Source) {
@@ -1031,7 +1043,7 @@ onUnmounted(() => {
                 <div class="source-list">
                   <button v-for="(source, sourceIndex) in message.sources" :key="`${source.documentId}-${source.position}`" class="source-card" type="button" @click="openSource(source)">
                     <span class="source-card-index">{{ String(sourceIndex + 1).padStart(2, "0") }}</span>
-                    <span class="source-card-body"><strong>{{ source.originalFilename || "未命名文档" }} <em :class="`source-match source-match--${source.matchType || 'unknown'}`">{{ matchTypeLabel(source.matchType) }}</em></strong><small>第 {{ source.position + 1 }} 段 · 距离 {{ source.distance.toFixed(2) }}</small><span>{{ sourcePreview(source.content) }}</span></span>
+                    <span class="source-card-body"><strong>{{ source.originalFilename || "未命名文档" }} <em :class="`source-match source-match--${source.matchType || 'unknown'}`">{{ matchTypeLabel(source.matchType) }}</em></strong><small>第 {{ source.position + 1 }} 段 · {{ sourceScoreLabel(source) }}</small><span>{{ sourcePreview(source.content) }}</span></span>
                     <span class="source-card-arrow">↗</span>
                   </button>
                 </div>
@@ -1068,6 +1080,10 @@ onUnmounted(() => {
             <label>聊天模型<input v-model="providerForm.chatModel" type="text" placeholder="例如：gpt-4o-mini" required /></label>
             <label>嵌入模型<input v-model="providerForm.embeddingModel" type="text" placeholder="例如：text-embedding-3-small" required /></label>
           </div>
+          <div class="settings-two-column">
+            <label>Rerank Base URL（可选）<input v-model="providerForm.rerankBaseUrl" type="url" placeholder="例如：https://…/compatible-api/v1" /></label>
+            <label>Rerank 模型（可选）<input v-model="providerForm.rerankModel" type="text" placeholder="例如：qwen3-rerank" /></label>
+          </div>
           <div class="secret-note"><span class="secret-note-mark">⌘</span><div><strong>API Key 不在这里输入</strong><p>后端只读取 `.env` 中的 <code>{{ providerForm.apiKeyEnvVar }}</code>，页面不会显示或保存密钥。</p></div></div>
           <p v-if="providerMessage" class="provider-message" :class="`provider-message--${providerMessageKind}`" role="status">{{ providerMessage }}</p>
           <div class="settings-actions"><button class="settings-secondary" type="button" :disabled="providerTesting || providerSaving" @click="testProviderConnection">{{ providerTesting ? "测试中…" : "测试连接" }}</button><button class="settings-primary" type="submit" :disabled="providerSaving || providerTesting">{{ providerSaving ? "保存中…" : "保存配置" }}</button></div>
@@ -1083,7 +1099,7 @@ onUnmounted(() => {
         </header>
         <div class="source-panel-meta">
           <strong>{{ selectedSource.originalFilename || "未命名文档" }}</strong>
-          <span>第 {{ selectedSource.position + 1 }} 段 · {{ matchTypeLabel(selectedSource.matchType) }} · 检索距离 {{ selectedSource.distance.toFixed(2) }}</span>
+          <span>第 {{ selectedSource.position + 1 }} 段 · {{ matchTypeLabel(selectedSource.matchType) }} · {{ sourceScoreLabel(selectedSource) }}</span>
         </div>
         <div class="source-panel-content"><p>{{ selectedSource.content }}</p></div>
         <div class="source-panel-actions"><button class="source-copy-button" type="button" @click="copySource(selectedSource)">{{ copiedSourceKey === sourceKey(selectedSource) ? "已复制原文" : "复制原文" }}</button></div>
