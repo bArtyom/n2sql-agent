@@ -37,6 +37,7 @@ type Dependencies struct {
 	MultiAgentAnswers          multiagent.Answerer
 	MultiAgentStreamingAnswers multiagent.EventAnswerer
 	A2AAnswers                 multiagent.Answerer
+	A2AStore                   a2a.TaskStore
 	A2ATaskTimeout             time.Duration
 	MCPKnowledgeSearch         retrieval.Searcher
 	MCPDocuments               document.Reader
@@ -109,7 +110,12 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("POST /api/knowledge-bases/{id}/multi-agent-chat/stream", handler.NewMultiAgentChatStream(dependencies.MultiAgentStreamingAnswers))
 	}
 	if dependencies.A2AAnswers != nil {
-		a2aHandler := a2a.NewHandlerWithTimeoutAndMetrics(dependencies.A2AAnswers, dependencies.A2ATaskTimeout, registry)
+		var a2aHandler http.Handler
+		if dependencies.A2AStore != nil {
+			a2aHandler = a2a.NewHandlerWithStore(dependencies.A2AAnswers, dependencies.A2AStore, dependencies.A2ATaskTimeout, registry)
+		} else {
+			a2aHandler = a2a.NewHandlerWithTimeoutAndMetrics(dependencies.A2AAnswers, dependencies.A2ATaskTimeout, registry)
+		}
 		mux.Handle("GET /.well-known/agent.json", a2aHandler)
 		mux.Handle("POST /api/a2a/tasks", a2aHandler)
 		mux.Handle("GET /api/a2a/tasks/{id}", a2aHandler)

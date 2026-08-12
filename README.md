@@ -181,7 +181,7 @@ Go 侧的最小客户端位于 `internal/mcp`，可用于把同一个只读工�
 
 ## 最小 A2A HTTP 适配
 
-当前提供一个项目内的最小 Agent-to-Agent HTTP 入口，用于让其他 Agent 以任务方式调用本项目的 Multi-Agent Supervisor。它不是完整的官方 A2A 实现，暂不提供分布式队列、认证、推送流和持久化任务。
+当前提供一个项目内的最小 Agent-to-Agent HTTP 入口，用于让其他 Agent 以任务方式调用本项目的 Multi-Agent Supervisor。它不是完整的官方 A2A 实现，暂不提供分布式队列、认证或推送流；任务使用 PostgreSQL 持久化。
 
 ```text
 GET  /.well-known/agent.json   查看 Agent Card
@@ -198,4 +198,4 @@ curl -X POST http://localhost:8080/api/a2a/tasks \
   -d '{"knowledge_base_id":1,"message":"这份资料如何启动服务？","top_k":5}'
 ```
 
-任务会经历 `submitted → working → completed`，失败时进入 `failed`。任务数据当前只保存在进程内，服务重启后会丢失；最终答案和引用仍由现有 Multi-Agent Supervisor 生成。已有 `/metrics` 会记录 `a2a_tasks_submitted_total`、`a2a_tasks_started_total`、`a2a_tasks_completed_total`、`a2a_tasks_failed_total` 和总耗时。
+任务会经历 `submitted → working → completed`，失败时进入 `failed`。服务启动时使用 PostgreSQL 保存任务，后台 A2A Runner 负责领取和执行；任务结果在服务重启后仍可查询。已有 `/metrics` 会记录 `a2a_tasks_submitted_total`、`a2a_tasks_started_total`、`a2a_tasks_completed_total`、`a2a_tasks_failed_total` 和总耗时。内存 Store 仅用于单元测试和本地简化示例。

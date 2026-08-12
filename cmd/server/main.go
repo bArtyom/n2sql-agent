@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bArtyom/n2sql-agent/internal/a2a"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/app"
 	"github.com/bArtyom/n2sql-agent/internal/config"
@@ -59,6 +60,7 @@ func main() {
 	}
 	processor := worker.NewEmbeddingChunkingProcessor(extractor, documentchunk.NewSplitter(1000, 150), chunkStore, embeddingService)
 	metricsRegistry := metrics.New()
+	a2aStore := a2a.NewPostgresStore(db)
 	runner := worker.NewRunnerWithMetrics(worker.NewPostgresStore(db), processor, metricsRegistry)
 	searchService := retrieval.NewService(embeddingService, chunkStore)
 	answerService := rag.NewService(searchService, chatService)
@@ -109,6 +111,7 @@ func main() {
 			MultiAgentAnswers:          multiAgentAnswers,
 			MultiAgentStreamingAnswers: multiAgentAnswers,
 			A2AAnswers:                 multiAgentAnswers,
+			A2AStore:                   a2aStore,
 			A2ATaskTimeout:             cfg.AgentTimeout,
 			MCPKnowledgeSearch:         searchService,
 			MCPDocuments:               documentService,
@@ -123,6 +126,14 @@ func main() {
 	runContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	workerDone := make(chan struct{})
+	a2aRunner := a2a.NewRunner(a2aStore, multiAgentAnswers, cfg.AgentTimeout, metricsRegistry)
+	a2aDone := make(chan struct{})
+	go func() {
+		defer close(a2aDone)
+		a2aRunner.Run(runContext, cfg.WorkerPollInterval, func(err error) {
+			slog.ErrorContext(runContext, "a2a_worker_loop_error", "error", err)
+		})
+	}()
 	go func() {
 		defer close(workerDone)
 		runner.Run(runContext, cfg.WorkerPollInterval, func(err error) {
@@ -134,6 +145,7 @@ func main() {
 	serveErr := app.RunServer(runContext, server, 0)
 	stop()
 	<-workerDone
+	<-a2aDone
 	if serveErr != nil {
 		log.Fatal(serveErr)
 	}

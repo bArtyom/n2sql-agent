@@ -14,7 +14,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/metrics"
@@ -51,16 +50,6 @@ type TaskRequest struct {
 	TopK            int    `json:"top_k,omitempty"`
 }
 
-type task struct {
-	ID        string
-	Request   TaskRequest
-	Status    TaskStatus
-	Response  multiagent.Response
-	Error     string
-	CreatedAt time.Time
-	UpdatedAt time.Time
-}
-
 type taskView struct {
 	ID        string     `json:"id"`
 	Status    TaskStatus `json:"status"`
@@ -73,9 +62,9 @@ type Handler struct {
 	answerer multiagent.Answerer
 	timeout  time.Duration
 	metrics  *metrics.Registry
-
-	mu    sync.RWMutex
-	tasks map[string]*task
+	store    TaskStore
+	runner   *Runner
+	runNow   bool
 }
 
 var _ http.Handler = (*Handler)(nil)
@@ -89,10 +78,21 @@ func NewHandlerWithTimeout(answerer multiagent.Answerer, timeout time.Duration) 
 }
 
 func NewHandlerWithTimeoutAndMetrics(answerer multiagent.Answerer, timeout time.Duration, registry *metrics.Registry) http.Handler {
+	store := NewMemoryStore()
+	handler := newHandler(answerer, timeout, registry, store)
+	handler.runNow = true
+	return handler
+}
+
+func NewHandlerWithStore(answerer multiagent.Answerer, store TaskStore, timeout time.Duration, registry *metrics.Registry) http.Handler {
+	return newHandler(answerer, timeout, registry, store)
+}
+
+func newHandler(answerer multiagent.Answerer, timeout time.Duration, registry *metrics.Registry, store TaskStore) *Handler {
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
-	return &Handler{answerer: answerer, timeout: timeout, metrics: registry, tasks: make(map[string]*task)}
+	return &Handler{answerer: answerer, timeout: timeout, metrics: registry, store: store, runner: NewRunner(store, answerer, timeout, registry)}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -144,16 +144,26 @@ func (h *Handler) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	now := time.Now().UTC()
-	created := &task{ID: newTaskID(), Request: request, Status: StatusSubmitted, CreatedAt: now, UpdatedAt: now}
-	view := taskViewOf(created)
-	h.mu.Lock()
-	h.tasks[created.ID] = created
-	h.mu.Unlock()
-	h.observeTask(created, metrics.A2AStatusSubmitted, 0)
+	created, err := h.store.Create(r.Context(), CreateInput{ID: newTaskID(), KnowledgeBaseID: request.KnowledgeBaseID, Message: request.Message, TopK: request.TopK})
+	if err != nil {
+		if errors.Is(err, ErrTaskNotFound) {
+			h.writeError(w, http.StatusBadRequest, "knowledge base is unavailable")
+			return
+		}
+		slog.ErrorContext(r.Context(), "a2a_task_create_failed", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "unable to create A2A task")
+		return
+	}
+	h.observeTask(metrics.A2AStatusSubmitted, 0)
 	slog.InfoContext(r.Context(), "a2a_task_submitted", "task_id", created.ID, "knowledge_base_id", request.KnowledgeBaseID)
-	go h.runTask(created.ID)
-	h.writeJSON(w, http.StatusAccepted, view)
+	if h.runNow {
+		go func() {
+			if _, err := h.runner.RunOnce(context.Background()); err != nil {
+				slog.Error("a2a_task_run_failed", "task_id", created.ID, "error", err)
+			}
+		}()
+	}
+	h.writeJSON(w, http.StatusAccepted, taskViewOf(created))
 }
 
 func (h *Handler) getTask(w http.ResponseWriter, r *http.Request) {
@@ -163,33 +173,34 @@ func (h *Handler) getTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.HasSuffix(path, "/result") {
-		h.getResult(w, strings.TrimSuffix(path, "/result"))
+		h.getResult(w, r.Context(), strings.TrimSuffix(path, "/result"))
 		return
 	}
-	h.mu.RLock()
-	current, ok := h.tasks[path]
-	if ok {
-		view := taskViewOf(current)
-		h.mu.RUnlock()
-		h.writeJSON(w, http.StatusOK, view)
+	current, err := h.store.Get(r.Context(), path)
+	if errors.Is(err, ErrTaskNotFound) {
+		h.writeError(w, http.StatusNotFound, "A2A task not found")
 		return
 	}
-	h.mu.RUnlock()
-	h.writeError(w, http.StatusNotFound, "A2A task not found")
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "unable to get A2A task")
+		return
+	}
+	h.writeJSON(w, http.StatusOK, taskViewOf(current))
 }
 
-func (h *Handler) getResult(w http.ResponseWriter, id string) {
-	h.mu.RLock()
-	current, ok := h.tasks[id]
-	if !ok {
-		h.mu.RUnlock()
+func (h *Handler) getResult(w http.ResponseWriter, ctx context.Context, id string) {
+	current, err := h.store.Get(ctx, id)
+	if errors.Is(err, ErrTaskNotFound) {
 		h.writeError(w, http.StatusNotFound, "A2A task not found")
+		return
+	}
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "unable to get A2A task result")
 		return
 	}
 	status := current.Status
 	response := current.Response
 	view := taskViewOf(current)
-	h.mu.RUnlock()
 
 	switch status {
 	case StatusCompleted:
@@ -201,54 +212,13 @@ func (h *Handler) getResult(w http.ResponseWriter, id string) {
 	}
 }
 
-func (h *Handler) runTask(id string) {
-	h.mu.Lock()
-	current, ok := h.tasks[id]
-	if !ok {
-		h.mu.Unlock()
-		return
-	}
-	current.Status = StatusWorking
-	current.UpdatedAt = time.Now().UTC()
-	request := current.Request
-	started := current.UpdatedAt
-	h.mu.Unlock()
-	h.observeTask(current, metrics.A2AStatusStarted, 0)
-	slog.Info("a2a_task_started", "task_id", id, "knowledge_base_id", request.KnowledgeBaseID)
-
-	ctx, cancel := context.WithTimeout(context.Background(), h.timeout)
-	defer cancel()
-	response, err := h.answerer.Answer(ctx, request.KnowledgeBaseID, request.Message, request.TopK)
-
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	current, ok = h.tasks[id]
-	if !ok {
-		return
-	}
-	current.UpdatedAt = time.Now().UTC()
-	if err != nil {
-		current.Status = StatusFailed
-		current.Error = publicTaskError(err)
-		duration := current.UpdatedAt.Sub(started)
-		h.observeTask(current, metrics.A2AStatusFailed, duration)
-		slog.Error("a2a_task_failed", "task_id", id, "knowledge_base_id", request.KnowledgeBaseID, "duration_ms", duration.Milliseconds(), "error_kind", current.Error)
-		return
-	}
-	current.Status = StatusCompleted
-	current.Response = response
-	duration := current.UpdatedAt.Sub(started)
-	h.observeTask(current, metrics.A2AStatusCompleted, duration)
-	slog.Info("a2a_task_completed", "task_id", id, "knowledge_base_id", request.KnowledgeBaseID, "duration_ms", duration.Milliseconds())
-}
-
-func (h *Handler) observeTask(current *task, status string, duration time.Duration) {
+func (h *Handler) observeTask(status string, duration time.Duration) {
 	if h.metrics != nil {
 		h.metrics.ObserveA2ATask(status, duration)
 	}
 }
 
-func taskViewOf(current *task) taskView {
+func taskViewOf(current Task) taskView {
 	return taskView{ID: current.ID, Status: current.Status, CreatedAt: current.CreatedAt, UpdatedAt: current.UpdatedAt, Error: current.Error}
 }
 
