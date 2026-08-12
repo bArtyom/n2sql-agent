@@ -121,6 +121,13 @@ func NewKnowledgeSearchToolForKnowledgeBaseWithLimits(searcher retrieval.Searche
 }
 
 func NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistance(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxResults int, maxDistance float64) (*KnowledgeSearchTool, error) {
+	return NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocuments(searcher, knowledgeBaseID, maxResultBytes, maxResults, maxDistance, nil)
+}
+
+// NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocuments creates
+// a read-only search tool scoped to one knowledge base and, optionally, a set
+// of documents inside that knowledge base.
+func NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocuments(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxResults int, maxDistance float64, documentIDs []int64) (*KnowledgeSearchTool, error) {
 	if searcher == nil {
 		return nil, ErrKnowledgeSearcherUnavailable
 	}
@@ -136,7 +143,18 @@ func NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistance(searcher retrie
 	if err := ValidateMaxKnowledgeDistance(maxDistance); err != nil {
 		return nil, err
 	}
-	return &KnowledgeSearchTool{searcher: searcher, knowledgeBaseID: knowledgeBaseID, maxResultBytes: maxResultBytes, maxResults: maxResults, maxDistance: maxDistance}, nil
+	normalizedDocumentIDs, err := retrieval.NormalizeDocumentIDs(documentIDs)
+	if err != nil {
+		return nil, err
+	}
+	return &KnowledgeSearchTool{
+		searcher:        searcher,
+		knowledgeBaseID: knowledgeBaseID,
+		maxResultBytes:  maxResultBytes,
+		maxResults:      maxResults,
+		maxDistance:     maxDistance,
+		documentIDs:     normalizedDocumentIDs,
+	}, nil
 }
 
 func ValidateMaxKnowledgeDistance(maxDistance float64) error {
@@ -359,15 +377,10 @@ func NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistance(searcher re
 }
 
 func NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistanceAndDocuments(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxResults int, maxDistance float64, documentIDs []int64) (*ToolRegistry, error) {
-	normalizedIDs, err := retrieval.NormalizeDocumentIDs(documentIDs)
+	tool, err := NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocuments(searcher, knowledgeBaseID, maxResultBytes, maxResults, maxDistance, documentIDs)
 	if err != nil {
 		return nil, err
 	}
-	tool, err := NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistance(searcher, knowledgeBaseID, maxResultBytes, maxResults, maxDistance)
-	if err != nil {
-		return nil, err
-	}
-	tool.documentIDs = normalizedIDs
 	registry, err := NewToolRegistryWithAllowlist("knowledge_search")
 	if err != nil {
 		return nil, fmt.Errorf("create scoped knowledge search allowlist: %w", err)

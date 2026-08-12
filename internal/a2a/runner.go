@@ -8,6 +8,7 @@ import (
 
 	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/multiagent"
+	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 )
 
 type Runner struct {
@@ -103,7 +104,17 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 	slog.InfoContext(ctx, "a2a_task_started", "task_id", task.ID, "knowledge_base_id", task.KnowledgeBaseID)
 
 	taskContext, cancel := context.WithTimeout(ctx, r.timeout)
-	response, err := r.answerer.Answer(taskContext, task.KnowledgeBaseID, task.Message, task.TopK)
+	var response multiagent.Response
+	if len(task.DocumentIDs) > 0 {
+		optionsAnswerer, ok := r.answerer.(multiagent.OptionsAnswerer)
+		if !ok {
+			err = retrieval.ErrDocumentFilterUnavailable
+		} else {
+			response, err = optionsAnswerer.AnswerWithSearchOptions(taskContext, task.KnowledgeBaseID, task.Message, task.TopK, retrieval.SearchOptions{DocumentIDs: task.DocumentIDs})
+		}
+	} else {
+		response, err = r.answerer.Answer(taskContext, task.KnowledgeBaseID, task.Message, task.TopK)
+	}
 	cancel()
 	duration := time.Since(started)
 	if err != nil {

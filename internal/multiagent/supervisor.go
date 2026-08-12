@@ -91,8 +91,26 @@ type EventAnswerer interface {
 	AnswerWithEvents(context.Context, int64, string, int, EventSink) (Response, error)
 }
 
+// OptionsAnswerer is implemented by supervisors that can restrict research
+// to a set of documents inside the requested knowledge base.
+type OptionsAnswerer interface {
+	AnswerWithSearchOptions(context.Context, int64, string, int, retrieval.SearchOptions) (Response, error)
+}
+
+type OptionsEventAnswerer interface {
+	AnswerWithEventsAndSearchOptions(context.Context, int64, string, int, retrieval.SearchOptions, EventSink) (Response, error)
+}
+
 type EventResearcher interface {
 	ResearchWithEvents(context.Context, int64, string, int, EventSink) (ResearchReport, error)
+}
+
+type OptionsResearcher interface {
+	ResearchWithSearchOptions(context.Context, int64, string, int, retrieval.SearchOptions) (ResearchReport, error)
+}
+
+type OptionsEventResearcher interface {
+	ResearchWithEventsAndSearchOptions(context.Context, int64, string, int, retrieval.SearchOptions, EventSink) (ResearchReport, error)
 }
 
 // ResearchReport is the bounded hand-off from the Researcher to the Answerer.
@@ -132,6 +150,8 @@ type Supervisor struct {
 
 var _ Answerer = (*Supervisor)(nil)
 var _ EventAnswerer = (*Supervisor)(nil)
+var _ OptionsAnswerer = (*Supervisor)(nil)
+var _ OptionsEventAnswerer = (*Supervisor)(nil)
 
 type eventEmitter struct {
 	runID  string
@@ -197,13 +217,26 @@ func NewSupervisor(researcher Researcher, answerer FinalAnswerer, timeout time.D
 }
 
 func (s *Supervisor) Answer(ctx context.Context, knowledgeBaseID int64, question string, topK int) (Response, error) {
-	return s.AnswerWithEvents(ctx, knowledgeBaseID, question, topK, nil)
+	return s.AnswerWithSearchOptions(ctx, knowledgeBaseID, question, topK, retrieval.SearchOptions{})
 }
 
 func (s *Supervisor) AnswerWithEvents(ctx context.Context, knowledgeBaseID int64, question string, topK int, sink EventSink) (Response, error) {
+	return s.AnswerWithEventsAndSearchOptions(ctx, knowledgeBaseID, question, topK, retrieval.SearchOptions{}, sink)
+}
+
+func (s *Supervisor) AnswerWithSearchOptions(ctx context.Context, knowledgeBaseID int64, question string, topK int, options retrieval.SearchOptions) (Response, error) {
+	return s.AnswerWithEventsAndSearchOptions(ctx, knowledgeBaseID, question, topK, options, nil)
+}
+
+func (s *Supervisor) AnswerWithEventsAndSearchOptions(ctx context.Context, knowledgeBaseID int64, question string, topK int, options retrieval.SearchOptions, sink EventSink) (Response, error) {
 	if ctx == nil {
 		return Response{}, ErrInvalidContext
 	}
+	normalizedDocumentIDs, normalizeErr := retrieval.NormalizeDocumentIDs(options.DocumentIDs)
+	if normalizeErr != nil {
+		return Response{}, normalizeErr
+	}
+	options.DocumentIDs = normalizedDocumentIDs
 	question = strings.TrimSpace(question)
 	if knowledgeBaseID <= 0 || question == "" || len(question) > maxQuestionBytes || topK < 0 || topK > retrieval.MaxResults {
 		return Response{}, ErrInvalidRequest
@@ -228,7 +261,17 @@ func (s *Supervisor) AnswerWithEvents(ctx context.Context, knowledgeBaseID int64
 	}
 	var report ResearchReport
 	var err error
-	if eventResearcher, ok := s.researcher.(EventResearcher); ok {
+	if len(options.DocumentIDs) > 0 {
+		if eventResearcher, ok := s.researcher.(OptionsEventResearcher); ok {
+			report, err = eventResearcher.ResearchWithEventsAndSearchOptions(runContext, knowledgeBaseID, question, topK, options, func(event Event) error {
+				return emitter.emit(event.Type, event.Role, event.Round, event.Data)
+			})
+		} else if optionResearcher, ok := s.researcher.(OptionsResearcher); ok {
+			report, err = optionResearcher.ResearchWithSearchOptions(runContext, knowledgeBaseID, question, topK, options)
+		} else {
+			err = retrieval.ErrDocumentFilterUnavailable
+		}
+	} else if eventResearcher, ok := s.researcher.(EventResearcher); ok {
 		report, err = eventResearcher.ResearchWithEvents(runContext, knowledgeBaseID, question, topK, func(event Event) error {
 			return emitter.emit(event.Type, event.Role, event.Round, event.Data)
 		})
@@ -306,6 +349,7 @@ type KnowledgeSearchResearcher struct {
 }
 
 var _ Researcher = (*KnowledgeSearchResearcher)(nil)
+var _ OptionsResearcher = (*KnowledgeSearchResearcher)(nil)
 
 func NewKnowledgeSearchResearcher(searcher retrieval.Searcher, maxResultBytes int) (*KnowledgeSearchResearcher, error) {
 	if searcher == nil {
@@ -318,6 +362,10 @@ func NewKnowledgeSearchResearcher(searcher retrieval.Searcher, maxResultBytes in
 }
 
 func (r *KnowledgeSearchResearcher) Research(ctx context.Context, knowledgeBaseID int64, question string, topK int) (ResearchReport, error) {
+	return r.ResearchWithSearchOptions(ctx, knowledgeBaseID, question, topK, retrieval.SearchOptions{})
+}
+
+func (r *KnowledgeSearchResearcher) ResearchWithSearchOptions(ctx context.Context, knowledgeBaseID int64, question string, topK int, options retrieval.SearchOptions) (ResearchReport, error) {
 	if ctx == nil {
 		return ResearchReport{}, ErrInvalidContext
 	}
@@ -325,7 +373,7 @@ func (r *KnowledgeSearchResearcher) Research(ctx context.Context, knowledgeBaseI
 	if knowledgeBaseID <= 0 || question == "" || topK < 1 || topK > retrieval.MaxResults {
 		return ResearchReport{}, ErrInvalidRequest
 	}
-	tool, err := agent.NewKnowledgeSearchToolForKnowledgeBaseWithMaxBytes(r.searcher, knowledgeBaseID, r.maxResultBytes)
+	tool, err := agent.NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocuments(r.searcher, knowledgeBaseID, r.maxResultBytes, retrieval.MaxResults, agent.DefaultMaxKnowledgeDistance, options.DocumentIDs)
 	if err != nil {
 		return ResearchReport{}, fmt.Errorf("create scoped knowledge search tool: %w", err)
 	}
@@ -361,6 +409,9 @@ type AutonomousKnowledgeSearchResearcher struct {
 }
 
 var _ Researcher = (*AutonomousKnowledgeSearchResearcher)(nil)
+var _ OptionsResearcher = (*AutonomousKnowledgeSearchResearcher)(nil)
+var _ EventResearcher = (*AutonomousKnowledgeSearchResearcher)(nil)
+var _ OptionsEventResearcher = (*AutonomousKnowledgeSearchResearcher)(nil)
 
 func NewAutonomousKnowledgeSearchResearcher(chat modelruntime.ToolChatRunner, searcher retrieval.Searcher, maxSteps, maxResultBytes int) (*AutonomousKnowledgeSearchResearcher, error) {
 	if chat == nil || searcher == nil {
@@ -381,10 +432,18 @@ func NewAutonomousKnowledgeSearchResearcher(chat modelruntime.ToolChatRunner, se
 }
 
 func (r *AutonomousKnowledgeSearchResearcher) Research(ctx context.Context, knowledgeBaseID int64, question string, topK int) (ResearchReport, error) {
-	return r.ResearchWithEvents(ctx, knowledgeBaseID, question, topK, nil)
+	return r.ResearchWithSearchOptions(ctx, knowledgeBaseID, question, topK, retrieval.SearchOptions{})
 }
 
 func (r *AutonomousKnowledgeSearchResearcher) ResearchWithEvents(ctx context.Context, knowledgeBaseID int64, question string, topK int, sink EventSink) (ResearchReport, error) {
+	return r.ResearchWithEventsAndSearchOptions(ctx, knowledgeBaseID, question, topK, retrieval.SearchOptions{}, sink)
+}
+
+func (r *AutonomousKnowledgeSearchResearcher) ResearchWithSearchOptions(ctx context.Context, knowledgeBaseID int64, question string, topK int, options retrieval.SearchOptions) (ResearchReport, error) {
+	return r.ResearchWithEventsAndSearchOptions(ctx, knowledgeBaseID, question, topK, options, nil)
+}
+
+func (r *AutonomousKnowledgeSearchResearcher) ResearchWithEventsAndSearchOptions(ctx context.Context, knowledgeBaseID int64, question string, topK int, options retrieval.SearchOptions, sink EventSink) (ResearchReport, error) {
 	if ctx == nil {
 		return ResearchReport{}, ErrInvalidContext
 	}
@@ -393,7 +452,7 @@ func (r *AutonomousKnowledgeSearchResearcher) ResearchWithEvents(ctx context.Con
 		return ResearchReport{}, ErrInvalidRequest
 	}
 
-	tool, err := agent.NewKnowledgeSearchToolForKnowledgeBaseWithMaxBytes(r.searcher, knowledgeBaseID, r.maxResultBytes)
+	tool, err := agent.NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocuments(r.searcher, knowledgeBaseID, r.maxResultBytes, retrieval.MaxResults, agent.DefaultMaxKnowledgeDistance, options.DocumentIDs)
 	if err != nil {
 		return ResearchReport{}, fmt.Errorf("create scoped knowledge search tool: %w", err)
 	}

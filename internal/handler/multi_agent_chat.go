@@ -10,6 +10,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
 	"github.com/bArtyom/n2sql-agent/internal/multiagent"
+	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 )
 
 // NewMultiAgentChat exposes the non-streaming in-process Supervisor workflow.
@@ -27,7 +28,18 @@ func NewMultiAgentChat(answerer multiagent.Answerer) http.Handler {
 		if !ok {
 			return
 		}
-		response, err := answerer.Answer(r.Context(), knowledgeBaseID, request.Message, request.TopK)
+		var response multiagent.Response
+		var err error
+		if len(request.DocumentIDs) > 0 {
+			optionsAnswerer, available := answerer.(multiagent.OptionsAnswerer)
+			if !available {
+				writeMultiAgentChatError(w, retrieval.ErrDocumentFilterUnavailable)
+				return
+			}
+			response, err = optionsAnswerer.AnswerWithSearchOptions(r.Context(), knowledgeBaseID, request.Message, request.TopK, retrieval.SearchOptions{DocumentIDs: request.DocumentIDs})
+		} else {
+			response, err = answerer.Answer(r.Context(), knowledgeBaseID, request.Message, request.TopK)
+		}
 		if err != nil {
 			writeMultiAgentChatError(w, err)
 			return
@@ -66,7 +78,17 @@ func NewMultiAgentChatStream(answerer multiagent.EventAnswerer) http.Handler {
 		emit := func(event multiagent.Event) error {
 			return writeMultiAgentSSEEvent(w, flusher, event)
 		}
-		_, err := answerer.AnswerWithEvents(r.Context(), knowledgeBaseID, request.Message, request.TopK, emit)
+		var err error
+		if len(request.DocumentIDs) > 0 {
+			optionsAnswerer, available := answerer.(multiagent.OptionsEventAnswerer)
+			if !available {
+				err = retrieval.ErrDocumentFilterUnavailable
+			} else {
+				_, err = optionsAnswerer.AnswerWithEventsAndSearchOptions(r.Context(), knowledgeBaseID, request.Message, request.TopK, retrieval.SearchOptions{DocumentIDs: request.DocumentIDs}, emit)
+			}
+		} else {
+			_, err = answerer.AnswerWithEvents(r.Context(), knowledgeBaseID, request.Message, request.TopK, emit)
+		}
 		if err == nil || r.Context().Err() != nil {
 			return
 		}
@@ -108,6 +130,10 @@ func multiAgentChatError(err error) (string, int) {
 	switch {
 	case errors.Is(err, multiagent.ErrInvalidRequest):
 		return "invalid multi-agent chat request", http.StatusBadRequest
+	case errors.Is(err, retrieval.ErrInvalidDocumentIDs):
+		return "invalid multi-agent document filter", http.StatusBadRequest
+	case errors.Is(err, retrieval.ErrDocumentFilterUnavailable):
+		return "multi-agent document filter is unavailable", http.StatusInternalServerError
 	case errors.Is(err, multiagent.ErrInvalidResearchReport), errors.Is(err, multiagent.ErrEmptyFinalAnswer):
 		return "multi-agent answer was invalid", http.StatusBadGateway
 	case errors.Is(err, context.DeadlineExceeded):

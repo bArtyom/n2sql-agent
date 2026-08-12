@@ -197,7 +197,7 @@ function sourceKey(source: Source): string {
 }
 
 function toggleDocument(documentID: number) {
-  if (chatMode.value !== "agent") return;
+  if (chatMode.value !== "agent" && chatMode.value !== "research" && chatMode.value !== "a2a") return;
   selectedDocumentIDs.value = selectedDocumentIDs.value.includes(documentID)
     ? selectedDocumentIDs.value.filter((id) => id !== documentID)
     : [...selectedDocumentIDs.value, documentID];
@@ -569,7 +569,7 @@ async function askQuestion() {
       method: "POST",
       headers,
       body: JSON.stringify(useResearchMode
-        ? { message: prompt, topK: topK.value }
+        ? { message: prompt, topK: topK.value, document_ids: selectedDocumentIDs.value }
         : {
             message: prompt,
             top_k: topK.value,
@@ -620,7 +620,7 @@ async function askA2ATask(prompt: string, answerIndex: number) {
   const task = await requestJSON<A2ATask>("/api/a2a/tasks", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ knowledge_base_id: selectedKnowledgeBaseId.value, message: prompt, top_k: topK.value }),
+      body: JSON.stringify({ knowledge_base_id: selectedKnowledgeBaseId.value, message: prompt, top_k: topK.value, document_ids: selectedDocumentIDs.value }),
   });
   answer.activity = "任务已提交，等待后台 Agent 领取…";
 
@@ -961,7 +961,7 @@ onUnmounted(() => {
           <ul v-else class="document-list">
             <li v-for="document in documents" :key="document.id" class="document-row">
               <label v-if="document.processingStatus === 'succeeded'" class="document-select" :title="selectedDocumentIDs.includes(document.id) ? '取消限定此文档' : '只检索此文档'">
-                <input type="checkbox" :checked="selectedDocumentIDs.includes(document.id)" :disabled="streaming || chatMode !== 'agent'" @change="toggleDocument(document.id)" />
+                <input type="checkbox" :checked="selectedDocumentIDs.includes(document.id)" :disabled="streaming" @change="toggleDocument(document.id)" />
                 <span class="visually-hidden">选择 {{ document.originalFilename }}</span>
               </label>
               <span class="file-icon">{{ document.contentType === "application/pdf" ? "PDF" : "TXT" }}</span>
@@ -988,7 +988,7 @@ onUnmounted(() => {
           <p v-if="chatMode === 'research'" class="chat-mode-note">协作研究会根据证据多轮检索；本次结果只在当前页面展示，不写入会话历史。</p>
           <p v-else-if="chatMode === 'a2a'" class="chat-mode-note">异步任务会交给后台 Agent 执行；页面会自动跟踪任务状态，完成后展示答案和引用，不写入会话历史。</p>
           <div class="retrieval-controls">
-            <div><strong>检索范围</strong><span>{{ chatMode === 'agent' && selectedDocumentIDs.length ? `标准 Agent 仅检索 ${selectedDocumentIDs.length} 份已选文档；` : "当前模式检索整个知识库；" }}控制召回数量和证据相关度</span></div>
+            <div><strong>检索范围</strong><span>{{ selectedDocumentIDs.length ? `${chatMode === 'research' ? '协作研究' : chatMode === 'a2a' ? '异步任务' : '标准 Agent'} 仅检索 ${selectedDocumentIDs.length} 份已选文档；` : "当前模式检索整个知识库；" }}控制召回数量和证据相关度</span></div>
             <label>召回片段数<select v-model.number="topK" :disabled="streaming"><option v-for="value in [3, 5, 8, 12, 20]" :key="value" :value="value">{{ value }} 条</option></select></label>
             <label v-if="chatMode === 'agent'" class="threshold-control">距离上限
               <input v-model.number="similarityThreshold" type="range" min="0.30" max="0.90" step="0.05" :disabled="streaming">

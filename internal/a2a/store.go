@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/multiagent"
+	"github.com/bArtyom/n2sql-agent/internal/retrieval"
+	"github.com/lib/pq"
 )
 
 var ErrNoTask = errors.New("no A2A task available")
@@ -32,6 +34,7 @@ type CreateInput struct {
 	KnowledgeBaseID int64
 	Message         string
 	TopK            int
+	DocumentIDs     []int64
 }
 
 type Task struct {
@@ -39,6 +42,7 @@ type Task struct {
 	KnowledgeBaseID int64
 	Message         string
 	TopK            int
+	DocumentIDs     []int64
 	Status          TaskStatus
 	Response        multiagent.Response
 	Error           string
@@ -59,7 +63,11 @@ func NewMemoryStore() *MemoryStore { return &MemoryStore{tasks: make(map[string]
 
 func (s *MemoryStore) Create(_ context.Context, input CreateInput) (Task, error) {
 	now := time.Now().UTC()
-	task := Task{ID: input.ID, KnowledgeBaseID: input.KnowledgeBaseID, Message: input.Message, TopK: input.TopK, Status: StatusSubmitted, CreatedAt: now, UpdatedAt: now}
+	normalizedDocumentIDs, err := retrieval.NormalizeDocumentIDs(input.DocumentIDs)
+	if err != nil {
+		return Task{}, err
+	}
+	task := Task{ID: input.ID, KnowledgeBaseID: input.KnowledgeBaseID, Message: input.Message, TopK: input.TopK, DocumentIDs: normalizedDocumentIDs, Status: StatusSubmitted, CreatedAt: now, UpdatedAt: now}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.tasks[task.ID] = task
@@ -143,16 +151,20 @@ type PostgresStore struct{ db *sql.DB }
 func NewPostgresStore(db *sql.DB) *PostgresStore { return &PostgresStore{db: db} }
 
 func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Task, error) {
+	normalizedDocumentIDs, err := retrieval.NormalizeDocumentIDs(input.DocumentIDs)
+	if err != nil {
+		return Task{}, err
+	}
 	var task Task
-	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO a2a_tasks (id, administrator_id, knowledge_base_id, message, top_k, status)
-		SELECT $1, settings.administrator_id, kb.id, $3, $4, 'submitted'
+	err = s.db.QueryRowContext(ctx, `
+		INSERT INTO a2a_tasks (id, administrator_id, knowledge_base_id, message, top_k, document_ids, status)
+		SELECT $1, settings.administrator_id, kb.id, $3, $4, $5, 'submitted'
 		FROM system_settings AS settings
 		JOIN knowledge_bases AS kb ON kb.administrator_id = settings.administrator_id
 		WHERE settings.id = 1 AND kb.id = $2
-		RETURNING id, knowledge_base_id, message, top_k, status, attempt_count, created_at, updated_at`,
-		input.ID, input.KnowledgeBaseID, input.Message, input.TopK).Scan(
-		&task.ID, &task.KnowledgeBaseID, &task.Message, &task.TopK, &task.Status,
+		RETURNING id, knowledge_base_id, message, top_k, document_ids, status, attempt_count, created_at, updated_at`,
+		input.ID, input.KnowledgeBaseID, input.Message, input.TopK, pq.Array(normalizedDocumentIDs)).Scan(
+		&task.ID, &task.KnowledgeBaseID, &task.Message, &task.TopK, pq.Array(&task.DocumentIDs), &task.Status,
 		&task.AttemptCount, &task.CreatedAt, &task.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -170,12 +182,12 @@ func (s *PostgresStore) Get(ctx context.Context, id string) (Task, error) {
 	var errorCode sql.NullString
 	var startedAt, completedAt sql.NullTime
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, knowledge_base_id, message, top_k, status, response, error_code,
+		SELECT id, knowledge_base_id, message, top_k, document_ids, status, response, error_code,
 		       attempt_count, created_at, started_at, completed_at, updated_at
 		FROM a2a_tasks
 		WHERE id = $1
 		  AND administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, id).Scan(
-		&task.ID, &task.KnowledgeBaseID, &task.Message, &task.TopK, &task.Status, &response, &errorCode,
+		&task.ID, &task.KnowledgeBaseID, &task.Message, &task.TopK, pq.Array(&task.DocumentIDs), &task.Status, &response, &errorCode,
 		&task.AttemptCount, &task.CreatedAt, &startedAt, &completedAt, &task.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -220,10 +232,10 @@ func (s *PostgresStore) ClaimNext(ctx context.Context, lease time.Duration) (Tas
 			updated_at = CURRENT_TIMESTAMP
 		FROM next_task
 		WHERE task.id = next_task.id
-		RETURNING task.id, task.knowledge_base_id, task.message, task.top_k,
+		RETURNING task.id, task.knowledge_base_id, task.message, task.top_k, task.document_ids,
 		          task.status, task.attempt_count, task.created_at,
 			 task.started_at, task.updated_at`, int64(lease.Seconds())).Scan(
-		&task.ID, &task.KnowledgeBaseID, &task.Message, &task.TopK, &task.Status,
+		&task.ID, &task.KnowledgeBaseID, &task.Message, &task.TopK, pq.Array(&task.DocumentIDs), &task.Status,
 		&task.AttemptCount, &task.CreatedAt, &task.StartedAt, &task.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {

@@ -45,9 +45,10 @@ const (
 )
 
 type TaskRequest struct {
-	KnowledgeBaseID int64  `json:"knowledge_base_id"`
-	Message         string `json:"message"`
-	TopK            int    `json:"top_k,omitempty"`
+	KnowledgeBaseID int64   `json:"knowledge_base_id"`
+	Message         string  `json:"message"`
+	TopK            int     `json:"top_k,omitempty"`
+	DocumentIDs     []int64 `json:"document_ids,omitempty"`
 }
 
 type taskView struct {
@@ -143,8 +144,13 @@ func (h *Handler) createTask(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, "invalid A2A task request")
 		return
 	}
+	normalizedDocumentIDs, err := retrieval.NormalizeDocumentIDs(request.DocumentIDs)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, "invalid A2A task request")
+		return
+	}
 
-	created, err := h.store.Create(r.Context(), CreateInput{ID: newTaskID(), KnowledgeBaseID: request.KnowledgeBaseID, Message: request.Message, TopK: request.TopK})
+	created, err := h.store.Create(r.Context(), CreateInput{ID: newTaskID(), KnowledgeBaseID: request.KnowledgeBaseID, Message: request.Message, TopK: request.TopK, DocumentIDs: normalizedDocumentIDs})
 	if err != nil {
 		if errors.Is(err, ErrTaskNotFound) {
 			h.writeError(w, http.StatusBadRequest, "knowledge base is unavailable")
