@@ -97,6 +97,9 @@ const chatMode = ref<ChatMode>("agent");
 const topK = ref(5);
 const similarityThreshold = ref(0.65);
 const selectedSource = ref<Source | null>(null);
+const copiedMessageIndex = ref<number | null>(null);
+const copiedSourceKey = ref<string | null>(null);
+let copyFeedbackTimer: number | undefined;
 let documentPollTimer: number | undefined;
 let a2aPollingTimer: number | undefined;
 
@@ -169,6 +172,42 @@ function closeSource() {
 
 function closeSourceOnEscape(event: KeyboardEvent) {
   if (event.key === "Escape") closeSource();
+}
+
+function sourceKey(source: Source): string {
+  return `${source.documentId}-${source.position}`;
+}
+
+async function copyText(value: string): Promise<boolean> {
+  if (!value.trim() || !navigator.clipboard?.writeText) {
+    errorMessage.value = "当前浏览器不支持复制，请手动选择文本。";
+    return false;
+  }
+  try {
+    await navigator.clipboard.writeText(value);
+    return true;
+  } catch {
+    errorMessage.value = "复制失败，请检查浏览器的剪贴板权限。";
+    return false;
+  }
+}
+
+function showCopyFeedback(kind: "answer" | "source", key: number | string) {
+  window.clearTimeout(copyFeedbackTimer);
+  copiedMessageIndex.value = kind === "answer" ? key as number : null;
+  copiedSourceKey.value = kind === "source" ? key as string : null;
+  copyFeedbackTimer = window.setTimeout(() => {
+    copiedMessageIndex.value = null;
+    copiedSourceKey.value = null;
+  }, 1800);
+}
+
+async function copyAnswer(message: ChatMessage, index: number) {
+  if (await copyText(message.content)) showCopyFeedback("answer", index);
+}
+
+async function copySource(source: Source) {
+  if (await copyText(source.content)) showCopyFeedback("source", sourceKey(source));
 }
 
 async function openProviderSettings() {
@@ -787,6 +826,7 @@ onMounted(() => {
 onUnmounted(() => {
   window.clearInterval(documentPollTimer);
   clearA2APolling();
+  window.clearTimeout(copyFeedbackTimer);
   window.removeEventListener("keydown", closeSourceOnEscape);
 });
 </script>
@@ -978,6 +1018,9 @@ onUnmounted(() => {
                 <span v-if="message.role === 'assistant' && !message.content && message.status === 'streaming'" class="typing"><i /><i /><i /></span>
                 <span v-else>{{ message.content }}</span>
               </div>
+              <div v-if="message.role === 'assistant' && message.content && message.status !== 'streaming'" class="message-actions">
+                <button type="button" @click="copyAnswer(message, index)">{{ copiedMessageIndex === index ? "已复制回答" : "复制回答" }}</button>
+              </div>
               <div v-if="message.role === 'assistant' && message.sources?.length" class="sources">
                 <div class="sources-heading"><span class="sources-label">引用 {{ message.sources.length }}</span><span>点击查看原文</span></div>
                 <div class="source-list">
@@ -1038,6 +1081,7 @@ onUnmounted(() => {
           <span>第 {{ selectedSource.position + 1 }} 段 · 检索距离 {{ selectedSource.distance.toFixed(2) }}</span>
         </div>
         <div class="source-panel-content"><p>{{ selectedSource.content }}</p></div>
+        <div class="source-panel-actions"><button class="source-copy-button" type="button" @click="copySource(selectedSource)">{{ copiedSourceKey === sourceKey(selectedSource) ? "已复制原文" : "复制原文" }}</button></div>
         <p class="source-panel-note">这段内容来自知识库检索结果，仅作为回答依据展示，不会被当作操作指令执行。</p>
       </aside>
     </div>
