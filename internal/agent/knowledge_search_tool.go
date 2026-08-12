@@ -18,6 +18,7 @@ var (
 	ErrKnowledgeSearcherUnavailable = errors.New("knowledge searcher unavailable")
 	ErrInvalidMaxResultBytes        = errors.New("knowledge search result byte limit must be at least 2")
 	ErrInvalidMaxResults            = errors.New("knowledge search result limit must be between 1 and 20")
+	ErrInvalidMaxKnowledgeDistance  = errors.New("knowledge search distance threshold must be greater than 0 and at most 1")
 )
 
 const (
@@ -87,12 +88,13 @@ type KnowledgeSearchTool struct {
 	knowledgeBaseID int64
 	maxResultBytes  int
 	maxResults      int
+	maxDistance     float64
 }
 
 var _ Tool = (*KnowledgeSearchTool)(nil)
 
 func NewKnowledgeSearchTool(searcher retrieval.Searcher) *KnowledgeSearchTool {
-	return &KnowledgeSearchTool{searcher: searcher, maxResultBytes: DefaultMaxToolResultBytes, maxResults: retrieval.MaxResults}
+	return &KnowledgeSearchTool{searcher: searcher, maxResultBytes: DefaultMaxToolResultBytes, maxResults: retrieval.MaxResults, maxDistance: DefaultMaxKnowledgeDistance}
 }
 
 func NewKnowledgeSearchToolForKnowledgeBase(searcher retrieval.Searcher, knowledgeBaseID int64) (*KnowledgeSearchTool, error) {
@@ -106,7 +108,7 @@ func NewKnowledgeSearchToolWithMaxBytes(searcher retrieval.Searcher, maxResultBy
 	if maxResultBytes < 2 {
 		return nil, ErrInvalidMaxResultBytes
 	}
-	return &KnowledgeSearchTool{searcher: searcher, maxResultBytes: maxResultBytes, maxResults: retrieval.MaxResults}, nil
+	return &KnowledgeSearchTool{searcher: searcher, maxResultBytes: maxResultBytes, maxResults: retrieval.MaxResults, maxDistance: DefaultMaxKnowledgeDistance}, nil
 }
 
 func NewKnowledgeSearchToolForKnowledgeBaseWithMaxBytes(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes int) (*KnowledgeSearchTool, error) {
@@ -114,6 +116,10 @@ func NewKnowledgeSearchToolForKnowledgeBaseWithMaxBytes(searcher retrieval.Searc
 }
 
 func NewKnowledgeSearchToolForKnowledgeBaseWithLimits(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxResults int) (*KnowledgeSearchTool, error) {
+	return NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistance(searcher, knowledgeBaseID, maxResultBytes, maxResults, DefaultMaxKnowledgeDistance)
+}
+
+func NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistance(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxResults int, maxDistance float64) (*KnowledgeSearchTool, error) {
 	if searcher == nil {
 		return nil, ErrKnowledgeSearcherUnavailable
 	}
@@ -126,7 +132,17 @@ func NewKnowledgeSearchToolForKnowledgeBaseWithLimits(searcher retrieval.Searche
 	if maxResults < 1 || maxResults > retrieval.MaxResults {
 		return nil, ErrInvalidMaxResults
 	}
-	return &KnowledgeSearchTool{searcher: searcher, knowledgeBaseID: knowledgeBaseID, maxResultBytes: maxResultBytes, maxResults: maxResults}, nil
+	if err := ValidateMaxKnowledgeDistance(maxDistance); err != nil {
+		return nil, err
+	}
+	return &KnowledgeSearchTool{searcher: searcher, knowledgeBaseID: knowledgeBaseID, maxResultBytes: maxResultBytes, maxResults: maxResults, maxDistance: maxDistance}, nil
+}
+
+func ValidateMaxKnowledgeDistance(maxDistance float64) error {
+	if maxDistance <= 0 || maxDistance > 1 {
+		return ErrInvalidMaxKnowledgeDistance
+	}
+	return nil
 }
 
 func (t *KnowledgeSearchTool) Name() string {
@@ -190,7 +206,7 @@ func (t *KnowledgeSearchTool) Call(ctx context.Context, raw json.RawMessage) (To
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("knowledge search: %w", err)
 	}
-	relevantResults := filterRelevantKnowledgeResults(results)
+	relevantResults := filterRelevantKnowledgeResults(results, t.maxDistance)
 	content, visibleResults, truncated, err := limitKnowledgeSearchResults(relevantResults, t.maxResultBytes)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("encode knowledge search results: %w", err)
@@ -214,10 +230,13 @@ func (t *KnowledgeSearchTool) Call(ctx context.Context, raw json.RawMessage) (To
 	}, nil
 }
 
-func filterRelevantKnowledgeResults(results []retrieval.Result) []retrieval.Result {
+func filterRelevantKnowledgeResults(results []retrieval.Result, maxDistance float64) []retrieval.Result {
+	if maxDistance == 0 {
+		maxDistance = DefaultMaxKnowledgeDistance
+	}
 	relevant := make([]retrieval.Result, 0, len(results))
 	for _, result := range results {
-		if result.Distance <= DefaultMaxKnowledgeDistance {
+		if result.Distance <= maxDistance {
 			relevant = append(relevant, result)
 		}
 	}
@@ -329,7 +348,11 @@ func NewKnowledgeSearchRegistryForKnowledgeBaseWithMaxBytes(searcher retrieval.S
 }
 
 func NewKnowledgeSearchRegistryForKnowledgeBaseWithLimits(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxResults int) (*ToolRegistry, error) {
-	tool, err := NewKnowledgeSearchToolForKnowledgeBaseWithLimits(searcher, knowledgeBaseID, maxResultBytes, maxResults)
+	return NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistance(searcher, knowledgeBaseID, maxResultBytes, maxResults, DefaultMaxKnowledgeDistance)
+}
+
+func NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistance(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxResults int, maxDistance float64) (*ToolRegistry, error) {
+	tool, err := NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistance(searcher, knowledgeBaseID, maxResultBytes, maxResults, maxDistance)
 	if err != nil {
 		return nil, err
 	}

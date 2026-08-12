@@ -170,11 +170,12 @@ func decodeIdempotencyKey(w http.ResponseWriter, r *http.Request, conversationID
 
 func idempotencyRequestHash(knowledgeBaseID int64, request agentservice.ChatRequest) (string, error) {
 	payload, err := json.Marshal(struct {
-		KnowledgeBaseID int64  `json:"knowledge_base_id"`
-		ConversationID  int64  `json:"conversation_id"`
-		Message         string `json:"message"`
-		TopK            int    `json:"top_k"`
-	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message, TopK: request.TopK})
+		KnowledgeBaseID int64   `json:"knowledge_base_id"`
+		ConversationID  int64   `json:"conversation_id"`
+		Message         string  `json:"message"`
+		TopK            int     `json:"top_k"`
+		Threshold       float64 `json:"similarity_threshold"`
+	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message, TopK: request.TopK, Threshold: request.SimilarityThreshold})
 	if err != nil {
 		return "", err
 	}
@@ -217,6 +218,12 @@ func decodeKnowledgeBaseAgentChatRequest(w http.ResponseWriter, r *http.Request,
 	if request.TopK < 1 || request.TopK > retrieval.MaxResults {
 		http.Error(w, `{"error":"invalid agent chat top_k"}`, http.StatusBadRequest)
 		return 0, agentservice.ChatRequest{}, false
+	}
+	if request.SimilarityThreshold != 0 {
+		if err := agent.ValidateMaxKnowledgeDistance(request.SimilarityThreshold); err != nil {
+			http.Error(w, `{"error":"invalid agent chat similarity_threshold"}`, http.StatusBadRequest)
+			return 0, agentservice.ChatRequest{}, false
+		}
 	}
 	for index := range request.History {
 		if request.History[index].Role != "user" && request.History[index].Role != "assistant" {

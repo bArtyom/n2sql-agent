@@ -123,6 +123,13 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	if request.TopK < 1 || request.TopK > retrieval.MaxResults {
 		return Response{}, ErrInvalidRequest
 	}
+	maxDistance := agent.DefaultMaxKnowledgeDistance
+	if request.SimilarityThreshold != 0 {
+		if err := agent.ValidateMaxKnowledgeDistance(request.SimilarityThreshold); err != nil {
+			return Response{}, ErrInvalidRequest
+		}
+		maxDistance = request.SimilarityThreshold
+	}
 	runContext, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	history, historySummaryStats, err := buildHistoryMessages(runContext, request.History, s.maxHistoryMessages, s.maxHistoryBytes, s.historySummarizer, request.CachedSummary)
@@ -130,7 +137,7 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		return Response{}, err
 	}
 
-	registry, err := agent.NewKnowledgeSearchRegistryForKnowledgeBaseWithLimits(s.searcher, knowledgeBaseID, s.maxToolResultBytes, request.TopK)
+	registry, err := agent.NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistance(s.searcher, knowledgeBaseID, s.maxToolResultBytes, request.TopK, maxDistance)
 	if err != nil {
 		return Response{}, fmt.Errorf("create knowledge search registry: %w", err)
 	}

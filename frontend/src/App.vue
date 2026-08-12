@@ -95,6 +95,7 @@ const conversationsLoading = ref(false);
 const conversationCreating = ref(false);
 const chatMode = ref<ChatMode>("agent");
 const topK = ref(5);
+const similarityThreshold = ref(0.65);
 let documentPollTimer: number | undefined;
 let a2aPollingTimer: number | undefined;
 
@@ -482,7 +483,12 @@ async function askQuestion() {
       headers,
       body: JSON.stringify(useResearchMode
         ? { message: prompt, topK: topK.value }
-        : { message: prompt, top_k: topK.value, conversation_id: activeConversationID }),
+        : {
+            message: prompt,
+            top_k: topK.value,
+            similarity_threshold: similarityThreshold.value,
+            conversation_id: activeConversationID,
+          }),
     });
     if (!response.ok || !response.body) {
       const payload = await response.json().catch(() => null);
@@ -885,8 +891,12 @@ onUnmounted(() => {
           <p v-if="chatMode === 'research'" class="chat-mode-note">协作研究会根据证据多轮检索；本次结果只在当前页面展示，不写入会话历史。</p>
           <p v-else-if="chatMode === 'a2a'" class="chat-mode-note">异步任务会交给后台 Agent 执行；页面会自动跟踪任务状态，完成后展示答案和引用，不写入会话历史。</p>
           <div class="retrieval-controls">
-            <div><strong>检索范围</strong><span>控制每次最多召回的文档片段</span></div>
+            <div><strong>检索范围</strong><span>控制召回数量和证据相关度；距离越小越严格</span></div>
             <label>召回片段数<select v-model.number="topK" :disabled="streaming"><option v-for="value in [3, 5, 8, 12, 20]" :key="value" :value="value">{{ value }} 条</option></select></label>
+            <label v-if="chatMode === 'agent'" class="threshold-control">距离上限
+              <input v-model.number="similarityThreshold" type="range" min="0.30" max="0.90" step="0.05" :disabled="streaming">
+              <output>{{ similarityThreshold.toFixed(2) }}</output>
+            </label>
           </div>
           <template v-if="chatMode !== 'a2a'">
             <div class="conversation-bar">
