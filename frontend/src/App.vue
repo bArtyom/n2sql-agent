@@ -16,6 +16,7 @@ type Source = {
   position: number;
   content: string;
   distance: number;
+  matchType?: "vector" | "keyword" | "hybrid" | string;
 };
 type ChatMessage = {
   role: "user" | "assistant";
@@ -160,6 +161,10 @@ function mergeSources(existing: Source[], incoming: Source[]): Source[] {
 function sourcePreview(content: string): string {
   const normalized = content.replace(/\s+/g, " ").trim();
   return normalized.length > 118 ? `${normalized.slice(0, 118)}…` : normalized;
+}
+
+function matchTypeLabel(matchType?: string): string {
+  return ({ vector: "语义命中", keyword: "关键词命中", hybrid: "双路命中" }[matchType || ""] || "检索命中");
 }
 
 function openSource(source: Source) {
@@ -1026,7 +1031,7 @@ onUnmounted(() => {
                 <div class="source-list">
                   <button v-for="(source, sourceIndex) in message.sources" :key="`${source.documentId}-${source.position}`" class="source-card" type="button" @click="openSource(source)">
                     <span class="source-card-index">{{ String(sourceIndex + 1).padStart(2, "0") }}</span>
-                    <span class="source-card-body"><strong>{{ source.originalFilename || "未命名文档" }}</strong><small>第 {{ source.position + 1 }} 段 · 距离 {{ source.distance.toFixed(2) }}</small><span>{{ sourcePreview(source.content) }}</span></span>
+                    <span class="source-card-body"><strong>{{ source.originalFilename || "未命名文档" }} <em :class="`source-match source-match--${source.matchType || 'unknown'}`">{{ matchTypeLabel(source.matchType) }}</em></strong><small>第 {{ source.position + 1 }} 段 · 距离 {{ source.distance.toFixed(2) }}</small><span>{{ sourcePreview(source.content) }}</span></span>
                     <span class="source-card-arrow">↗</span>
                   </button>
                 </div>
@@ -1078,7 +1083,7 @@ onUnmounted(() => {
         </header>
         <div class="source-panel-meta">
           <strong>{{ selectedSource.originalFilename || "未命名文档" }}</strong>
-          <span>第 {{ selectedSource.position + 1 }} 段 · 检索距离 {{ selectedSource.distance.toFixed(2) }}</span>
+          <span>第 {{ selectedSource.position + 1 }} 段 · {{ matchTypeLabel(selectedSource.matchType) }} · 检索距离 {{ selectedSource.distance.toFixed(2) }}</span>
         </div>
         <div class="source-panel-content"><p>{{ selectedSource.content }}</p></div>
         <div class="source-panel-actions"><button class="source-copy-button" type="button" @click="copySource(selectedSource)">{{ copiedSourceKey === sourceKey(selectedSource) ? "已复制原文" : "复制原文" }}</button></div>

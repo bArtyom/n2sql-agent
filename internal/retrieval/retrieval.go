@@ -119,23 +119,30 @@ func (s *Service) Search(ctx context.Context, knowledgeBaseID int64, query strin
 func mergeResults(vectorResults, keywordResults []Result, limit int) []Result {
 	merged := make([]Result, 0, limit)
 	seen := make(map[string]struct{}, limit)
-	add := func(result Result) {
+	add := func(result Result, matchType string) {
 		key := fmt.Sprintf("%d:%d", result.DocumentID, result.Position)
 		if _, ok := seen[key]; ok {
+			for index := range merged {
+				if fmt.Sprintf("%d:%d", merged[index].DocumentID, merged[index].Position) == key {
+					merged[index].MatchType = "hybrid"
+					break
+				}
+			}
 			return
 		}
+		result.MatchType = matchType
 		seen[key] = struct{}{}
 		merged = append(merged, result)
 	}
 	for index := 0; len(merged) < limit && (index < len(vectorResults) || index < len(keywordResults)); index++ {
 		if index < len(vectorResults) {
-			add(vectorResults[index])
+			add(vectorResults[index], "vector")
 		}
 		if len(merged) >= limit {
 			break
 		}
 		if index < len(keywordResults) {
-			add(keywordResults[index])
+			add(keywordResults[index], "keyword")
 		}
 	}
 	return merged

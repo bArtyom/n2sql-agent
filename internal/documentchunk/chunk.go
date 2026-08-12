@@ -57,6 +57,7 @@ type SearchResult struct {
 	Position         int     `json:"position"`
 	Content          string  `json:"content"`
 	Distance         float64 `json:"distance"`
+	MatchType        string  `json:"matchType,omitempty"`
 }
 
 type PostgresStore struct{ db *sql.DB }
@@ -112,6 +113,7 @@ func (s *PostgresStore) Search(ctx context.Context, knowledgeBaseID int64, embed
 		if err := rows.Scan(&result.DocumentID, &result.OriginalFilename, &result.Position, &result.Content, &result.Distance); err != nil {
 			return nil, fmt.Errorf("scan similar document chunk: %w", err)
 		}
+		result.MatchType = "vector"
 		results = append(results, result)
 	}
 	if err := rows.Err(); err != nil {
@@ -143,6 +145,7 @@ func (s *PostgresStore) SearchKeyword(ctx context.Context, knowledgeBaseID int64
 		if err := rows.Scan(&result.DocumentID, &result.OriginalFilename, &result.Position, &result.Content, &result.Distance); err != nil {
 			return nil, fmt.Errorf("scan keyword document chunk: %w", err)
 		}
+		result.MatchType = "keyword"
 		results = append(results, result)
 	}
 	if err := rows.Err(); err != nil {

@@ -87,7 +87,7 @@ func TestHybridServiceMergesVectorAndKeywordResultsWithoutDuplicates(t *testing.
 	if err != nil {
 		t.Fatalf("Search() error = %v", err)
 	}
-	if len(results) != 2 || results[0].DocumentID != 1 || results[1].DocumentID != 2 {
+	if len(results) != 2 || results[0].DocumentID != 1 || results[1].DocumentID != 2 || results[0].MatchType != "hybrid" || results[1].MatchType != "keyword" {
 		t.Fatalf("hybrid results = %#v, want vector ID 1 and keyword ID 2", results)
 	}
 }
