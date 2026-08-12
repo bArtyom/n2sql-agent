@@ -109,7 +109,7 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("POST /api/knowledge-bases/{id}/multi-agent-chat/stream", handler.NewMultiAgentChatStream(dependencies.MultiAgentStreamingAnswers))
 	}
 	if dependencies.A2AAnswers != nil {
-		a2aHandler := a2a.NewHandlerWithTimeout(dependencies.A2AAnswers, dependencies.A2ATaskTimeout)
+		a2aHandler := a2a.NewHandlerWithTimeoutAndMetrics(dependencies.A2AAnswers, dependencies.A2ATaskTimeout, registry)
 		mux.Handle("GET /.well-known/agent.json", a2aHandler)
 		mux.Handle("POST /api/a2a/tasks", a2aHandler)
 		mux.Handle("GET /api/a2a/tasks/{id}", a2aHandler)

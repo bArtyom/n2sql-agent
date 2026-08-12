@@ -198,4 +198,4 @@ curl -X POST http://localhost:8080/api/a2a/tasks \
   -d '{"knowledge_base_id":1,"message":"这份资料如何启动服务？","top_k":5}'
 ```
 
-任务会经历 `submitted → working → completed`，失败时进入 `failed`。任务数据当前只保存在进程内，服务重启后会丢失；最终答案和引用仍由现有 Multi-Agent Supervisor 生成。
+任务会经历 `submitted → working → completed`，失败时进入 `failed`。任务数据当前只保存在进程内，服务重启后会丢失；最终答案和引用仍由现有 Multi-Agent Supervisor 生成。已有 `/metrics` 会记录 `a2a_tasks_submitted_total`、`a2a_tasks_started_total`、`a2a_tasks_completed_total`、`a2a_tasks_failed_total` 和总耗时。

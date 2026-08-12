@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/a2a"
+	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/multiagent"
 )
 
@@ -168,4 +169,64 @@ func TestHandlerPublishesFailedTaskWithoutInternalError(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("task did not reach failed state")
+}
+
+func TestHandlerRecordsTaskMetrics(t *testing.T) {
+	registry := metrics.New()
+	server := httptest.NewServer(a2a.NewHandlerWithTimeoutAndMetrics(answererStub{
+		response: multiagent.Response{Answer: "完成"},
+	}, time.Second, registry))
+	defer server.Close()
+
+	response, err := server.Client().Post(server.URL+"/api/a2a/tasks", "application/json", strings.NewReader(`{"knowledge_base_id":7,"message":"问题"}`))
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	var task struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&task); err != nil {
+		response.Body.Close()
+		t.Fatalf("decode task: %v", err)
+	}
+	response.Body.Close()
+
+	waitForTask(t, server.Client(), server.URL, task.ID, "completed")
+	metricsResponse := httptest.NewRecorder()
+	registry.Handler().ServeHTTP(metricsResponse, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := metricsResponse.Body.String()
+	for _, want := range []string{
+		"a2a_tasks_submitted_total 1",
+		"a2a_tasks_started_total 1",
+		"a2a_tasks_completed_total 1",
+		"a2a_tasks_failed_total 0",
+		"a2a_task_duration_ms_total ",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics body = %q, want %q", body, want)
+		}
+	}
+}
+
+func waitForTask(t *testing.T, client *http.Client, baseURL, id, wantStatus string) {
+	t.Helper()
+	for attempt := 0; attempt < 100; attempt++ {
+		response, err := client.Get(baseURL + "/api/a2a/tasks/" + id)
+		if err != nil {
+			t.Fatalf("get task: %v", err)
+		}
+		var state struct {
+			Status string `json:"status"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&state); err != nil {
+			response.Body.Close()
+			t.Fatalf("decode state: %v", err)
+		}
+		response.Body.Close()
+		if state.Status == wantStatus {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("task %s did not reach %q", id, wantStatus)
 }
