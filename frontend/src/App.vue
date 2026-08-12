@@ -26,7 +26,14 @@ type ChatMessage = {
   researchEvents?: ResearchEvent[];
 };
 type ResearchEvent = { type: string; round?: number; label: string; detail?: string };
-type ChatMode = "agent" | "research";
+type ChatMode = "agent" | "research" | "a2a";
+type A2ATask = {
+  id: string;
+  status: "submitted" | "working" | "completed" | "failed" | string;
+  created_at?: string;
+  updated_at?: string;
+  error?: string;
+};
 type Conversation = { id: number; knowledgeBaseId: number; title: string; createdAt: string; updatedAt: string };
 type ConversationMessage = { id: number; conversationId: number; role: "user" | "assistant"; content: string; createdAt: string };
 type StreamPayload = {
@@ -85,6 +92,7 @@ const conversationsLoading = ref(false);
 const conversationCreating = ref(false);
 const chatMode = ref<ChatMode>("agent");
 let documentPollTimer: number | undefined;
+let a2aPollingTimer: number | undefined;
 
 const selectedKnowledgeBase = computed(() =>
   knowledgeBases.value.find((item) => item.id === selectedKnowledgeBaseId.value) ?? null,
@@ -343,12 +351,20 @@ async function ensureConversation(title: string): Promise<number> {
 }
 
 function selectKnowledgeBase(id: number) {
+  if (streaming.value) return;
   selectedKnowledgeBaseId.value = id;
   mobileRailOpen.value = false;
   messages.value = [];
   conversationId.value = null;
   void refreshDocuments();
   void loadConversation();
+}
+
+function clearA2APolling() {
+  if (a2aPollingTimer !== undefined) {
+    window.clearTimeout(a2aPollingTimer);
+    a2aPollingTimer = undefined;
+  }
 }
 
 async function createKnowledgeBase() {
@@ -432,9 +448,10 @@ async function askQuestion() {
   const prompt = question.value.trim();
   if (!prompt || !selectedKnowledgeBaseId.value || streaming.value) return;
   const useResearchMode = chatMode.value === "research";
+  const useA2AMode = chatMode.value === "a2a";
   let activeConversationID: number | null = null;
   try {
-    if (!useResearchMode) activeConversationID = await ensureConversation(prompt);
+    if (!useResearchMode && !useA2AMode) activeConversationID = await ensureConversation(prompt);
   } catch (error) {
     showError(error);
     return;
@@ -446,6 +463,10 @@ async function askQuestion() {
   const answerIndex = messages.value.length - 1;
   streaming.value = true;
   try {
+    if (useA2AMode) {
+      await askA2ATask(prompt, answerIndex);
+      return;
+    }
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
@@ -490,6 +511,52 @@ async function askQuestion() {
     showError(error);
   } finally {
     streaming.value = false;
+  }
+}
+
+async function askA2ATask(prompt: string, answerIndex: number) {
+  if (!selectedKnowledgeBaseId.value) throw new Error("请先选择知识库。");
+  const answer = messages.value[answerIndex];
+  if (!answer) throw new Error("无法创建问答结果。");
+
+  const task = await requestJSON<A2ATask>("/api/a2a/tasks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ knowledge_base_id: selectedKnowledgeBaseId.value, message: prompt, top_k: 5 }),
+  });
+  answer.activity = "任务已提交，等待后台 Agent 领取…";
+
+  try {
+    while (true) {
+      const current = await requestJSON<A2ATask>(`/api/a2a/tasks/${encodeURIComponent(task.id)}`);
+      if (current.status === "submitted") {
+        answer.activity = "任务已排队，等待后台 Agent 领取…";
+      } else if (current.status === "working") {
+        answer.activity = "后台 Agent 正在检索并组织答案…";
+      } else if (current.status === "failed") {
+        throw new Error(current.error || "后台 Agent 任务失败。");
+      } else if (current.status === "completed") {
+        const result = await requestJSON<{ answer?: string; sources?: Source[] }>(
+          `/api/a2a/tasks/${encodeURIComponent(task.id)}/result`,
+        );
+        answer.content = typeof result.answer === "string" ? result.answer : "";
+        answer.sources = mergeSources(answer.sources ?? [], parseSources(result.sources));
+        answer.activity = "后台任务已完成";
+        answer.status = "done";
+        return;
+      } else {
+        throw new Error(`后台任务返回了未知状态：${current.status}`);
+      }
+
+      await new Promise<void>((resolve) => {
+        a2aPollingTimer = window.setTimeout(() => {
+          a2aPollingTimer = undefined;
+          resolve();
+        }, 1000);
+      });
+    }
+  } finally {
+    clearA2APolling();
   }
 }
 
@@ -636,7 +703,10 @@ function formatBytes(size: number) {
 }
 
 onMounted(() => void loadKnowledgeBases().then(() => loadConversation()));
-onUnmounted(() => window.clearInterval(documentPollTimer));
+onUnmounted(() => {
+  window.clearInterval(documentPollTimer);
+  clearA2APolling();
+});
 </script>
 
 <template>
@@ -750,7 +820,7 @@ onUnmounted(() => window.clearInterval(documentPollTimer));
         <div class="chat-panel panel-card">
           <div class="panel-heading">
             <div><span class="section-index">02</span><h2>问答台</h2></div>
-            <span class="panel-meta">STREAMING</span>
+            <span class="panel-meta">{{ chatMode === "a2a" ? "ASYNC TASK" : "STREAMING" }}</span>
           </div>
           <div class="chat-intro">
             <span class="chat-spark">✦</span>
@@ -758,34 +828,38 @@ onUnmounted(() => window.clearInterval(documentPollTimer));
             <div class="chat-mode-switch" role="group" aria-label="问答模式">
               <button type="button" :class="{ 'chat-mode--active': chatMode === 'agent' }" :aria-pressed="chatMode === 'agent'" :disabled="streaming" @click="chatMode = 'agent'">标准 Agent</button>
               <button type="button" :class="{ 'chat-mode--active': chatMode === 'research' }" :aria-pressed="chatMode === 'research'" :disabled="streaming" @click="chatMode = 'research'">协作研究</button>
+              <button type="button" :class="{ 'chat-mode--active': chatMode === 'a2a' }" :aria-pressed="chatMode === 'a2a'" :disabled="streaming" @click="chatMode = 'a2a'">异步任务</button>
             </div>
           </div>
           <p v-if="chatMode === 'research'" class="chat-mode-note">协作研究会根据证据多轮检索；本次结果只在当前页面展示，不写入会话历史。</p>
-          <div class="conversation-bar">
-            <div class="conversation-current">
-              <span class="conversation-caption">当前会话</span>
-              <strong>{{ selectedConversation?.title || "还没有会话" }}</strong>
-            </div>
-            <button class="conversation-new" type="button" :disabled="conversationCreating || streaming || !selectedKnowledgeBase" @click="createConversation">
-              {{ conversationCreating ? "创建中…" : "+ 新对话" }}
-            </button>
-          </div>
-          <div v-if="conversations.length" class="conversation-list" aria-label="会话列表">
-              <div
-                v-for="item in conversations"
-                :key="item.id"
-                class="conversation-item"
-                :class="{ 'conversation-item--active': item.id === conversationId }"
-                @click="selectConversation(item.id)"
-              >
-                <span class="conversation-item-title">{{ item.title }}</span>
-                <small>{{ new Date(item.updatedAt).toLocaleDateString("zh-CN") }}</small>
-                <div class="conversation-actions">
-                  <button type="button" aria-label="重命名会话" :disabled="conversationsLoading || streaming" @click.stop="renameConversation(item)">改名</button>
-                  <button type="button" aria-label="删除会话" :disabled="conversationsLoading || streaming" @click.stop="deleteConversation(item)">删</button>
-                </div>
+          <p v-else-if="chatMode === 'a2a'" class="chat-mode-note">异步任务会交给后台 Agent 执行；页面会自动跟踪任务状态，完成后展示答案和引用，不写入会话历史。</p>
+          <template v-if="chatMode !== 'a2a'">
+            <div class="conversation-bar">
+              <div class="conversation-current">
+                <span class="conversation-caption">当前会话</span>
+                <strong>{{ selectedConversation?.title || "还没有会话" }}</strong>
               </div>
-          </div>
+              <button class="conversation-new" type="button" :disabled="conversationCreating || streaming || !selectedKnowledgeBase" @click="createConversation">
+                {{ conversationCreating ? "创建中…" : "+ 新对话" }}
+              </button>
+            </div>
+            <div v-if="conversations.length" class="conversation-list" aria-label="会话列表">
+                <div
+                  v-for="item in conversations"
+                  :key="item.id"
+                  class="conversation-item"
+                  :class="{ 'conversation-item--active': item.id === conversationId }"
+                  @click="selectConversation(item.id)"
+                >
+                  <span class="conversation-item-title">{{ item.title }}</span>
+                  <small>{{ new Date(item.updatedAt).toLocaleDateString("zh-CN") }}</small>
+                  <div class="conversation-actions">
+                    <button type="button" aria-label="重命名会话" :disabled="conversationsLoading || streaming" @click.stop="renameConversation(item)">改名</button>
+                    <button type="button" aria-label="删除会话" :disabled="conversationsLoading || streaming" @click.stop="deleteConversation(item)">删</button>
+                  </div>
+                </div>
+            </div>
+          </template>
           <div class="messages" aria-live="polite">
             <div v-if="!messages.length" class="chat-empty"><span>“</span><p>问一个关于这套资料的问题，<br />让线索自己浮上来。</p></div>
             <article v-for="(message, index) in messages" :key="index" class="message" :class="`message--${message.role}`">
