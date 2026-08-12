@@ -49,6 +49,7 @@ type TaskRequest struct {
 	Message         string  `json:"message"`
 	TopK            int     `json:"top_k,omitempty"`
 	DocumentIDs     []int64 `json:"document_ids,omitempty"`
+	QueryRewrite    bool    `json:"query_rewrite,omitempty"`
 }
 
 type taskView struct {
@@ -119,7 +120,7 @@ func agentCard() map[string]any {
 			"id":          defaultAgentSkill,
 			"name":        "知识库问答",
 			"description": "根据知识库检索结果回答问题，并返回引用来源",
-			"input":       map[string]any{"knowledge_base_id": "integer", "message": "string", "top_k": "integer"},
+			"input":       map[string]any{"knowledge_base_id": "integer", "message": "string", "top_k": "integer", "document_ids": "integer[]", "query_rewrite": "boolean"},
 		}},
 	}
 }
@@ -150,7 +151,7 @@ func (h *Handler) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created, err := h.store.Create(r.Context(), CreateInput{ID: newTaskID(), KnowledgeBaseID: request.KnowledgeBaseID, Message: request.Message, TopK: request.TopK, DocumentIDs: normalizedDocumentIDs})
+	created, err := h.store.Create(r.Context(), CreateInput{ID: newTaskID(), KnowledgeBaseID: request.KnowledgeBaseID, Message: request.Message, TopK: request.TopK, DocumentIDs: normalizedDocumentIDs, QueryRewrite: request.QueryRewrite})
 	if err != nil {
 		if errors.Is(err, ErrTaskNotFound) {
 			h.writeError(w, http.StatusBadRequest, "knowledge base is unavailable")

@@ -261,7 +261,7 @@ func (s *Supervisor) AnswerWithEventsAndSearchOptions(ctx context.Context, knowl
 	}
 	var report ResearchReport
 	var err error
-	if len(options.DocumentIDs) > 0 {
+	if len(options.DocumentIDs) > 0 || options.QueryRewrite {
 		if eventResearcher, ok := s.researcher.(OptionsEventResearcher); ok {
 			report, err = eventResearcher.ResearchWithEventsAndSearchOptions(runContext, knowledgeBaseID, question, topK, options, func(event Event) error {
 				return emitter.emit(event.Type, event.Role, event.Round, event.Data)
@@ -373,7 +373,7 @@ func (r *KnowledgeSearchResearcher) ResearchWithSearchOptions(ctx context.Contex
 	if knowledgeBaseID <= 0 || question == "" || topK < 1 || topK > retrieval.MaxResults {
 		return ResearchReport{}, ErrInvalidRequest
 	}
-	tool, err := agent.NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocuments(r.searcher, knowledgeBaseID, r.maxResultBytes, retrieval.MaxResults, agent.DefaultMaxKnowledgeDistance, options.DocumentIDs)
+	tool, err := agent.NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewrite(r.searcher, knowledgeBaseID, r.maxResultBytes, retrieval.MaxResults, agent.DefaultMaxKnowledgeDistance, options.DocumentIDs, options.QueryRewrite)
 	if err != nil {
 		return ResearchReport{}, fmt.Errorf("create scoped knowledge search tool: %w", err)
 	}
@@ -452,7 +452,7 @@ func (r *AutonomousKnowledgeSearchResearcher) ResearchWithEventsAndSearchOptions
 		return ResearchReport{}, ErrInvalidRequest
 	}
 
-	tool, err := agent.NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocuments(r.searcher, knowledgeBaseID, r.maxResultBytes, retrieval.MaxResults, agent.DefaultMaxKnowledgeDistance, options.DocumentIDs)
+	tool, err := agent.NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewrite(r.searcher, knowledgeBaseID, r.maxResultBytes, retrieval.MaxResults, agent.DefaultMaxKnowledgeDistance, options.DocumentIDs, options.QueryRewrite)
 	if err != nil {
 		return ResearchReport{}, fmt.Errorf("create scoped knowledge search tool: %w", err)
 	}

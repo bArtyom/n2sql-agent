@@ -1,0 +1,2 @@
+ALTER TABLE a2a_tasks
+    ADD COLUMN query_rewrite BOOLEAN NOT NULL DEFAULT FALSE;

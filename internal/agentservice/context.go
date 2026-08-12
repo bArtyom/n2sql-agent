@@ -26,6 +26,7 @@ type ChatRequest struct {
 	TopK                int                   `json:"top_k,omitempty"`
 	SimilarityThreshold float64               `json:"similarity_threshold,omitempty"`
 	DocumentIDs         []int64               `json:"document_ids,omitempty"`
+	QueryRewrite        bool                  `json:"query_rewrite,omitempty"`
 	History             []HistoryMessage      `json:"history,omitempty"`
 	ConversationID      int64                 `json:"conversation_id,omitempty"`
 	CachedSummary       *CachedHistorySummary `json:"-"`

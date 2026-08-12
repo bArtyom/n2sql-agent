@@ -90,6 +90,7 @@ type KnowledgeSearchTool struct {
 	maxResults      int
 	maxDistance     float64
 	documentIDs     []int64
+	queryRewrite    bool
 }
 
 var _ Tool = (*KnowledgeSearchTool)(nil)
@@ -128,6 +129,10 @@ func NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistance(searcher retrie
 // a read-only search tool scoped to one knowledge base and, optionally, a set
 // of documents inside that knowledge base.
 func NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocuments(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxResults int, maxDistance float64, documentIDs []int64) (*KnowledgeSearchTool, error) {
+	return NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewrite(searcher, knowledgeBaseID, maxResultBytes, maxResults, maxDistance, documentIDs, false)
+}
+
+func NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewrite(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxResults int, maxDistance float64, documentIDs []int64, queryRewrite bool) (*KnowledgeSearchTool, error) {
 	if searcher == nil {
 		return nil, ErrKnowledgeSearcherUnavailable
 	}
@@ -154,6 +159,7 @@ func NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocuments(sea
 		maxResults:      maxResults,
 		maxDistance:     maxDistance,
 		documentIDs:     normalizedDocumentIDs,
+		queryRewrite:    queryRewrite,
 	}, nil
 }
 
@@ -225,14 +231,14 @@ func (t *KnowledgeSearchTool) Call(ctx context.Context, raw json.RawMessage) (To
 		results []retrieval.Result
 		err     error
 	)
-	if len(t.documentIDs) == 0 {
+	if len(t.documentIDs) == 0 && !t.queryRewrite {
 		results, err = t.searcher.Search(ctx, input.KnowledgeBaseID, input.Query, input.Limit)
 	} else {
 		filtered, ok := t.searcher.(retrieval.FilteredSearcher)
 		if !ok {
 			return ToolResult{}, retrieval.ErrDocumentFilterUnavailable
 		}
-		results, err = filtered.SearchWithOptions(ctx, input.KnowledgeBaseID, input.Query, input.Limit, retrieval.SearchOptions{DocumentIDs: t.documentIDs})
+		results, err = filtered.SearchWithOptions(ctx, input.KnowledgeBaseID, input.Query, input.Limit, retrieval.SearchOptions{DocumentIDs: t.documentIDs, QueryRewrite: t.queryRewrite})
 	}
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("knowledge search: %w", err)
@@ -377,7 +383,11 @@ func NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistance(searcher re
 }
 
 func NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistanceAndDocuments(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxResults int, maxDistance float64, documentIDs []int64) (*ToolRegistry, error) {
-	tool, err := NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocuments(searcher, knowledgeBaseID, maxResultBytes, maxResults, maxDistance, documentIDs)
+	return NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewrite(searcher, knowledgeBaseID, maxResultBytes, maxResults, maxDistance, documentIDs, false)
+}
+
+func NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewrite(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxResults int, maxDistance float64, documentIDs []int64, queryRewrite bool) (*ToolRegistry, error) {
+	tool, err := NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewrite(searcher, knowledgeBaseID, maxResultBytes, maxResults, maxDistance, documentIDs, queryRewrite)
 	if err != nil {
 		return nil, err
 	}

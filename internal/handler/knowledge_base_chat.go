@@ -25,6 +25,7 @@ type knowledgeBaseChatRequest struct {
 	TopK                int     `json:"topK"`
 	SimilarityThreshold float64 `json:"similarity_threshold,omitempty"`
 	DocumentIDs         []int64 `json:"document_ids,omitempty"`
+	QueryRewrite        bool    `json:"query_rewrite,omitempty"`
 }
 
 func NewKnowledgeBaseChat(answerer rag.Answerer) http.Handler {
@@ -40,13 +41,13 @@ func NewKnowledgeBaseChat(answerer rag.Answerer) http.Handler {
 
 		var response rag.Response
 		var err error
-		if len(request.DocumentIDs) > 0 {
+		if len(request.DocumentIDs) > 0 || request.QueryRewrite {
 			optionsAnswerer, ok := answerer.(rag.OptionsAnswerer)
 			if !ok {
 				writeKnowledgeBaseChatError(w, rag.ErrThresholdUnavailable)
 				return
 			}
-			response, err = optionsAnswerer.AnswerWithSearchOptions(r.Context(), knowledgeBaseID, request.Message, request.TopK, request.SimilarityThreshold, retrieval.SearchOptions{DocumentIDs: request.DocumentIDs})
+			response, err = optionsAnswerer.AnswerWithSearchOptions(r.Context(), knowledgeBaseID, request.Message, request.TopK, request.SimilarityThreshold, retrieval.SearchOptions{DocumentIDs: request.DocumentIDs, QueryRewrite: request.QueryRewrite})
 		} else if request.SimilarityThreshold != 0 {
 			thresholdAnswerer, ok := answerer.(rag.ThresholdAnswerer)
 			if !ok {
@@ -80,6 +81,8 @@ func knowledgeBaseChatError(err error) (string, int) {
 		return "invalid similarity threshold", http.StatusBadRequest
 	case errors.Is(err, rag.ErrThresholdUnavailable):
 		return "similarity threshold is unavailable", http.StatusInternalServerError
+	case errors.Is(err, retrieval.ErrQueryRewriteUnavailable):
+		return "query rewrite is unavailable", http.StatusInternalServerError
 	case errors.Is(err, modelprovider.ErrNotFound):
 		return "model provider not configured", http.StatusNotFound
 	case errors.Is(err, modelruntime.ErrAPIKeyEnvironmentMismatch), errors.Is(err, modelruntime.ErrAPIKeyNotConfigured):

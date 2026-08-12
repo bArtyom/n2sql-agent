@@ -101,6 +101,7 @@ const conversationCreating = ref(false);
 const chatMode = ref<ChatMode>("agent");
 const topK = ref(5);
 const similarityThreshold = ref(0.65);
+const queryRewrite = ref(false);
 const selectedDocumentIDs = ref<number[]>([]);
 const selectedSource = ref<Source | null>(null);
 const copiedMessageIndex = ref<number | null>(null);
@@ -569,12 +570,13 @@ async function askQuestion() {
       method: "POST",
       headers,
       body: JSON.stringify(useResearchMode
-        ? { message: prompt, topK: topK.value, document_ids: selectedDocumentIDs.value }
+        ? { message: prompt, topK: topK.value, document_ids: selectedDocumentIDs.value, query_rewrite: queryRewrite.value }
         : {
             message: prompt,
             top_k: topK.value,
             similarity_threshold: similarityThreshold.value,
             document_ids: selectedDocumentIDs.value,
+            query_rewrite: queryRewrite.value,
             conversation_id: activeConversationID,
           }),
     });
@@ -620,7 +622,7 @@ async function askA2ATask(prompt: string, answerIndex: number) {
   const task = await requestJSON<A2ATask>("/api/a2a/tasks", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ knowledge_base_id: selectedKnowledgeBaseId.value, message: prompt, top_k: topK.value, document_ids: selectedDocumentIDs.value }),
+      body: JSON.stringify({ knowledge_base_id: selectedKnowledgeBaseId.value, message: prompt, top_k: topK.value, document_ids: selectedDocumentIDs.value, query_rewrite: queryRewrite.value }),
   });
   answer.activity = "任务已提交，等待后台 Agent 领取…";
 
@@ -990,6 +992,7 @@ onUnmounted(() => {
           <div class="retrieval-controls">
             <div><strong>检索范围</strong><span>{{ selectedDocumentIDs.length ? `${chatMode === 'research' ? '协作研究' : chatMode === 'a2a' ? '异步任务' : '标准 Agent'} 仅检索 ${selectedDocumentIDs.length} 份已选文档；` : "当前模式检索整个知识库；" }}控制召回数量和证据相关度</span></div>
             <label>召回片段数<select v-model.number="topK" :disabled="streaming"><option v-for="value in [3, 5, 8, 12, 20]" :key="value" :value="value">{{ value }} 条</option></select></label>
+            <label class="rewrite-control"><input v-model="queryRewrite" type="checkbox" :disabled="streaming" /> 多查询改写</label>
             <label v-if="chatMode === 'agent'" class="threshold-control">距离上限
               <input v-model.number="similarityThreshold" type="range" min="0.30" max="0.90" step="0.05" :disabled="streaming">
               <output>{{ similarityThreshold.toFixed(2) }}</output>

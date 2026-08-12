@@ -105,12 +105,12 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 
 	taskContext, cancel := context.WithTimeout(ctx, r.timeout)
 	var response multiagent.Response
-	if len(task.DocumentIDs) > 0 {
+	if len(task.DocumentIDs) > 0 || task.QueryRewrite {
 		optionsAnswerer, ok := r.answerer.(multiagent.OptionsAnswerer)
 		if !ok {
 			err = retrieval.ErrDocumentFilterUnavailable
 		} else {
-			response, err = optionsAnswerer.AnswerWithSearchOptions(taskContext, task.KnowledgeBaseID, task.Message, task.TopK, retrieval.SearchOptions{DocumentIDs: task.DocumentIDs})
+			response, err = optionsAnswerer.AnswerWithSearchOptions(taskContext, task.KnowledgeBaseID, task.Message, task.TopK, retrieval.SearchOptions{DocumentIDs: task.DocumentIDs, QueryRewrite: task.QueryRewrite})
 		}
 	} else {
 		response, err = r.answerer.Answer(taskContext, task.KnowledgeBaseID, task.Message, task.TopK)

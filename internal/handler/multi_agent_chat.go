@@ -30,13 +30,13 @@ func NewMultiAgentChat(answerer multiagent.Answerer) http.Handler {
 		}
 		var response multiagent.Response
 		var err error
-		if len(request.DocumentIDs) > 0 {
+		if len(request.DocumentIDs) > 0 || request.QueryRewrite {
 			optionsAnswerer, available := answerer.(multiagent.OptionsAnswerer)
 			if !available {
 				writeMultiAgentChatError(w, retrieval.ErrDocumentFilterUnavailable)
 				return
 			}
-			response, err = optionsAnswerer.AnswerWithSearchOptions(r.Context(), knowledgeBaseID, request.Message, request.TopK, retrieval.SearchOptions{DocumentIDs: request.DocumentIDs})
+			response, err = optionsAnswerer.AnswerWithSearchOptions(r.Context(), knowledgeBaseID, request.Message, request.TopK, retrieval.SearchOptions{DocumentIDs: request.DocumentIDs, QueryRewrite: request.QueryRewrite})
 		} else {
 			response, err = answerer.Answer(r.Context(), knowledgeBaseID, request.Message, request.TopK)
 		}
@@ -79,12 +79,12 @@ func NewMultiAgentChatStream(answerer multiagent.EventAnswerer) http.Handler {
 			return writeMultiAgentSSEEvent(w, flusher, event)
 		}
 		var err error
-		if len(request.DocumentIDs) > 0 {
+		if len(request.DocumentIDs) > 0 || request.QueryRewrite {
 			optionsAnswerer, available := answerer.(multiagent.OptionsEventAnswerer)
 			if !available {
 				err = retrieval.ErrDocumentFilterUnavailable
 			} else {
-				_, err = optionsAnswerer.AnswerWithEventsAndSearchOptions(r.Context(), knowledgeBaseID, request.Message, request.TopK, retrieval.SearchOptions{DocumentIDs: request.DocumentIDs}, emit)
+				_, err = optionsAnswerer.AnswerWithEventsAndSearchOptions(r.Context(), knowledgeBaseID, request.Message, request.TopK, retrieval.SearchOptions{DocumentIDs: request.DocumentIDs, QueryRewrite: request.QueryRewrite}, emit)
 			}
 		} else {
 			_, err = answerer.AnswerWithEvents(r.Context(), knowledgeBaseID, request.Message, request.TopK, emit)
@@ -134,6 +134,8 @@ func multiAgentChatError(err error) (string, int) {
 		return "invalid multi-agent document filter", http.StatusBadRequest
 	case errors.Is(err, retrieval.ErrDocumentFilterUnavailable):
 		return "multi-agent document filter is unavailable", http.StatusInternalServerError
+	case errors.Is(err, retrieval.ErrQueryRewriteUnavailable):
+		return "multi-agent query rewrite is unavailable", http.StatusInternalServerError
 	case errors.Is(err, multiagent.ErrInvalidResearchReport), errors.Is(err, multiagent.ErrEmptyFinalAnswer):
 		return "multi-agent answer was invalid", http.StatusBadGateway
 	case errors.Is(err, context.DeadlineExceeded):

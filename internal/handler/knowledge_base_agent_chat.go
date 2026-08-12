@@ -176,7 +176,8 @@ func idempotencyRequestHash(knowledgeBaseID int64, request agentservice.ChatRequ
 		TopK            int     `json:"top_k"`
 		Threshold       float64 `json:"similarity_threshold"`
 		DocumentIDs     []int64 `json:"document_ids"`
-	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message, TopK: request.TopK, Threshold: request.SimilarityThreshold, DocumentIDs: request.DocumentIDs})
+		QueryRewrite    bool    `json:"query_rewrite"`
+	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message, TopK: request.TopK, Threshold: request.SimilarityThreshold, DocumentIDs: request.DocumentIDs, QueryRewrite: request.QueryRewrite})
 	if err != nil {
 		return "", err
 	}

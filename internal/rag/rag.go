@@ -153,7 +153,7 @@ func (s *Service) retrieveSources(ctx context.Context, knowledgeBaseID int64, qu
 		sources []retrieval.Result
 		err     error
 	)
-	if len(options.DocumentIDs) == 0 {
+	if len(options.DocumentIDs) == 0 && !options.QueryRewrite {
 		sources, err = s.search.Search(ctx, knowledgeBaseID, question, topK)
 	} else {
 		filtered, ok := s.search.(retrieval.FilteredSearcher)

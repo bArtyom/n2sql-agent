@@ -31,9 +31,10 @@ func NewKnowledgeBaseSearch(searcher retrieval.Searcher) http.Handler {
 		}
 
 		var request struct {
-			Query       string  `json:"query"`
-			Limit       int     `json:"limit"`
-			DocumentIDs []int64 `json:"document_ids,omitempty"`
+			Query        string  `json:"query"`
+			Limit        int     `json:"limit"`
+			DocumentIDs  []int64 `json:"document_ids,omitempty"`
+			QueryRewrite bool    `json:"query_rewrite,omitempty"`
 		}
 		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSearchBody))
 		decoder.DisallowUnknownFields()
@@ -64,7 +65,7 @@ func NewKnowledgeBaseSearch(searcher retrieval.Searcher) http.Handler {
 		}
 
 		var results []retrieval.Result
-		if len(normalizedDocumentIDs) == 0 {
+		if len(normalizedDocumentIDs) == 0 && !request.QueryRewrite {
 			results, err = searcher.Search(r.Context(), knowledgeBaseID, request.Query, request.Limit)
 		} else {
 			filtered, ok := searcher.(retrieval.FilteredSearcher)
@@ -72,7 +73,7 @@ func NewKnowledgeBaseSearch(searcher retrieval.Searcher) http.Handler {
 				writeSearchError(w, retrieval.ErrDocumentFilterUnavailable)
 				return
 			}
-			results, err = filtered.SearchWithOptions(r.Context(), knowledgeBaseID, request.Query, request.Limit, retrieval.SearchOptions{DocumentIDs: normalizedDocumentIDs})
+			results, err = filtered.SearchWithOptions(r.Context(), knowledgeBaseID, request.Query, request.Limit, retrieval.SearchOptions{DocumentIDs: normalizedDocumentIDs, QueryRewrite: request.QueryRewrite})
 		}
 		if err != nil {
 			writeSearchError(w, err)
@@ -88,6 +89,8 @@ func writeSearchError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, retrieval.ErrInvalidKnowledgeBase), errors.Is(err, retrieval.ErrInvalidQuery), errors.Is(err, retrieval.ErrInvalidLimit), errors.Is(err, retrieval.ErrInvalidDocumentIDs):
 		http.Error(w, `{"error":"invalid search request"}`, http.StatusBadRequest)
+	case errors.Is(err, retrieval.ErrQueryRewriteUnavailable):
+		http.Error(w, `{"error":"query rewrite is unavailable"}`, http.StatusInternalServerError)
 	case errors.Is(err, modelprovider.ErrNotFound):
 		http.Error(w, `{"error":"model provider not configured"}`, http.StatusNotFound)
 	case errors.Is(err, modelruntime.ErrAPIKeyEnvironmentMismatch), errors.Is(err, modelruntime.ErrAPIKeyNotConfigured):

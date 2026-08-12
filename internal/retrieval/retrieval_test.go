@@ -25,6 +25,36 @@ func (s *embeddingStub) Embed(_ context.Context, input []string) (modelclient.Em
 	}, nil
 }
 
+type recordingEmbedder struct {
+	queries []string
+}
+
+func (s *recordingEmbedder) Embed(_ context.Context, input []string) (modelclient.EmbeddingResponse, error) {
+	s.queries = append(s.queries, input...)
+	return modelclient.EmbeddingResponse{Data: []modelclient.Embedding{{Index: 0, Vector: []float32{0.1, 0.2}}}}, nil
+}
+
+type queryRewriterStub struct {
+	queries []string
+}
+
+func (s *queryRewriterStub) Rewrite(_ context.Context, query string, maxVariants int) ([]string, error) {
+	s.queries = append(s.queries, query)
+	if maxVariants != retrieval.MaxQueryVariants {
+		return nil, errors.New("unexpected rewrite limit")
+	}
+	return []string{"启动服务命令", "启动服务命令"}, nil
+}
+
+type multiQueryChunkStore struct {
+	queries int
+}
+
+func (s *multiQueryChunkStore) Search(_ context.Context, _ int64, _ []float32, _ int) ([]retrieval.Result, error) {
+	s.queries++
+	return []retrieval.Result{{DocumentID: int64(s.queries), Position: 0, Content: "候选"}}, nil
+}
+
 type usageObserverStub struct {
 	embedding usage.TokenUsage
 }
@@ -118,6 +148,32 @@ func TestServicePassesNormalizedDocumentFilter(t *testing.T) {
 	}
 	if !reflect.DeepEqual(store.documentIDs, []int64{3, 9}) {
 		t.Fatalf("document IDs = %#v, want [3 9]", store.documentIDs)
+	}
+}
+
+func TestServiceExpandsAndDeduplicatesQueryRewriteVariants(t *testing.T) {
+	embedder := &recordingEmbedder{}
+	rewriter := &queryRewriterStub{}
+	chunks := &multiQueryChunkStore{}
+	service := retrieval.NewHybridServiceWithRerankerAndRewriter(embedder, chunks, nil, nil, rewriter)
+
+	results, err := service.SearchWithOptions(context.Background(), 7, "如何启动服务", 5, retrieval.SearchOptions{QueryRewrite: true})
+	if err != nil {
+		t.Fatalf("SearchWithOptions() error = %v", err)
+	}
+	if len(rewriter.queries) != 1 || len(embedder.queries) != 2 || chunks.queries != 2 {
+		t.Fatalf("rewrite calls=%d embedded=%v chunk queries=%d, want one rewrite and two searches", len(rewriter.queries), embedder.queries, chunks.queries)
+	}
+	if len(results) != 2 {
+		t.Fatalf("results = %#v, want two unique candidates", results)
+	}
+}
+
+func TestServiceRejectsRewriteWhenRewriterIsUnavailable(t *testing.T) {
+	service := retrieval.NewService(&embeddingStub{}, &chunkStoreStub{})
+	_, err := service.SearchWithOptions(context.Background(), 7, "问题", 5, retrieval.SearchOptions{QueryRewrite: true})
+	if !errors.Is(err, retrieval.ErrQueryRewriteUnavailable) {
+		t.Fatalf("SearchWithOptions() error = %v, want ErrQueryRewriteUnavailable", err)
 	}
 }
 
