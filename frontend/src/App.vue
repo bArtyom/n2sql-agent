@@ -96,6 +96,7 @@ const conversationCreating = ref(false);
 const chatMode = ref<ChatMode>("agent");
 const topK = ref(5);
 const similarityThreshold = ref(0.65);
+const selectedSource = ref<Source | null>(null);
 let documentPollTimer: number | undefined;
 let a2aPollingTimer: number | undefined;
 
@@ -151,6 +152,23 @@ function mergeSources(existing: Source[], incoming: Source[]): Source[] {
     if (!merged.has(key)) merged.set(key, source);
   }
   return [...merged.values()];
+}
+
+function sourcePreview(content: string): string {
+  const normalized = content.replace(/\s+/g, " ").trim();
+  return normalized.length > 118 ? `${normalized.slice(0, 118)}…` : normalized;
+}
+
+function openSource(source: Source) {
+  selectedSource.value = source;
+}
+
+function closeSource() {
+  selectedSource.value = null;
+}
+
+function closeSourceOnEscape(event: KeyboardEvent) {
+  if (event.key === "Escape") closeSource();
 }
 
 async function openProviderSettings() {
@@ -358,6 +376,7 @@ async function ensureConversation(title: string): Promise<number> {
 function selectKnowledgeBase(id: number) {
   if (streaming.value) return;
   selectedKnowledgeBaseId.value = id;
+  closeSource();
   mobileRailOpen.value = false;
   messages.value = [];
   conversationId.value = null;
@@ -390,6 +409,7 @@ async function createKnowledgeBase() {
     newKnowledgeBaseName.value = "";
     newKnowledgeBaseDescription.value = "";
     messages.value = [];
+    closeSource();
     conversations.value = [];
     conversationId.value = null;
     documents.value = [];
@@ -462,6 +482,7 @@ async function askQuestion() {
     return;
   }
   question.value = "";
+  closeSource();
   messages.value.push({ role: "user", content: prompt });
   const answer: ChatMessage = { role: "assistant", content: "", sources: [], status: "streaming" };
   messages.value.push(answer);
@@ -759,10 +780,14 @@ function formatBytes(size: number) {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
-onMounted(() => void loadKnowledgeBases().then(() => loadConversation()));
+onMounted(() => {
+  window.addEventListener("keydown", closeSourceOnEscape);
+  void loadKnowledgeBases().then(() => loadConversation());
+});
 onUnmounted(() => {
   window.clearInterval(documentPollTimer);
   clearA2APolling();
+  window.removeEventListener("keydown", closeSourceOnEscape);
 });
 </script>
 
@@ -954,11 +979,14 @@ onUnmounted(() => {
                 <span v-else>{{ message.content }}</span>
               </div>
               <div v-if="message.role === 'assistant' && message.sources?.length" class="sources">
-                <span class="sources-label">引用 {{ message.sources.length }}</span>
-                <details v-for="source in message.sources" :key="`${source.documentId}-${source.position}`">
-                  <summary>{{ source.originalFilename || "未命名文档" }} · 第 {{ source.position + 1 }} 段</summary>
-                  <p>{{ source.content }}</p>
-                </details>
+                <div class="sources-heading"><span class="sources-label">引用 {{ message.sources.length }}</span><span>点击查看原文</span></div>
+                <div class="source-list">
+                  <button v-for="(source, sourceIndex) in message.sources" :key="`${source.documentId}-${source.position}`" class="source-card" type="button" @click="openSource(source)">
+                    <span class="source-card-index">{{ String(sourceIndex + 1).padStart(2, "0") }}</span>
+                    <span class="source-card-body"><strong>{{ source.originalFilename || "未命名文档" }}</strong><small>第 {{ source.position + 1 }} 段 · 距离 {{ source.distance.toFixed(2) }}</small><span>{{ sourcePreview(source.content) }}</span></span>
+                    <span class="source-card-arrow">↗</span>
+                  </button>
+                </div>
               </div>
             </article>
           </div>
@@ -997,6 +1025,21 @@ onUnmounted(() => {
           <div class="settings-actions"><button class="settings-secondary" type="button" :disabled="providerTesting || providerSaving" @click="testProviderConnection">{{ providerTesting ? "测试中…" : "测试连接" }}</button><button class="settings-primary" type="submit" :disabled="providerSaving || providerTesting">{{ providerSaving ? "保存中…" : "保存配置" }}</button></div>
         </form>
       </section>
+    </div>
+
+    <div v-if="selectedSource" class="source-backdrop" @click.self="closeSource">
+      <aside class="source-panel" role="dialog" aria-modal="true" aria-labelledby="source-panel-title">
+        <header class="source-panel-header">
+          <div><p class="eyebrow">SOURCE {{ String(selectedSource.position + 1).padStart(2, "0") }}</p><h2 id="source-panel-title">原文片段</h2></div>
+          <button class="settings-close" type="button" aria-label="关闭引用详情" @click="closeSource">×</button>
+        </header>
+        <div class="source-panel-meta">
+          <strong>{{ selectedSource.originalFilename || "未命名文档" }}</strong>
+          <span>第 {{ selectedSource.position + 1 }} 段 · 检索距离 {{ selectedSource.distance.toFixed(2) }}</span>
+        </div>
+        <div class="source-panel-content"><p>{{ selectedSource.content }}</p></div>
+        <p class="source-panel-note">这段内容来自知识库检索结果，仅作为回答依据展示，不会被当作操作指令执行。</p>
+      </aside>
     </div>
   </div>
 </template>
