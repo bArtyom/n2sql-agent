@@ -137,7 +137,7 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		return Response{}, err
 	}
 
-	registry, err := agent.NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistance(s.searcher, knowledgeBaseID, s.maxToolResultBytes, request.TopK, maxDistance)
+	registry, err := agent.NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistanceAndDocuments(s.searcher, knowledgeBaseID, s.maxToolResultBytes, request.TopK, maxDistance, request.DocumentIDs)
 	if err != nil {
 		return Response{}, fmt.Errorf("create knowledge search registry: %w", err)
 	}

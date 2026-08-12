@@ -79,6 +79,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus
 .upload-shortcut { margin-left: auto; color: #a9b5ac !important; font-size: 10px; }
 .document-list { margin: 10px 20px; padding: 0; list-style: none; }
 .document-row { display: flex; min-height: 66px; align-items: center; gap: 12px; border-bottom: 1px solid #eef0e9; }
+.document-select { display: grid; width: 16px; height: 16px; place-items: center; flex: 0 0 auto; }
+.document-select input { width: 13px; height: 13px; accent-color: #527d68; }
 .file-icon { display: grid; width: 34px; height: 38px; place-items: center; color: #a96d36; background: #fbebd8; font-size: 9px; font-weight: 800; }
 .document-copy { min-width: 0; flex: 1; }
 .document-copy strong, .document-copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

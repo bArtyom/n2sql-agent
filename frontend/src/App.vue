@@ -101,6 +101,7 @@ const conversationCreating = ref(false);
 const chatMode = ref<ChatMode>("agent");
 const topK = ref(5);
 const similarityThreshold = ref(0.65);
+const selectedDocumentIDs = ref<number[]>([]);
 const selectedSource = ref<Source | null>(null);
 const copiedMessageIndex = ref<number | null>(null);
 const copiedSourceKey = ref<string | null>(null);
@@ -193,6 +194,13 @@ function closeSourceOnEscape(event: KeyboardEvent) {
 
 function sourceKey(source: Source): string {
   return `${source.documentId}-${source.position}`;
+}
+
+function toggleDocument(documentID: number) {
+  if (chatMode.value !== "agent") return;
+  selectedDocumentIDs.value = selectedDocumentIDs.value.includes(documentID)
+    ? selectedDocumentIDs.value.filter((id) => id !== documentID)
+    : [...selectedDocumentIDs.value, documentID];
 }
 
 async function copyText(value: string): Promise<boolean> {
@@ -431,7 +439,8 @@ async function ensureConversation(title: string): Promise<number> {
 
 function selectKnowledgeBase(id: number) {
   if (streaming.value) return;
-  selectedKnowledgeBaseId.value = id;
+	selectedKnowledgeBaseId.value = id;
+	selectedDocumentIDs.value = [];
   closeSource();
   mobileRailOpen.value = false;
   messages.value = [];
@@ -461,7 +470,8 @@ async function createKnowledgeBase() {
       body: JSON.stringify({ name, description: newKnowledgeBaseDescription.value.trim() }),
     });
     knowledgeBases.value = [...knowledgeBases.value, created];
-    selectedKnowledgeBaseId.value = created.id;
+		selectedKnowledgeBaseId.value = created.id;
+		selectedDocumentIDs.value = [];
     newKnowledgeBaseName.value = "";
     newKnowledgeBaseDescription.value = "";
     messages.value = [];
@@ -564,6 +574,7 @@ async function askQuestion() {
             message: prompt,
             top_k: topK.value,
             similarity_threshold: similarityThreshold.value,
+            document_ids: selectedDocumentIDs.value,
             conversation_id: activeConversationID,
           }),
     });
@@ -949,6 +960,10 @@ onUnmounted(() => {
           </div>
           <ul v-else class="document-list">
             <li v-for="document in documents" :key="document.id" class="document-row">
+              <label v-if="document.processingStatus === 'succeeded'" class="document-select" :title="selectedDocumentIDs.includes(document.id) ? '取消限定此文档' : '只检索此文档'">
+                <input type="checkbox" :checked="selectedDocumentIDs.includes(document.id)" :disabled="streaming || chatMode !== 'agent'" @change="toggleDocument(document.id)" />
+                <span class="visually-hidden">选择 {{ document.originalFilename }}</span>
+              </label>
               <span class="file-icon">{{ document.contentType === "application/pdf" ? "PDF" : "TXT" }}</span>
               <div class="document-copy"><strong>{{ document.originalFilename }}</strong><span>{{ formatBytes(document.sizeBytes) }} · #{{ document.id }}</span></div>
               <span class="processing-status" :class="`processing-status--${document.processingStatus}`"><i />{{ statusLabel(document.processingStatus) }}</span>
@@ -973,7 +988,7 @@ onUnmounted(() => {
           <p v-if="chatMode === 'research'" class="chat-mode-note">协作研究会根据证据多轮检索；本次结果只在当前页面展示，不写入会话历史。</p>
           <p v-else-if="chatMode === 'a2a'" class="chat-mode-note">异步任务会交给后台 Agent 执行；页面会自动跟踪任务状态，完成后展示答案和引用，不写入会话历史。</p>
           <div class="retrieval-controls">
-            <div><strong>检索范围</strong><span>控制召回数量和证据相关度；距离越小越严格</span></div>
+            <div><strong>检索范围</strong><span>{{ chatMode === 'agent' && selectedDocumentIDs.length ? `标准 Agent 仅检索 ${selectedDocumentIDs.length} 份已选文档；` : "当前模式检索整个知识库；" }}控制召回数量和证据相关度</span></div>
             <label>召回片段数<select v-model.number="topK" :disabled="streaming"><option v-for="value in [3, 5, 8, 12, 20]" :key="value" :value="value">{{ value }} 条</option></select></label>
             <label v-if="chatMode === 'agent'" class="threshold-control">距离上限
               <input v-model.number="similarityThreshold" type="range" min="0.30" max="0.90" step="0.05" :disabled="streaming">

@@ -3,6 +3,7 @@ package retrieval_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -38,6 +39,19 @@ type chunkStoreStub struct {
 	knowledgeBaseID int64
 	embedding       []float32
 	limit           int
+}
+
+type filteredChunkStoreStub struct {
+	documentIDs []int64
+}
+
+func (s *filteredChunkStoreStub) Search(context.Context, int64, []float32, int) ([]retrieval.Result, error) {
+	return nil, nil
+}
+
+func (s *filteredChunkStoreStub) SearchWithDocuments(_ context.Context, _ int64, _ []float32, _ int, documentIDs []int64) ([]retrieval.Result, error) {
+	s.documentIDs = append([]int64(nil), documentIDs...)
+	return []retrieval.Result{{DocumentID: documentIDs[0], Position: 0, Content: "范围内资料", Distance: 0.1}}, nil
 }
 
 type hybridChunkStoreStub struct{}
@@ -88,6 +102,22 @@ func TestServiceEmbedsQueryAndSearchesKnowledgeBase(t *testing.T) {
 	}
 	if store.knowledgeBaseID != 7 || store.limit != 5 || len(store.embedding) != 2 || store.embedding[1] != 0.2 {
 		t.Fatalf("search arguments = %#v", store)
+	}
+}
+
+func TestServicePassesNormalizedDocumentFilter(t *testing.T) {
+	store := &filteredChunkStoreStub{}
+	service := retrieval.NewService(&embeddingStub{}, store)
+
+	results, err := service.SearchWithOptions(context.Background(), 7, "问题", 5, retrieval.SearchOptions{DocumentIDs: []int64{9, 3, 9}})
+	if err != nil {
+		t.Fatalf("SearchWithOptions() error = %v", err)
+	}
+	if len(results) != 1 || results[0].DocumentID != 3 {
+		t.Fatalf("results = %#v", results)
+	}
+	if !reflect.DeepEqual(store.documentIDs, []int64{3, 9}) {
+		t.Fatalf("document IDs = %#v, want [3 9]", store.documentIDs)
 	}
 }
 

@@ -48,6 +48,10 @@ type ThresholdAnswerer interface {
 	AnswerWithThreshold(context.Context, int64, string, int, float64) (Response, error)
 }
 
+type OptionsAnswerer interface {
+	AnswerWithSearchOptions(context.Context, int64, string, int, float64, retrieval.SearchOptions) (Response, error)
+}
+
 type StreamEvent struct {
 	Type    string             `json:"type"`
 	Delta   string             `json:"delta,omitempty"`
@@ -62,6 +66,10 @@ type ThresholdStreamAnswerer interface {
 	StreamWithThreshold(context.Context, int64, string, int, float64, func(StreamEvent) error) error
 }
 
+type OptionsStreamAnswerer interface {
+	StreamWithSearchOptions(context.Context, int64, string, int, float64, retrieval.SearchOptions, func(StreamEvent) error) error
+}
+
 type Service struct {
 	search Searcher
 	chat   ChatRunner
@@ -72,18 +80,22 @@ func NewService(search Searcher, chat ChatRunner) *Service {
 }
 
 func (s *Service) Answer(ctx context.Context, knowledgeBaseID int64, question string, topK int) (Response, error) {
-	return s.answer(ctx, knowledgeBaseID, question, topK, retrieval.DefaultMaxDistance)
+	return s.answer(ctx, knowledgeBaseID, question, topK, retrieval.DefaultMaxDistance, retrieval.SearchOptions{})
 }
 
 func (s *Service) AnswerWithThreshold(ctx context.Context, knowledgeBaseID int64, question string, topK int, maxDistance float64) (Response, error) {
-	return s.answer(ctx, knowledgeBaseID, question, topK, maxDistance)
+	return s.answer(ctx, knowledgeBaseID, question, topK, maxDistance, retrieval.SearchOptions{})
 }
 
-func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, question string, topK int, maxDistance float64) (Response, error) {
+func (s *Service) AnswerWithSearchOptions(ctx context.Context, knowledgeBaseID int64, question string, topK int, maxDistance float64, options retrieval.SearchOptions) (Response, error) {
+	return s.answer(ctx, knowledgeBaseID, question, topK, maxDistance, options)
+}
+
+func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, question string, topK int, maxDistance float64, options retrieval.SearchOptions) (Response, error) {
 	if len(question) > MaxQuestionBytes {
 		return Response{}, errors.New("chat question is too large")
 	}
-	sources, err := s.retrieveSources(ctx, knowledgeBaseID, question, topK, maxDistance)
+	sources, err := s.retrieveSources(ctx, knowledgeBaseID, question, topK, maxDistance, options)
 	if err != nil {
 		return Response{}, err
 	}
@@ -99,14 +111,18 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, question st
 }
 
 func (s *Service) Stream(ctx context.Context, knowledgeBaseID int64, question string, topK int, emit func(StreamEvent) error) error {
-	return s.stream(ctx, knowledgeBaseID, question, topK, retrieval.DefaultMaxDistance, emit)
+	return s.stream(ctx, knowledgeBaseID, question, topK, retrieval.DefaultMaxDistance, retrieval.SearchOptions{}, emit)
 }
 
 func (s *Service) StreamWithThreshold(ctx context.Context, knowledgeBaseID int64, question string, topK int, maxDistance float64, emit func(StreamEvent) error) error {
-	return s.stream(ctx, knowledgeBaseID, question, topK, maxDistance, emit)
+	return s.stream(ctx, knowledgeBaseID, question, topK, maxDistance, retrieval.SearchOptions{}, emit)
 }
 
-func (s *Service) stream(ctx context.Context, knowledgeBaseID int64, question string, topK int, maxDistance float64, emit func(StreamEvent) error) error {
+func (s *Service) StreamWithSearchOptions(ctx context.Context, knowledgeBaseID int64, question string, topK int, maxDistance float64, options retrieval.SearchOptions, emit func(StreamEvent) error) error {
+	return s.stream(ctx, knowledgeBaseID, question, topK, maxDistance, options, emit)
+}
+
+func (s *Service) stream(ctx context.Context, knowledgeBaseID int64, question string, topK int, maxDistance float64, options retrieval.SearchOptions, emit func(StreamEvent) error) error {
 	if len(question) > MaxQuestionBytes {
 		return errors.New("chat question is too large")
 	}
@@ -117,7 +133,7 @@ func (s *Service) stream(ctx context.Context, knowledgeBaseID int64, question st
 	if !ok {
 		return ErrStreamingUnavailable
 	}
-	sources, err := s.retrieveSources(ctx, knowledgeBaseID, question, topK, maxDistance)
+	sources, err := s.retrieveSources(ctx, knowledgeBaseID, question, topK, maxDistance, options)
 	if err != nil {
 		return err
 	}
@@ -132,8 +148,20 @@ func (s *Service) stream(ctx context.Context, knowledgeBaseID int64, question st
 	return nil
 }
 
-func (s *Service) retrieveSources(ctx context.Context, knowledgeBaseID int64, question string, topK int, maxDistance float64) ([]retrieval.Result, error) {
-	sources, err := s.search.Search(ctx, knowledgeBaseID, question, topK)
+func (s *Service) retrieveSources(ctx context.Context, knowledgeBaseID int64, question string, topK int, maxDistance float64, options retrieval.SearchOptions) ([]retrieval.Result, error) {
+	var (
+		sources []retrieval.Result
+		err     error
+	)
+	if len(options.DocumentIDs) == 0 {
+		sources, err = s.search.Search(ctx, knowledgeBaseID, question, topK)
+	} else {
+		filtered, ok := s.search.(retrieval.FilteredSearcher)
+		if !ok {
+			return nil, retrieval.ErrDocumentFilterUnavailable
+		}
+		sources, err = filtered.SearchWithOptions(ctx, knowledgeBaseID, question, topK, options)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("retrieve answer sources: %w", err)
 	}

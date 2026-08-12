@@ -175,7 +175,8 @@ func idempotencyRequestHash(knowledgeBaseID int64, request agentservice.ChatRequ
 		Message         string  `json:"message"`
 		TopK            int     `json:"top_k"`
 		Threshold       float64 `json:"similarity_threshold"`
-	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message, TopK: request.TopK, Threshold: request.SimilarityThreshold})
+		DocumentIDs     []int64 `json:"document_ids"`
+	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message, TopK: request.TopK, Threshold: request.SimilarityThreshold, DocumentIDs: request.DocumentIDs})
 	if err != nil {
 		return "", err
 	}
@@ -225,6 +226,12 @@ func decodeKnowledgeBaseAgentChatRequest(w http.ResponseWriter, r *http.Request,
 			return 0, agentservice.ChatRequest{}, false
 		}
 	}
+	normalizedDocumentIDs, err := retrieval.NormalizeDocumentIDs(request.DocumentIDs)
+	if err != nil {
+		http.Error(w, `{"error":"invalid agent chat document_ids"}`, http.StatusBadRequest)
+		return 0, agentservice.ChatRequest{}, false
+	}
+	request.DocumentIDs = normalizedDocumentIDs
 	for index := range request.History {
 		if request.History[index].Role != "user" && request.History[index].Role != "assistant" {
 			http.Error(w, `{"error":"invalid agent chat history"}`, http.StatusBadRequest)
@@ -257,6 +264,8 @@ func knowledgeBaseAgentChatError(err error) (string, int) {
 	switch {
 	case errors.Is(err, agentservice.ErrInvalidRequest):
 		return "invalid agent chat request", http.StatusBadRequest
+	case errors.Is(err, retrieval.ErrInvalidDocumentIDs):
+		return "invalid agent chat document filter", http.StatusBadRequest
 	case errors.Is(err, conversation.ErrInvalidConversation), errors.Is(err, conversation.ErrInvalidKnowledgeBase), errors.Is(err, conversation.ErrInvalidMessage), errors.Is(err, conversation.ErrInvalidIdempotencyKey):
 		return "invalid conversation request", http.StatusBadRequest
 	case errors.Is(err, conversation.ErrIdempotencyConflict):

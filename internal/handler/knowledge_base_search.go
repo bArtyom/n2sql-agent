@@ -31,8 +31,9 @@ func NewKnowledgeBaseSearch(searcher retrieval.Searcher) http.Handler {
 		}
 
 		var request struct {
-			Query string `json:"query"`
-			Limit int    `json:"limit"`
+			Query       string  `json:"query"`
+			Limit       int     `json:"limit"`
+			DocumentIDs []int64 `json:"document_ids,omitempty"`
 		}
 		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSearchBody))
 		decoder.DisallowUnknownFields()
@@ -56,8 +57,23 @@ func NewKnowledgeBaseSearch(searcher retrieval.Searcher) http.Handler {
 			http.Error(w, `{"error":"invalid search limit"}`, http.StatusBadRequest)
 			return
 		}
+		normalizedDocumentIDs, err := retrieval.NormalizeDocumentIDs(request.DocumentIDs)
+		if err != nil {
+			http.Error(w, `{"error":"invalid search document_ids"}`, http.StatusBadRequest)
+			return
+		}
 
-		results, err := searcher.Search(r.Context(), knowledgeBaseID, request.Query, request.Limit)
+		var results []retrieval.Result
+		if len(normalizedDocumentIDs) == 0 {
+			results, err = searcher.Search(r.Context(), knowledgeBaseID, request.Query, request.Limit)
+		} else {
+			filtered, ok := searcher.(retrieval.FilteredSearcher)
+			if !ok {
+				writeSearchError(w, retrieval.ErrDocumentFilterUnavailable)
+				return
+			}
+			results, err = filtered.SearchWithOptions(r.Context(), knowledgeBaseID, request.Query, request.Limit, retrieval.SearchOptions{DocumentIDs: normalizedDocumentIDs})
+		}
 		if err != nil {
 			writeSearchError(w, err)
 			return
@@ -70,7 +86,7 @@ func NewKnowledgeBaseSearch(searcher retrieval.Searcher) http.Handler {
 
 func writeSearchError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, retrieval.ErrInvalidKnowledgeBase), errors.Is(err, retrieval.ErrInvalidQuery), errors.Is(err, retrieval.ErrInvalidLimit):
+	case errors.Is(err, retrieval.ErrInvalidKnowledgeBase), errors.Is(err, retrieval.ErrInvalidQuery), errors.Is(err, retrieval.ErrInvalidLimit), errors.Is(err, retrieval.ErrInvalidDocumentIDs):
 		http.Error(w, `{"error":"invalid search request"}`, http.StatusBadRequest)
 	case errors.Is(err, modelprovider.ErrNotFound):
 		http.Error(w, `{"error":"model provider not configured"}`, http.StatusNotFound)

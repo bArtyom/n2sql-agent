@@ -24,6 +24,7 @@ type knowledgeBaseChatRequest struct {
 	Message             string  `json:"message"`
 	TopK                int     `json:"topK"`
 	SimilarityThreshold float64 `json:"similarity_threshold,omitempty"`
+	DocumentIDs         []int64 `json:"document_ids,omitempty"`
 }
 
 func NewKnowledgeBaseChat(answerer rag.Answerer) http.Handler {
@@ -39,7 +40,14 @@ func NewKnowledgeBaseChat(answerer rag.Answerer) http.Handler {
 
 		var response rag.Response
 		var err error
-		if request.SimilarityThreshold != 0 {
+		if len(request.DocumentIDs) > 0 {
+			optionsAnswerer, ok := answerer.(rag.OptionsAnswerer)
+			if !ok {
+				writeKnowledgeBaseChatError(w, rag.ErrThresholdUnavailable)
+				return
+			}
+			response, err = optionsAnswerer.AnswerWithSearchOptions(r.Context(), knowledgeBaseID, request.Message, request.TopK, request.SimilarityThreshold, retrieval.SearchOptions{DocumentIDs: request.DocumentIDs})
+		} else if request.SimilarityThreshold != 0 {
 			thresholdAnswerer, ok := answerer.(rag.ThresholdAnswerer)
 			if !ok {
 				writeKnowledgeBaseChatError(w, rag.ErrThresholdUnavailable)
@@ -66,7 +74,7 @@ func knowledgeBaseChatError(err error) (string, int) {
 	switch {
 	case errors.Is(err, rag.ErrNoSources):
 		return "no relevant document sources found", http.StatusNotFound
-	case errors.Is(err, retrieval.ErrInvalidKnowledgeBase), errors.Is(err, retrieval.ErrInvalidQuery), errors.Is(err, retrieval.ErrInvalidLimit):
+	case errors.Is(err, retrieval.ErrInvalidKnowledgeBase), errors.Is(err, retrieval.ErrInvalidQuery), errors.Is(err, retrieval.ErrInvalidLimit), errors.Is(err, retrieval.ErrInvalidDocumentIDs):
 		return "invalid chat request", http.StatusBadRequest
 	case errors.Is(err, retrieval.ErrInvalidMaxDistance):
 		return "invalid similarity threshold", http.StatusBadRequest
@@ -122,6 +130,12 @@ func decodeKnowledgeBaseChatRequest(w http.ResponseWriter, r *http.Request) (int
 			return 0, knowledgeBaseChatRequest{}, false
 		}
 	}
+	normalizedDocumentIDs, err := retrieval.NormalizeDocumentIDs(request.DocumentIDs)
+	if err != nil {
+		http.Error(w, `{"error":"invalid chat document_ids"}`, http.StatusBadRequest)
+		return 0, knowledgeBaseChatRequest{}, false
+	}
+	request.DocumentIDs = normalizedDocumentIDs
 	return knowledgeBaseID, request, true
 }
 

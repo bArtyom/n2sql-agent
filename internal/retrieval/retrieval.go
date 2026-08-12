@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
@@ -12,15 +13,18 @@ import (
 )
 
 var (
-	ErrInvalidKnowledgeBase = errors.New("invalid knowledge base ID")
-	ErrInvalidQuery         = errors.New("invalid search query")
-	ErrInvalidLimit         = errors.New("invalid search result limit")
-	ErrInvalidMaxDistance   = errors.New("search distance threshold must be greater than 0 and at most 1")
+	ErrInvalidKnowledgeBase      = errors.New("invalid knowledge base ID")
+	ErrInvalidQuery              = errors.New("invalid search query")
+	ErrInvalidLimit              = errors.New("invalid search result limit")
+	ErrInvalidMaxDistance        = errors.New("search distance threshold must be greater than 0 and at most 1")
+	ErrInvalidDocumentIDs        = errors.New("invalid document filter")
+	ErrDocumentFilterUnavailable = errors.New("document filter is unavailable")
 )
 
 const (
 	DefaultResults     = 5
 	MaxResults         = 20
+	MaxDocumentIDs     = 100
 	DefaultMaxDistance = 0.65
 )
 
@@ -42,6 +46,22 @@ type KeywordSearcher interface {
 	SearchKeyword(context.Context, int64, string, int) ([]Result, error)
 }
 
+type FilteredChunkSearcher interface {
+	SearchWithDocuments(context.Context, int64, []float32, int, []int64) ([]documentchunk.SearchResult, error)
+}
+
+type FilteredKeywordSearcher interface {
+	SearchKeywordWithDocuments(context.Context, int64, string, int, []int64) ([]Result, error)
+}
+
+type SearchOptions struct {
+	DocumentIDs []int64
+}
+
+type FilteredSearcher interface {
+	SearchWithOptions(context.Context, int64, string, int, SearchOptions) ([]Result, error)
+}
+
 // Reranker re-scores a small candidate set after the cheap recall stages.
 type Reranker interface {
 	Rerank(context.Context, string, []Result, int) ([]Result, error)
@@ -52,6 +72,30 @@ func ValidateMaxDistance(maxDistance float64) error {
 		return ErrInvalidMaxDistance
 	}
 	return nil
+}
+
+func NormalizeDocumentIDs(documentIDs []int64) ([]int64, error) {
+	if len(documentIDs) > MaxDocumentIDs {
+		return nil, ErrInvalidDocumentIDs
+	}
+	unique := make(map[int64]struct{}, len(documentIDs))
+	normalized := make([]int64, 0, len(documentIDs))
+	for _, documentID := range documentIDs {
+		if documentID <= 0 {
+			return nil, ErrInvalidDocumentIDs
+		}
+		if _, exists := unique[documentID]; exists {
+			continue
+		}
+		unique[documentID] = struct{}{}
+		normalized = append(normalized, documentID)
+	}
+	sort.Slice(normalized, func(left, right int) bool { return normalized[left] < normalized[right] })
+	return normalized, nil
+}
+
+func (s *Service) SearchWithOptions(ctx context.Context, knowledgeBaseID int64, query string, limit int, options SearchOptions) ([]Result, error) {
+	return s.searchWithOptions(ctx, knowledgeBaseID, query, limit, options)
 }
 
 // FilterByMaxDistance keeps only results close enough to the query. pgvector
@@ -99,6 +143,10 @@ func NewHybridServiceWithReranker(embedder Embedder, chunks ChunkSearcher, keywo
 }
 
 func (s *Service) Search(ctx context.Context, knowledgeBaseID int64, query string, limit int) ([]Result, error) {
+	return s.searchWithOptions(ctx, knowledgeBaseID, query, limit, SearchOptions{})
+}
+
+func (s *Service) searchWithOptions(ctx context.Context, knowledgeBaseID int64, query string, limit int, options SearchOptions) ([]Result, error) {
 	if knowledgeBaseID <= 0 {
 		return nil, ErrInvalidKnowledgeBase
 	}
@@ -108,6 +156,10 @@ func (s *Service) Search(ctx context.Context, knowledgeBaseID int64, query strin
 	}
 	if limit <= 0 || limit > MaxResults {
 		return nil, ErrInvalidLimit
+	}
+	documentIDs, err := NormalizeDocumentIDs(options.DocumentIDs)
+	if err != nil {
+		return nil, err
 	}
 	response, err := s.embedder.Embed(ctx, []string{query})
 	if err != nil {
@@ -126,13 +178,31 @@ func (s *Service) Search(ctx context.Context, knowledgeBaseID int64, query strin
 			candidateLimit = MaxResults
 		}
 	}
-	results, err := s.chunks.Search(ctx, knowledgeBaseID, response.Data[0].Vector, candidateLimit)
+	var results []Result
+	if len(documentIDs) == 0 {
+		results, err = s.chunks.Search(ctx, knowledgeBaseID, response.Data[0].Vector, candidateLimit)
+	} else {
+		filtered, ok := s.chunks.(FilteredChunkSearcher)
+		if !ok {
+			return nil, ErrDocumentFilterUnavailable
+		}
+		results, err = filtered.SearchWithDocuments(ctx, knowledgeBaseID, response.Data[0].Vector, candidateLimit, documentIDs)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("search document chunks: %w", err)
 	}
 	merged := results
 	if s.keyword != nil {
-		keywordResults, err := s.keyword.SearchKeyword(ctx, knowledgeBaseID, query, candidateLimit)
+		var keywordResults []Result
+		if len(documentIDs) == 0 {
+			keywordResults, err = s.keyword.SearchKeyword(ctx, knowledgeBaseID, query, candidateLimit)
+		} else {
+			filtered, ok := s.keyword.(FilteredKeywordSearcher)
+			if !ok {
+				return nil, ErrDocumentFilterUnavailable
+			}
+			keywordResults, err = filtered.SearchKeywordWithDocuments(ctx, knowledgeBaseID, query, candidateLimit, documentIDs)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("search keyword document chunks: %w", err)
 		}

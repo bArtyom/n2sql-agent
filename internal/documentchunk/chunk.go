@@ -94,18 +94,20 @@ func (s *PostgresStore) Replace(ctx context.Context, documentID int64, chunks []
 }
 
 func (s *PostgresStore) Search(ctx context.Context, knowledgeBaseID int64, embedding []float32, limit int) ([]SearchResult, error) {
+	return s.SearchWithDocuments(ctx, knowledgeBaseID, embedding, limit, nil)
+}
+
+func (s *PostgresStore) SearchWithDocuments(ctx context.Context, knowledgeBaseID int64, embedding []float32, limit int, documentIDs []int64) ([]SearchResult, error) {
 	queryVector := vectorLiteral(embedding)
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT chunks.document_id, documents.original_filename, chunks.position, chunks.content,
-		       chunks.embedding <=> $2::vector AS distance
-		FROM document_chunks AS chunks
-		JOIN documents AS documents ON documents.id = chunks.document_id
-		WHERE documents.knowledge_base_id = $1
-		  AND chunks.embedding IS NOT NULL
-		ORDER BY chunks.embedding <=> $2::vector, chunks.position
-		LIMIT $3`, knowledgeBaseID, queryVector, limit)
+	query := "SELECT chunks.document_id, documents.original_filename, chunks.position, chunks.content, " +
+		"chunks.embedding <=> $2::vector AS distance " +
+		"FROM document_chunks AS chunks JOIN documents AS documents ON documents.id = chunks.document_id " +
+		"WHERE documents.knowledge_base_id = $1 AND chunks.embedding IS NOT NULL " +
+		"AND ($4::bigint[] IS NULL OR chunks.document_id = ANY($4::bigint[])) " +
+		"ORDER BY chunks.embedding <=> $2::vector, chunks.position LIMIT $3"
+	rows, err := s.db.QueryContext(ctx, query, knowledgeBaseID, queryVector, limit, documentIDsArgument(documentIDs))
 	if err != nil {
-		return nil, fmt.Errorf("query similar document chunks: %w", err)
+		return nil, fmt.Errorf("query filtered document chunks: %w", err)
 	}
 	defer rows.Close()
 
@@ -113,13 +115,13 @@ func (s *PostgresStore) Search(ctx context.Context, knowledgeBaseID int64, embed
 	for rows.Next() {
 		var result SearchResult
 		if err := rows.Scan(&result.DocumentID, &result.OriginalFilename, &result.Position, &result.Content, &result.Distance); err != nil {
-			return nil, fmt.Errorf("scan similar document chunk: %w", err)
+			return nil, fmt.Errorf("scan filtered document chunk: %w", err)
 		}
 		result.MatchType = "vector"
 		results = append(results, result)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate similar document chunks: %w", err)
+		return nil, fmt.Errorf("iterate filtered document chunks: %w", err)
 	}
 	return results, nil
 }
@@ -127,26 +129,26 @@ func (s *PostgresStore) Search(ctx context.Context, knowledgeBaseID int64, embed
 // SearchKeyword returns chunks that contain the query text. It is a small
 // lexical companion to vector search for exact names, codes and commands.
 func (s *PostgresStore) SearchKeyword(ctx context.Context, knowledgeBaseID int64, query string, limit int) ([]SearchResult, error) {
+	return s.SearchKeywordWithDocuments(ctx, knowledgeBaseID, query, limit, nil)
+}
+
+func (s *PostgresStore) SearchKeywordWithDocuments(ctx context.Context, knowledgeBaseID int64, query string, limit int, documentIDs []int64) ([]SearchResult, error) {
 	exactPattern := "%" + strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(strings.ToLower(query)) + "%"
-	rows, err := s.db.QueryContext(ctx, `
-		WITH search_query AS (
-			SELECT plainto_tsquery('simple', $2) AS terms
-		), scored AS (
-			SELECT chunks.document_id, documents.original_filename, chunks.position, chunks.content,
-			       ts_rank_cd(chunks.content_search, search_query.terms) AS keyword_score,
-			   CASE WHEN lower(chunks.content) LIKE $3 ESCAPE E'\\' THEN 1.0 ELSE 0.0 END AS exact_score
-			FROM document_chunks AS chunks
-			JOIN documents AS documents ON documents.id = chunks.document_id
-			CROSS JOIN search_query
-			WHERE documents.knowledge_base_id = $1
-			  AND (chunks.content_search @@ search_query.terms OR lower(chunks.content) LIKE $3 ESCAPE E'\\')
-		)
-		SELECT document_id, original_filename, position, content, 0::float8 AS distance, keyword_score
-		FROM scored
-		ORDER BY exact_score DESC, keyword_score DESC, position, document_id
-		LIMIT $4`, knowledgeBaseID, query, exactPattern, limit)
+	sqlQuery := "WITH search_query AS (" +
+		"SELECT plainto_tsquery('simple', $2) AS terms" +
+		"), scored AS (" +
+		"SELECT chunks.document_id, documents.original_filename, chunks.position, chunks.content, " +
+		"ts_rank_cd(chunks.content_search, search_query.terms) AS keyword_score, " +
+		"CASE WHEN lower(chunks.content) LIKE $3 ESCAPE E'\\\\' THEN 1.0 ELSE 0.0 END AS exact_score " +
+		"FROM document_chunks AS chunks JOIN documents AS documents ON documents.id = chunks.document_id " +
+		"CROSS JOIN search_query WHERE documents.knowledge_base_id = $1 " +
+		"AND (chunks.content_search @@ search_query.terms OR lower(chunks.content) LIKE $3 ESCAPE E'\\\\') " +
+		"AND ($4::bigint[] IS NULL OR chunks.document_id = ANY($4::bigint[]))" +
+		") SELECT document_id, original_filename, position, content, 0::float8 AS distance, keyword_score " +
+		"FROM scored ORDER BY exact_score DESC, keyword_score DESC, position, document_id LIMIT $5"
+	rows, err := s.db.QueryContext(ctx, sqlQuery, knowledgeBaseID, query, exactPattern, documentIDsArgument(documentIDs), limit)
 	if err != nil {
-		return nil, fmt.Errorf("query keyword document chunks: %w", err)
+		return nil, fmt.Errorf("query filtered keyword document chunks: %w", err)
 	}
 	defer rows.Close()
 
@@ -154,15 +156,26 @@ func (s *PostgresStore) SearchKeyword(ctx context.Context, knowledgeBaseID int64
 	for rows.Next() {
 		var result SearchResult
 		if err := rows.Scan(&result.DocumentID, &result.OriginalFilename, &result.Position, &result.Content, &result.Distance, &result.KeywordScore); err != nil {
-			return nil, fmt.Errorf("scan keyword document chunk: %w", err)
+			return nil, fmt.Errorf("scan filtered keyword document chunk: %w", err)
 		}
 		result.MatchType = "keyword"
 		results = append(results, result)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate keyword document chunks: %w", err)
+		return nil, fmt.Errorf("iterate filtered keyword document chunks: %w", err)
 	}
 	return results, nil
+}
+
+func documentIDsArgument(documentIDs []int64) any {
+	if len(documentIDs) == 0 {
+		return nil
+	}
+	parts := make([]string, len(documentIDs))
+	for index, documentID := range documentIDs {
+		parts[index] = strconv.FormatInt(documentID, 10)
+	}
+	return "{" + strings.Join(parts, ",") + "}"
 }
 
 func vectorLiteral(vector []float32) string {

@@ -89,6 +89,7 @@ type KnowledgeSearchTool struct {
 	maxResultBytes  int
 	maxResults      int
 	maxDistance     float64
+	documentIDs     []int64
 }
 
 var _ Tool = (*KnowledgeSearchTool)(nil)
@@ -202,7 +203,19 @@ func (t *KnowledgeSearchTool) Call(ctx context.Context, raw json.RawMessage) (To
 		return ToolResult{}, ErrInvalidKnowledgeSearchInput
 	}
 
-	results, err := t.searcher.Search(ctx, input.KnowledgeBaseID, input.Query, input.Limit)
+	var (
+		results []retrieval.Result
+		err     error
+	)
+	if len(t.documentIDs) == 0 {
+		results, err = t.searcher.Search(ctx, input.KnowledgeBaseID, input.Query, input.Limit)
+	} else {
+		filtered, ok := t.searcher.(retrieval.FilteredSearcher)
+		if !ok {
+			return ToolResult{}, retrieval.ErrDocumentFilterUnavailable
+		}
+		results, err = filtered.SearchWithOptions(ctx, input.KnowledgeBaseID, input.Query, input.Limit, retrieval.SearchOptions{DocumentIDs: t.documentIDs})
+	}
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("knowledge search: %w", err)
 	}
@@ -342,10 +355,19 @@ func NewKnowledgeSearchRegistryForKnowledgeBaseWithLimits(searcher retrieval.Sea
 }
 
 func NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistance(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxResults int, maxDistance float64) (*ToolRegistry, error) {
+	return NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistanceAndDocuments(searcher, knowledgeBaseID, maxResultBytes, maxResults, maxDistance, nil)
+}
+
+func NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistanceAndDocuments(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxResults int, maxDistance float64, documentIDs []int64) (*ToolRegistry, error) {
+	normalizedIDs, err := retrieval.NormalizeDocumentIDs(documentIDs)
+	if err != nil {
+		return nil, err
+	}
 	tool, err := NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistance(searcher, knowledgeBaseID, maxResultBytes, maxResults, maxDistance)
 	if err != nil {
 		return nil, err
 	}
+	tool.documentIDs = normalizedIDs
 	registry, err := NewToolRegistryWithAllowlist("knowledge_search")
 	if err != nil {
 		return nil, fmt.Errorf("create scoped knowledge search allowlist: %w", err)
