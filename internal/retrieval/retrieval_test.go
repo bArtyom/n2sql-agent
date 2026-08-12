@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 	"github.com/bArtyom/n2sql-agent/internal/usage"
@@ -39,6 +40,19 @@ type chunkStoreStub struct {
 	limit           int
 }
 
+type hybridChunkStoreStub struct{}
+
+func (hybridChunkStoreStub) Search(context.Context, int64, []float32, int) ([]documentchunk.SearchResult, error) {
+	return []documentchunk.SearchResult{{DocumentID: 1, Position: 0, Content: "向量命中", Distance: 0.2}}, nil
+}
+
+func (hybridChunkStoreStub) SearchKeyword(context.Context, int64, string, int) ([]retrieval.Result, error) {
+	return []retrieval.Result{
+		{DocumentID: 1, Position: 0, Content: "重复命中", Distance: 0},
+		{DocumentID: 2, Position: 1, Content: "关键词命中", Distance: 0},
+	}, nil
+}
+
 func (s *chunkStoreStub) Search(_ context.Context, knowledgeBaseID int64, embedding []float32, limit int) ([]retrieval.Result, error) {
 	s.knowledgeBaseID = knowledgeBaseID
 	s.embedding = embedding
@@ -63,6 +77,18 @@ func TestServiceEmbedsQueryAndSearchesKnowledgeBase(t *testing.T) {
 	}
 	if store.knowledgeBaseID != 7 || store.limit != 5 || len(store.embedding) != 2 || store.embedding[1] != 0.2 {
 		t.Fatalf("search arguments = %#v", store)
+	}
+}
+
+func TestHybridServiceMergesVectorAndKeywordResultsWithoutDuplicates(t *testing.T) {
+	service := retrieval.NewHybridService(&embeddingStub{}, hybridChunkStoreStub{}, hybridChunkStoreStub{})
+
+	results, err := service.Search(context.Background(), 7, "错误码", 3)
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(results) != 2 || results[0].DocumentID != 1 || results[1].DocumentID != 2 {
+		t.Fatalf("hybrid results = %#v, want vector ID 1 and keyword ID 2", results)
 	}
 }
 

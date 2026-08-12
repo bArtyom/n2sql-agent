@@ -63,7 +63,7 @@ func main() {
 	metricsRegistry := metrics.New()
 	a2aStore := a2a.NewPostgresStore(db)
 	runner := worker.NewRunnerWithMetrics(worker.NewPostgresStore(db), processor, metricsRegistry)
-	searchService := retrieval.NewService(embeddingService, chunkStore)
+	searchService := retrieval.NewHybridService(embeddingService, chunkStore, chunkStore)
 	answerService := rag.NewService(searchService, chatService)
 	var historySummarizer agentservice.HistorySummarizer
 	if cfg.AgentHistorySummaryEnabled {

@@ -38,6 +38,10 @@ type Searcher interface {
 	Search(context.Context, int64, string, int) ([]Result, error)
 }
 
+type KeywordSearcher interface {
+	SearchKeyword(context.Context, int64, string, int) ([]Result, error)
+}
+
 func ValidateMaxDistance(maxDistance float64) error {
 	if maxDistance <= 0 || maxDistance > 1 {
 		return ErrInvalidMaxDistance
@@ -66,10 +70,15 @@ func FilterByMaxDistance(results []Result, maxDistance float64) ([]Result, error
 type Service struct {
 	embedder Embedder
 	chunks   ChunkSearcher
+	keyword  KeywordSearcher
 }
 
 func NewService(embedder Embedder, chunks ChunkSearcher) *Service {
 	return &Service{embedder: embedder, chunks: chunks}
+}
+
+func NewHybridService(embedder Embedder, chunks ChunkSearcher, keyword KeywordSearcher) *Service {
+	return &Service{embedder: embedder, chunks: chunks, keyword: keyword}
 }
 
 func (s *Service) Search(ctx context.Context, knowledgeBaseID int64, query string, limit int) ([]Result, error) {
@@ -97,5 +106,37 @@ func (s *Service) Search(ctx context.Context, knowledgeBaseID int64, query strin
 	if err != nil {
 		return nil, fmt.Errorf("search document chunks: %w", err)
 	}
-	return results, nil
+	if s.keyword == nil {
+		return results, nil
+	}
+	keywordResults, err := s.keyword.SearchKeyword(ctx, knowledgeBaseID, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("search keyword document chunks: %w", err)
+	}
+	return mergeResults(results, keywordResults, limit), nil
+}
+
+func mergeResults(vectorResults, keywordResults []Result, limit int) []Result {
+	merged := make([]Result, 0, limit)
+	seen := make(map[string]struct{}, limit)
+	add := func(result Result) {
+		key := fmt.Sprintf("%d:%d", result.DocumentID, result.Position)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		merged = append(merged, result)
+	}
+	for index := 0; len(merged) < limit && (index < len(vectorResults) || index < len(keywordResults)); index++ {
+		if index < len(vectorResults) {
+			add(vectorResults[index])
+		}
+		if len(merged) >= limit {
+			break
+		}
+		if index < len(keywordResults) {
+			add(keywordResults[index])
+		}
+	}
+	return merged
 }

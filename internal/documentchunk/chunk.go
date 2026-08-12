@@ -120,6 +120,37 @@ func (s *PostgresStore) Search(ctx context.Context, knowledgeBaseID int64, embed
 	return results, nil
 }
 
+// SearchKeyword returns chunks that contain the query text. It is a small
+// lexical companion to vector search for exact names, codes and commands.
+func (s *PostgresStore) SearchKeyword(ctx context.Context, knowledgeBaseID int64, query string, limit int) ([]SearchResult, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT chunks.document_id, documents.original_filename, chunks.position, chunks.content,
+		       0::float8 AS distance
+		FROM document_chunks AS chunks
+		JOIN documents AS documents ON documents.id = chunks.document_id
+		WHERE documents.knowledge_base_id = $1
+		  AND strpos(lower(chunks.content), lower($2)) > 0
+		ORDER BY chunks.position, chunks.document_id
+		LIMIT $3`, knowledgeBaseID, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query keyword document chunks: %w", err)
+	}
+	defer rows.Close()
+
+	results := make([]SearchResult, 0, limit)
+	for rows.Next() {
+		var result SearchResult
+		if err := rows.Scan(&result.DocumentID, &result.OriginalFilename, &result.Position, &result.Content, &result.Distance); err != nil {
+			return nil, fmt.Errorf("scan keyword document chunk: %w", err)
+		}
+		results = append(results, result)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate keyword document chunks: %w", err)
+	}
+	return results, nil
+}
+
 func vectorLiteral(vector []float32) string {
 	values := make([]string, len(vector))
 	for index, value := range vector {
