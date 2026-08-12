@@ -127,20 +127,24 @@ func (s *PostgresStore) Search(ctx context.Context, knowledgeBaseID int64, embed
 // SearchKeyword returns chunks that contain the query text. It is a small
 // lexical companion to vector search for exact names, codes and commands.
 func (s *PostgresStore) SearchKeyword(ctx context.Context, knowledgeBaseID int64, query string, limit int) ([]SearchResult, error) {
+	exactPattern := "%" + strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(strings.ToLower(query)) + "%"
 	rows, err := s.db.QueryContext(ctx, `
-		WITH scored AS (
+		WITH search_query AS (
+			SELECT plainto_tsquery('simple', $2) AS terms
+		), scored AS (
 			SELECT chunks.document_id, documents.original_filename, chunks.position, chunks.content,
-			       ts_rank_cd(to_tsvector('simple', chunks.content), plainto_tsquery('simple', $2)) AS keyword_score,
-			       CASE WHEN strpos(lower(chunks.content), lower($2)) > 0 THEN 1.0 ELSE 0.0 END AS exact_score
+			       ts_rank_cd(chunks.content_search, search_query.terms) AS keyword_score,
+			   CASE WHEN lower(chunks.content) LIKE $3 ESCAPE E'\\' THEN 1.0 ELSE 0.0 END AS exact_score
 			FROM document_chunks AS chunks
 			JOIN documents AS documents ON documents.id = chunks.document_id
+			CROSS JOIN search_query
 			WHERE documents.knowledge_base_id = $1
+			  AND (chunks.content_search @@ search_query.terms OR lower(chunks.content) LIKE $3 ESCAPE E'\\')
 		)
 		SELECT document_id, original_filename, position, content, 0::float8 AS distance, keyword_score
 		FROM scored
-		WHERE exact_score > 0 OR keyword_score > 0
 		ORDER BY exact_score DESC, keyword_score DESC, position, document_id
-		LIMIT $3`, knowledgeBaseID, query, limit)
+		LIMIT $4`, knowledgeBaseID, query, exactPattern, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query keyword document chunks: %w", err)
 	}
