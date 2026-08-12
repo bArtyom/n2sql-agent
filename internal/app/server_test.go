@@ -99,7 +99,23 @@ func (knowledgeBaseStoreStub) List(context.Context) ([]knowledgebase.KnowledgeBa
 
 func (knowledgeBaseStoreStub) Delete(context.Context, int64) error { return nil }
 
+type mcpKnowledgeBaseStoreStub struct{}
+
+func (mcpKnowledgeBaseStoreStub) Create(context.Context, knowledgebase.CreateInput) (knowledgebase.KnowledgeBase, error) {
+	return knowledgebase.KnowledgeBase{}, nil
+}
+
+func (mcpKnowledgeBaseStoreStub) List(context.Context) ([]knowledgebase.KnowledgeBase, error) {
+	return []knowledgebase.KnowledgeBase{{ID: 7}}, nil
+}
+
+func (mcpKnowledgeBaseStoreStub) Delete(context.Context, int64) error { return nil }
+
 type documentUploaderStub struct{}
+
+func (documentUploaderStub) List(context.Context, int64) ([]document.Document, error) {
+	return nil, nil
+}
 
 func (documentUploaderStub) Upload(context.Context, document.UploadInput) (document.Document, error) {
 	return document.Document{ID: 1, ProcessingStatus: "pending"}, nil
@@ -286,7 +302,7 @@ func TestServerRoutesKnowledgeBaseMultiAgentChatStream(t *testing.T) {
 
 func TestServerRoutesKnowledgeBaseMCP(t *testing.T) {
 	response := httptest.NewRecorder()
-	server := app.New(app.Dependencies{MCPKnowledgeSearch: searcherStub{}})
+	server := app.New(app.Dependencies{MCPKnowledgeSearch: searcherStub{}, MCPDocuments: documentUploaderStub{}, MCPKnowledgeBases: mcpKnowledgeBaseStoreStub{}})
 
 	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"server/discover"}`)))
 

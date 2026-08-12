@@ -158,7 +158,7 @@ curl -N -X POST http://localhost:8080/api/knowledge-bases/1/multi-agent-chat/str
 POST http://localhost:8080/api/knowledge-bases/{id}/mcp
 ```
 
-当前只暴露只读的 `knowledge_search` 工具。MCP 客户端可以依次调用 `server/discover`、`tools/list` 和 `tools/call`；知识库 ID 固定来自 URL，工具参数只接受 `query` 和 `limit`，不会把跨知识库访问权交给调用方。适配器使用无会话的 `2026-07-28` 请求头，同时兼容旧版 `initialize` 握手，尚未实现 MCP 的资源、提示词、授权和任务扩展。
+当前暴露两个只读工具：`knowledge_search` 和 `document_list`。MCP 客户端可以依次调用 `server/discover`、`tools/list` 和 `tools/call`；知识库 ID 固定来自 URL，并且服务端会校验它属于当前管理员，工具参数不能改变知识库范围。适配器使用无会话的 `2026-07-28` 请求头，同时兼容旧版 `initialize` 握手，尚未实现 MCP 的资源、提示词、授权和任务扩展。
 
 示例调用：
 

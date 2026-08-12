@@ -35,6 +35,8 @@ type Dependencies struct {
 	MultiAgentAnswers          multiagent.Answerer
 	MultiAgentStreamingAnswers multiagent.EventAnswerer
 	MCPKnowledgeSearch         retrieval.Searcher
+	MCPDocuments               document.Reader
+	MCPKnowledgeBases          knowledgebase.Store
 	Conversations              *conversation.Service
 	AgentMaxToolResultBytes    int
 	AgentMaxHistoryBytes       int
@@ -102,8 +104,8 @@ func New(dependencies Dependencies) http.Handler {
 	if dependencies.MultiAgentStreamingAnswers != nil {
 		mux.Handle("POST /api/knowledge-bases/{id}/multi-agent-chat/stream", handler.NewMultiAgentChatStream(dependencies.MultiAgentStreamingAnswers))
 	}
-	if dependencies.MCPKnowledgeSearch != nil {
-		mux.Handle("POST /api/knowledge-bases/{id}/mcp", mcp.NewKnowledgeBaseHandler(dependencies.MCPKnowledgeSearch, dependencies.AgentMaxToolResultBytes))
+	if dependencies.MCPKnowledgeSearch != nil && dependencies.MCPDocuments != nil && dependencies.MCPKnowledgeBases != nil {
+		mux.Handle("POST /api/knowledge-bases/{id}/mcp", mcp.NewKnowledgeBaseHandler(dependencies.MCPKnowledgeSearch, dependencies.MCPDocuments, dependencies.MCPKnowledgeBases, dependencies.AgentMaxToolResultBytes))
 	}
 
 	return requestid.NewMiddleware(slog.Default(), registry.Middleware(mux))

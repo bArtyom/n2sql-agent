@@ -22,7 +22,8 @@ type Client struct {
 }
 
 func NewClient(endpoint string, httpClient *http.Client) (*Client, error) {
-	parsed, err := url.Parse(strings.TrimSpace(endpoint))
+	normalized := strings.TrimSpace(endpoint)
+	parsed, err := url.Parse(normalized)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return nil, errors.New("invalid MCP endpoint")
 	}
@@ -32,7 +33,7 @@ func NewClient(endpoint string, httpClient *http.Client) (*Client, error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &Client{endpoint: strings.TrimRight(endpoint, "/"), http: httpClient}, nil
+	return &Client{endpoint: strings.TrimRight(normalized, "/"), http: httpClient}, nil
 }
 
 func (c *Client) Discover(ctx context.Context) (Discovery, error) {

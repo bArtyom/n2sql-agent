@@ -109,6 +109,8 @@ func main() {
 			MultiAgentAnswers:          multiAgentAnswers,
 			MultiAgentStreamingAnswers: multiAgentAnswers,
 			MCPKnowledgeSearch:         searchService,
+			MCPDocuments:               documentService,
+			MCPKnowledgeBases:          knowledgeBaseStore,
 			Conversations:              conversationService,
 			AgentMaxToolResultBytes:    cfg.AgentMaxToolResultBytes,
 			AgentMaxHistoryBytes:       cfg.AgentMaxHistoryBytes,

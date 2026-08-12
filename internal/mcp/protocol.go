@@ -15,6 +15,8 @@ const (
 	methodNotFoundCode     = -32601
 	invalidParamsCode      = -32602
 	internalErrorCode      = -32603
+	headerMismatchCode     = -32020
+	unsupportedVersionCode = -32022
 	maxRequestBodyBytes    = 64 * 1024
 	defaultServerName      = "n2sql-agent"
 	defaultServerVersion   = "0.1.0"

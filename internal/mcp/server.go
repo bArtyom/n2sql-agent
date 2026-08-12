@@ -12,23 +12,34 @@ import (
 	"strings"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
+	"github.com/bArtyom/n2sql-agent/internal/document"
+	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 )
 
 // NewKnowledgeBaseHandler exposes a stateless, HTTP JSON-RPC MCP endpoint.
 // The knowledge-base ID is taken from the route and is never accepted from
 // tool arguments, so every request receives a scoped read-only tool.
-func NewKnowledgeBaseHandler(searcher retrieval.Searcher, maxResultBytes int) http.Handler {
+func NewKnowledgeBaseHandler(searcher retrieval.Searcher, documents document.Reader, knowledgeBases knowledgebase.Store, maxResultBytes int) http.Handler {
 	if maxResultBytes < 2 {
 		maxResultBytes = agent.DefaultMaxToolResultBytes
 	}
-	return &knowledgeBaseHandler{searcher: searcher, maxResultBytes: maxResultBytes}
+	return &knowledgeBaseHandler{searcher: searcher, documents: documents, knowledgeBases: knowledgeBases, maxResultBytes: maxResultBytes}
 }
 
 type knowledgeBaseHandler struct {
 	searcher       retrieval.Searcher
+	documents      document.Reader
+	knowledgeBases knowledgebase.Store
 	maxResultBytes int
 }
+
+var documentListParameters = json.RawMessage(`{
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false,
+  "description": "列出当前知识库中的文档及处理状态"
+}`)
 
 func (h *knowledgeBaseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -55,11 +66,20 @@ func (h *knowledgeBaseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if err := validateRoutingHeaders(r, request); err != nil {
-		writeRPCError(w, http.StatusBadRequest, request.ID, invalidRequestCode, err.Error())
+		code := invalidRequestCode
+		var protocolErr protocolError
+		if errors.As(err, &protocolErr) {
+			code = protocolErr.code
+		}
+		writeRPCError(w, http.StatusBadRequest, request.ID, code, err.Error())
 		return
 	}
-	if len(request.ID) == 0 && strings.HasPrefix(request.Method, "notifications/") {
-		w.WriteHeader(http.StatusAccepted)
+	if len(request.ID) == 0 {
+		if strings.HasPrefix(request.Method, "notifications/") {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		writeRPCError(w, http.StatusBadRequest, json.RawMessage("null"), invalidRequestCode, "request id is required")
 		return
 	}
 
@@ -71,7 +91,7 @@ func (h *knowledgeBaseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			SupportedVersions: []string{ProtocolVersion, legacyProtocolVersion},
 			Capabilities:      map[string]any{"tools": map[string]any{}},
 			ServerInfo:        ServerInfo{Name: defaultServerName, Version: defaultServerVersion},
-			Instructions:      "This server exposes a read-only, knowledge-base-scoped knowledge_search tool.",
+			Instructions:      "This server exposes read-only, knowledge-base-scoped search and document listing tools.",
 			Meta:              map[string]any{serverInfoMeta: ServerInfo{Name: defaultServerName, Version: defaultServerVersion}},
 		}
 	case "initialize":
@@ -138,13 +158,21 @@ func validateRoutingHeaders(r *http.Request, request rpcRequest) error {
 		return nil
 	}
 	if version != ProtocolVersion {
-		return fmt.Errorf("unsupported MCP protocol version %q", version)
+		return protocolError{code: unsupportedVersionCode, message: fmt.Sprintf("unsupported MCP protocol version %q", version)}
 	}
-	if bodyVersion := requestMetaVersion(request.Params); bodyVersion != "" && bodyVersion != version {
-		return errors.New("MCP request metadata does not match protocol header")
+	metadata, err := requestMetadata(request.Params)
+	var bodyVersion string
+	if err != nil || json.Unmarshal(metadata[protocolVersionMeta], &bodyVersion) != nil || strings.TrimSpace(bodyVersion) != version {
+		return protocolError{code: headerMismatchCode, message: "MCP request metadata does not match protocol header"}
+	}
+	if _, ok := metadata[clientInfoMeta]; !ok {
+		return protocolError{code: headerMismatchCode, message: "MCP request metadata is missing client info"}
+	}
+	if _, ok := metadata[clientCapabilitiesMeta]; !ok {
+		return protocolError{code: headerMismatchCode, message: "MCP request metadata is missing client capabilities"}
 	}
 	if method := strings.TrimSpace(r.Header.Get("Mcp-Method")); method == "" || method != request.Method {
-		return errors.New("Mcp-Method header does not match JSON-RPC method")
+		return protocolError{code: headerMismatchCode, message: "Mcp-Method header does not match JSON-RPC method"}
 	}
 	if request.Method == "tools/call" {
 		name := strings.TrimSpace(r.Header.Get("Mcp-Name"))
@@ -152,11 +180,18 @@ func validateRoutingHeaders(r *http.Request, request rpcRequest) error {
 			Name string `json:"name"`
 		}
 		if err := json.Unmarshal(request.Params, &params); err != nil || name == "" || name != params.Name {
-			return errors.New("Mcp-Name header does not match tool name")
+			return protocolError{code: headerMismatchCode, message: "Mcp-Name header does not match tool name"}
 		}
 	}
 	return nil
 }
+
+type protocolError struct {
+	code    int
+	message string
+}
+
+func (e protocolError) Error() string { return e.message }
 
 func initializeResult(raw json.RawMessage) (map[string]any, error) {
 	var params struct {
@@ -183,6 +218,9 @@ func (h *knowledgeBaseHandler) listTools(request *http.Request) (map[string]any,
 	if err != nil {
 		return nil, err
 	}
+	if err := h.authorizeKnowledgeBase(request.Context(), knowledgeBaseID); err != nil {
+		return nil, err
+	}
 	tool, err := agent.NewKnowledgeSearchToolForKnowledgeBaseWithMaxBytes(h.searcher, knowledgeBaseID, h.maxResultBytes)
 	if err != nil {
 		return nil, err
@@ -193,6 +231,10 @@ func (h *knowledgeBaseHandler) listTools(request *http.Request) (map[string]any,
 			Name:        tool.Name(),
 			Description: tool.Description(),
 			InputSchema: tool.Parameters(),
+		}, {
+			Name:        "document_list",
+			Description: "列出当前知识库中的文档及处理状态",
+			InputSchema: append(json.RawMessage(nil), documentListParameters...),
 		}},
 	}, nil
 }
@@ -202,6 +244,9 @@ func (h *knowledgeBaseHandler) callTool(ctx context.Context, request *http.Reque
 	if err != nil {
 		return ToolCallResult{}, err
 	}
+	if err := h.authorizeKnowledgeBase(ctx, knowledgeBaseID); err != nil {
+		return ToolCallResult{}, err
+	}
 	var params struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -209,12 +254,34 @@ func (h *knowledgeBaseHandler) callTool(ctx context.Context, request *http.Reque
 	if len(raw) == 0 || json.Unmarshal(raw, &params) != nil || strings.TrimSpace(params.Name) == "" {
 		return ToolCallResult{}, errInvalidParams
 	}
-	if params.Name != "knowledge_search" {
-		return ToolCallResult{}, fmt.Errorf("%w: unknown tool", errInvalidParams)
-	}
 	arguments := params.Arguments
 	if len(arguments) == 0 || string(arguments) == "null" {
 		arguments = json.RawMessage(`{}`)
+	}
+	if params.Name == "document_list" {
+		if err := validateEmptyArguments(arguments); err != nil {
+			return ToolCallResult{}, err
+		}
+		if h.documents == nil {
+			return ToolCallResult{}, errors.New("MCP document reader is unavailable")
+		}
+		documents, err := h.documents.List(ctx, knowledgeBaseID)
+		if err != nil {
+			slog.ErrorContext(ctx, "mcp_tool_call_failed", "tool_name", params.Name, "knowledge_base_id", knowledgeBaseID, "error_kind", "document_list_failed")
+			return ToolCallResult{ResultType: "complete", Content: []ContentBlock{{Type: "text", Text: "document listing failed"}}, IsError: true}, nil
+		}
+		encoded, err := json.Marshal(documents)
+		if err != nil {
+			return ToolCallResult{}, fmt.Errorf("encode document list: %w", err)
+		}
+		return ToolCallResult{
+			ResultType:        "complete",
+			Content:           []ContentBlock{{Type: "text", Text: string(encoded)}},
+			StructuredContent: map[string]any{"documents": documents},
+		}, nil
+	}
+	if params.Name != "knowledge_search" {
+		return ToolCallResult{}, fmt.Errorf("%w: unknown tool", errInvalidParams)
 	}
 	tool, err := agent.NewKnowledgeSearchToolForKnowledgeBaseWithMaxBytes(h.searcher, knowledgeBaseID, h.maxResultBytes)
 	if err != nil {
@@ -222,7 +289,7 @@ func (h *knowledgeBaseHandler) callTool(ctx context.Context, request *http.Reque
 	}
 	toolResult, err := tool.Call(ctx, arguments)
 	if err != nil {
-		slog.ErrorContext(ctx, "mcp_tool_call_failed", "tool_name", params.Name, "knowledge_base_id", knowledgeBaseID, "error", err)
+		slog.ErrorContext(ctx, "mcp_tool_call_failed", "tool_name", params.Name, "knowledge_base_id", knowledgeBaseID, "error_kind", classifyToolError(err))
 		message := "knowledge search failed"
 		if errors.Is(err, agent.ErrInvalidKnowledgeSearchInput) {
 			message = "invalid knowledge search arguments"
@@ -241,18 +308,70 @@ func (h *knowledgeBaseHandler) callTool(ctx context.Context, request *http.Reque
 	}, nil
 }
 
-func requestMetaVersion(raw json.RawMessage) string {
-	var params struct {
-		Meta map[string]json.RawMessage `json:"_meta"`
+func validateEmptyArguments(raw json.RawMessage) error {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
 	}
-	if len(raw) == 0 || json.Unmarshal(raw, &params) != nil {
+	var arguments map[string]json.RawMessage
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	if err := decoder.Decode(&arguments); err != nil {
+		return errInvalidParams
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return errInvalidParams
+	}
+	if len(arguments) != 0 {
+		return errInvalidParams
+	}
+	return nil
+}
+
+func (h *knowledgeBaseHandler) authorizeKnowledgeBase(ctx context.Context, id int64) error {
+	if h.knowledgeBases == nil {
+		return errors.New("MCP knowledge base scope is unavailable")
+	}
+	knowledgeBases, err := h.knowledgeBases.List(ctx)
+	if err != nil {
+		return fmt.Errorf("check MCP knowledge base scope: %w", err)
+	}
+	for _, knowledgeBase := range knowledgeBases {
+		if knowledgeBase.ID == id {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: %d", errInvalidKnowledgeBase, id)
+}
+
+func classifyToolError(err error) string {
+	if errors.Is(err, agent.ErrInvalidKnowledgeSearchInput) {
+		return "invalid_arguments"
+	}
+	return "knowledge_search_failed"
+}
+
+func requestMetaVersion(raw json.RawMessage) string {
+	metadata, err := requestMetadata(raw)
+	if err != nil {
 		return ""
 	}
 	var version string
-	if err := json.Unmarshal(params.Meta[protocolVersionMeta], &version); err != nil {
+	if err := json.Unmarshal(metadata[protocolVersionMeta], &version); err != nil {
 		return ""
 	}
 	return strings.TrimSpace(version)
+}
+
+func requestMetadata(raw json.RawMessage) (map[string]json.RawMessage, error) {
+	var params struct {
+		Meta map[string]json.RawMessage `json:"_meta"`
+	}
+	if len(raw) == 0 {
+		return nil, errors.New("missing request metadata")
+	}
+	if err := json.Unmarshal(raw, &params); err != nil || params.Meta == nil {
+		return nil, errors.New("invalid request metadata")
+	}
+	return params.Meta, nil
 }
 
 func routeKnowledgeBaseID(r *http.Request) (int64, error) {
