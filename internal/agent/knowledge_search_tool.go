@@ -17,6 +17,7 @@ var (
 	ErrInvalidKnowledgeBaseScope    = errors.New("invalid knowledge base scope")
 	ErrKnowledgeSearcherUnavailable = errors.New("knowledge searcher unavailable")
 	ErrInvalidMaxResultBytes        = errors.New("knowledge search result byte limit must be at least 2")
+	ErrInvalidMaxResults            = errors.New("knowledge search result limit must be between 1 and 20")
 )
 
 const (
@@ -85,12 +86,13 @@ type KnowledgeSearchTool struct {
 	searcher        retrieval.Searcher
 	knowledgeBaseID int64
 	maxResultBytes  int
+	maxResults      int
 }
 
 var _ Tool = (*KnowledgeSearchTool)(nil)
 
 func NewKnowledgeSearchTool(searcher retrieval.Searcher) *KnowledgeSearchTool {
-	return &KnowledgeSearchTool{searcher: searcher, maxResultBytes: DefaultMaxToolResultBytes}
+	return &KnowledgeSearchTool{searcher: searcher, maxResultBytes: DefaultMaxToolResultBytes, maxResults: retrieval.MaxResults}
 }
 
 func NewKnowledgeSearchToolForKnowledgeBase(searcher retrieval.Searcher, knowledgeBaseID int64) (*KnowledgeSearchTool, error) {
@@ -104,10 +106,14 @@ func NewKnowledgeSearchToolWithMaxBytes(searcher retrieval.Searcher, maxResultBy
 	if maxResultBytes < 2 {
 		return nil, ErrInvalidMaxResultBytes
 	}
-	return &KnowledgeSearchTool{searcher: searcher, maxResultBytes: maxResultBytes}, nil
+	return &KnowledgeSearchTool{searcher: searcher, maxResultBytes: maxResultBytes, maxResults: retrieval.MaxResults}, nil
 }
 
 func NewKnowledgeSearchToolForKnowledgeBaseWithMaxBytes(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes int) (*KnowledgeSearchTool, error) {
+	return NewKnowledgeSearchToolForKnowledgeBaseWithLimits(searcher, knowledgeBaseID, maxResultBytes, retrieval.MaxResults)
+}
+
+func NewKnowledgeSearchToolForKnowledgeBaseWithLimits(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxResults int) (*KnowledgeSearchTool, error) {
 	if searcher == nil {
 		return nil, ErrKnowledgeSearcherUnavailable
 	}
@@ -117,7 +123,10 @@ func NewKnowledgeSearchToolForKnowledgeBaseWithMaxBytes(searcher retrieval.Searc
 	if maxResultBytes < 2 {
 		return nil, ErrInvalidMaxResultBytes
 	}
-	return &KnowledgeSearchTool{searcher: searcher, knowledgeBaseID: knowledgeBaseID, maxResultBytes: maxResultBytes}, nil
+	if maxResults < 1 || maxResults > retrieval.MaxResults {
+		return nil, ErrInvalidMaxResults
+	}
+	return &KnowledgeSearchTool{searcher: searcher, knowledgeBaseID: knowledgeBaseID, maxResultBytes: maxResultBytes, maxResults: maxResults}, nil
 }
 
 func (t *KnowledgeSearchTool) Name() string {
@@ -159,8 +168,19 @@ func (t *KnowledgeSearchTool) Call(ctx context.Context, raw json.RawMessage) (To
 	if input.KnowledgeBaseID <= 0 || input.Query == "" {
 		return ToolResult{}, ErrInvalidKnowledgeSearchInput
 	}
+	maxResults := t.maxResults
+	if maxResults == 0 {
+		maxResults = retrieval.MaxResults
+	}
 	if input.Limit == 0 {
 		input.Limit = retrieval.DefaultResults
+	}
+	if input.Limit > maxResults {
+		if t.maxResults < retrieval.MaxResults {
+			input.Limit = maxResults
+		} else {
+			return ToolResult{}, ErrInvalidKnowledgeSearchInput
+		}
 	}
 	if input.Limit < 1 || input.Limit > retrieval.MaxResults {
 		return ToolResult{}, ErrInvalidKnowledgeSearchInput
@@ -305,7 +325,11 @@ func NewKnowledgeSearchRegistryForKnowledgeBase(searcher retrieval.Searcher, kno
 }
 
 func NewKnowledgeSearchRegistryForKnowledgeBaseWithMaxBytes(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes int) (*ToolRegistry, error) {
-	tool, err := NewKnowledgeSearchToolForKnowledgeBaseWithMaxBytes(searcher, knowledgeBaseID, maxResultBytes)
+	return NewKnowledgeSearchRegistryForKnowledgeBaseWithLimits(searcher, knowledgeBaseID, maxResultBytes, retrieval.MaxResults)
+}
+
+func NewKnowledgeSearchRegistryForKnowledgeBaseWithLimits(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxResults int) (*ToolRegistry, error) {
+	tool, err := NewKnowledgeSearchToolForKnowledgeBaseWithLimits(searcher, knowledgeBaseID, maxResultBytes, maxResults)
 	if err != nil {
 		return nil, err
 	}

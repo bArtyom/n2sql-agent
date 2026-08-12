@@ -94,6 +94,7 @@ const providerForm = ref<ModelProvider>(emptyModelProvider());
 const conversationsLoading = ref(false);
 const conversationCreating = ref(false);
 const chatMode = ref<ChatMode>("agent");
+const topK = ref(5);
 let documentPollTimer: number | undefined;
 let a2aPollingTimer: number | undefined;
 
@@ -480,8 +481,8 @@ async function askQuestion() {
       method: "POST",
       headers,
       body: JSON.stringify(useResearchMode
-        ? { message: prompt, topK: 5 }
-        : { message: prompt, conversation_id: activeConversationID }),
+        ? { message: prompt, topK: topK.value }
+        : { message: prompt, top_k: topK.value, conversation_id: activeConversationID }),
     });
     if (!response.ok || !response.body) {
       const payload = await response.json().catch(() => null);
@@ -525,7 +526,7 @@ async function askA2ATask(prompt: string, answerIndex: number) {
   const task = await requestJSON<A2ATask>("/api/a2a/tasks", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ knowledge_base_id: selectedKnowledgeBaseId.value, message: prompt, top_k: 5 }),
+    body: JSON.stringify({ knowledge_base_id: selectedKnowledgeBaseId.value, message: prompt, top_k: topK.value }),
   });
   answer.activity = "任务已提交，等待后台 Agent 领取…";
 
@@ -883,6 +884,10 @@ onUnmounted(() => {
           </div>
           <p v-if="chatMode === 'research'" class="chat-mode-note">协作研究会根据证据多轮检索；本次结果只在当前页面展示，不写入会话历史。</p>
           <p v-else-if="chatMode === 'a2a'" class="chat-mode-note">异步任务会交给后台 Agent 执行；页面会自动跟踪任务状态，完成后展示答案和引用，不写入会话历史。</p>
+          <div class="retrieval-controls">
+            <div><strong>检索范围</strong><span>控制每次最多召回的文档片段</span></div>
+            <label>召回片段数<select v-model.number="topK" :disabled="streaming"><option v-for="value in [3, 5, 8, 12, 20]" :key="value" :value="value">{{ value }} 条</option></select></label>
+          </div>
           <template v-if="chatMode !== 'a2a'">
             <div class="conversation-bar">
               <div class="conversation-current">

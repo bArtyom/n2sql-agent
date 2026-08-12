@@ -21,6 +21,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
 	"github.com/bArtyom/n2sql-agent/internal/requestid"
+	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 )
 
 func NewKnowledgeBaseAgentChat(answerer agentservice.Answerer) http.Handler {
@@ -172,7 +173,8 @@ func idempotencyRequestHash(knowledgeBaseID int64, request agentservice.ChatRequ
 		KnowledgeBaseID int64  `json:"knowledge_base_id"`
 		ConversationID  int64  `json:"conversation_id"`
 		Message         string `json:"message"`
-	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message})
+		TopK            int    `json:"top_k"`
+	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message, TopK: request.TopK})
 	if err != nil {
 		return "", err
 	}
@@ -207,6 +209,13 @@ func decodeKnowledgeBaseAgentChatRequest(w http.ResponseWriter, r *http.Request,
 	request.Message = strings.TrimSpace(request.Message)
 	if request.Message == "" || len(request.Message) > maxChatQuestion {
 		http.Error(w, `{"error":"invalid agent chat message"}`, http.StatusBadRequest)
+		return 0, agentservice.ChatRequest{}, false
+	}
+	if request.TopK == 0 {
+		request.TopK = retrieval.DefaultResults
+	}
+	if request.TopK < 1 || request.TopK > retrieval.MaxResults {
+		http.Error(w, `{"error":"invalid agent chat top_k"}`, http.StatusBadRequest)
 		return 0, agentservice.ChatRequest{}, false
 	}
 	for index := range request.History {

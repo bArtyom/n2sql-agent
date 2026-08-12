@@ -23,6 +23,7 @@ type CachedHistorySummary struct {
 // ChatRequest contains the current question and an optional bounded conversation history.
 type ChatRequest struct {
 	Message        string                `json:"message"`
+	TopK           int                   `json:"top_k,omitempty"`
 	History        []HistoryMessage      `json:"history,omitempty"`
 	ConversationID int64                 `json:"conversation_id,omitempty"`
 	CachedSummary  *CachedHistorySummary `json:"-"`

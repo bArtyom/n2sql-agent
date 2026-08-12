@@ -117,6 +117,12 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	if knowledgeBaseID <= 0 || request.Message == "" || len(request.Message) > maxQuestionBytes {
 		return Response{}, ErrInvalidRequest
 	}
+	if request.TopK == 0 {
+		request.TopK = retrieval.DefaultResults
+	}
+	if request.TopK < 1 || request.TopK > retrieval.MaxResults {
+		return Response{}, ErrInvalidRequest
+	}
 	runContext, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	history, historySummaryStats, err := buildHistoryMessages(runContext, request.History, s.maxHistoryMessages, s.maxHistoryBytes, s.historySummarizer, request.CachedSummary)
@@ -124,7 +130,7 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		return Response{}, err
 	}
 
-	registry, err := agent.NewKnowledgeSearchRegistryForKnowledgeBaseWithMaxBytes(s.searcher, knowledgeBaseID, s.maxToolResultBytes)
+	registry, err := agent.NewKnowledgeSearchRegistryForKnowledgeBaseWithLimits(s.searcher, knowledgeBaseID, s.maxToolResultBytes, request.TopK)
 	if err != nil {
 		return Response{}, fmt.Errorf("create knowledge search registry: %w", err)
 	}
