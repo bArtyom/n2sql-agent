@@ -314,6 +314,22 @@ func TestServerRoutesKnowledgeBaseMCP(t *testing.T) {
 	}
 }
 
+func TestServerRoutesA2A(t *testing.T) {
+	server := app.New(app.Dependencies{A2AAnswers: multiAgentAnswererStub{}})
+
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/.well-known/agent.json", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "knowledge_base_question_answering") {
+		t.Fatalf("agent card response = (%d, %q), want A2A card", response.Code, response.Body.String())
+	}
+
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/a2a/tasks", strings.NewReader(`{"knowledge_base_id":7,"message":"问题"}`)))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("task response status = %d, want %d", response.Code, http.StatusAccepted)
+	}
+}
+
 func TestServerDoesNotRegisterMCPRouteWithoutSearch(t *testing.T) {
 	response := httptest.NewRecorder()
 	server := app.New(app.Dependencies{})

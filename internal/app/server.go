@@ -3,7 +3,9 @@ package app
 import (
 	"log/slog"
 	"net/http"
+	"time"
 
+	"github.com/bArtyom/n2sql-agent/internal/a2a"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/document"
@@ -34,6 +36,8 @@ type Dependencies struct {
 	AgentStreamingAnswers      agentservice.EventAnswerer
 	MultiAgentAnswers          multiagent.Answerer
 	MultiAgentStreamingAnswers multiagent.EventAnswerer
+	A2AAnswers                 multiagent.Answerer
+	A2ATaskTimeout             time.Duration
 	MCPKnowledgeSearch         retrieval.Searcher
 	MCPDocuments               document.Reader
 	MCPKnowledgeBases          knowledgebase.Store
@@ -103,6 +107,13 @@ func New(dependencies Dependencies) http.Handler {
 	}
 	if dependencies.MultiAgentStreamingAnswers != nil {
 		mux.Handle("POST /api/knowledge-bases/{id}/multi-agent-chat/stream", handler.NewMultiAgentChatStream(dependencies.MultiAgentStreamingAnswers))
+	}
+	if dependencies.A2AAnswers != nil {
+		a2aHandler := a2a.NewHandlerWithTimeout(dependencies.A2AAnswers, dependencies.A2ATaskTimeout)
+		mux.Handle("GET /.well-known/agent.json", a2aHandler)
+		mux.Handle("POST /api/a2a/tasks", a2aHandler)
+		mux.Handle("GET /api/a2a/tasks/{id}", a2aHandler)
+		mux.Handle("GET /api/a2a/tasks/{id}/result", a2aHandler)
 	}
 	if dependencies.MCPKnowledgeSearch != nil && dependencies.MCPDocuments != nil && dependencies.MCPKnowledgeBases != nil {
 		mux.Handle("POST /api/knowledge-bases/{id}/mcp", mcp.NewKnowledgeBaseHandler(dependencies.MCPKnowledgeSearch, dependencies.MCPDocuments, dependencies.MCPKnowledgeBases, dependencies.AgentMaxToolResultBytes))

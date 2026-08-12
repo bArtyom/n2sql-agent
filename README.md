@@ -178,3 +178,24 @@ curl -X POST http://localhost:8080/api/knowledge-bases/1/mcp \
 ```
 
 Go 侧的最小客户端位于 `internal/mcp`，可用于把同一个只读工具接入后续 Agent 编排；当前没有把 API Key 或模型调用移到浏览器。
+
+## 最小 A2A HTTP 适配
+
+当前提供一个项目内的最小 Agent-to-Agent HTTP 入口，用于让其他 Agent 以任务方式调用本项目的 Multi-Agent Supervisor。它不是完整的官方 A2A 实现，暂不提供分布式队列、认证、推送流和持久化任务。
+
+```text
+GET  /.well-known/agent.json   查看 Agent Card
+POST /api/a2a/tasks            创建任务
+GET  /api/a2a/tasks/{id}       查询任务状态
+GET  /api/a2a/tasks/{id}/result 获取完成结果
+```
+
+创建任务示例：
+
+```sh
+curl -X POST http://localhost:8080/api/a2a/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{"knowledge_base_id":1,"message":"这份资料如何启动服务？","top_k":5}'
+```
+
+任务会经历 `submitted → working → completed`，失败时进入 `failed`。任务数据当前只保存在进程内，服务重启后会丢失；最终答案和引用仍由现有 Multi-Agent Supervisor 生成。

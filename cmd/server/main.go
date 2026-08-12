@@ -108,6 +108,8 @@ func main() {
 			AgentStreamingAnswers:      agentAnswerService,
 			MultiAgentAnswers:          multiAgentAnswers,
 			MultiAgentStreamingAnswers: multiAgentAnswers,
+			A2AAnswers:                 multiAgentAnswers,
+			A2ATaskTimeout:             cfg.AgentTimeout,
 			MCPKnowledgeSearch:         searchService,
 			MCPDocuments:               documentService,
 			MCPKnowledgeBases:          knowledgeBaseStore,
