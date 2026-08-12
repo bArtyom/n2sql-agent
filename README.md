@@ -201,3 +201,5 @@ curl -X POST http://localhost:8080/api/a2a/tasks \
 任务会经历 `submitted → working → completed`，失败时进入 `failed`。服务启动时使用 PostgreSQL 保存任务，后台 A2A Runner 负责领取、执行和定期清理过期终态任务；任务结果在服务重启后仍可查询。默认保留 7 天，可通过 `A2A_TASK_RETENTION` 和 `A2A_CLEANUP_INTERVAL` 调整。已有 `/metrics` 会记录 `a2a_tasks_submitted_total`、`a2a_tasks_started_total`、`a2a_tasks_completed_total`、`a2a_tasks_failed_total` 和总耗时。内存 Store 仅用于单元测试和本地简化示例。
 
 Go pprof 诊断接口默认关闭。需要本机排查性能时，可在 `.env` 设置 `PPROF_ADDRESS=127.0.0.1:6060`，然后访问 `http://127.0.0.1:6060/debug/pprof/`。不要将该端口暴露到公网。
+
+当前有两个可重复的本地基线 benchmark：`go test -run '^$' -bench '^BenchmarkPprofIndex$' -benchmem ./internal/diagnostics` 测量 pprof 页面边界，`go test -run '^$' -bench '^BenchmarkKnowledgeBaseSearchHandler$' -benchmem ./internal/handler` 测量知识库搜索 Handler 的 JSON/参数边界。两者都使用本地 stub，不访问 PostgreSQL、embedding 或聊天模型，不消耗 API token；它们不能代表真实检索或模型延迟。
