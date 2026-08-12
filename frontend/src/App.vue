@@ -24,8 +24,10 @@ type ChatMessage = {
   status?: "streaming" | "done" | "error";
   activity?: string;
   researchEvents?: ResearchEvent[];
+  agentEvents?: AgentEvent[];
 };
 type ResearchEvent = { type: string; round?: number; label: string; detail?: string };
+type AgentEvent = { type: string; step?: number; label: string; detail?: string; status: "running" | "done" | "error" };
 type ChatMode = "agent" | "research" | "a2a";
 type A2ATask = {
   id: string;
@@ -47,6 +49,7 @@ type StreamPayload = {
   type?: string;
   role?: string;
   round?: number;
+  step_number?: number;
 };
 type ModelProvider = {
   name: string;
@@ -566,6 +569,22 @@ function recordResearchEvent(answer: ChatMessage, type: string, label: string, d
   if (answer.researchEvents.length > 12) answer.researchEvents.shift();
 }
 
+function recordAgentEvent(answer: ChatMessage, type: string, label: string, detail = "", step?: number, status: AgentEvent["status"] = "done") {
+  answer.agentEvents ??= [];
+  answer.agentEvents.push({ type, step, label, detail: detail.slice(0, 140), status });
+  if (answer.agentEvents.length > 12) answer.agentEvents.shift();
+}
+
+function finishLastAgentToolEvent(answer: ChatMessage, detail: string, status: AgentEvent["status"] = "done") {
+  const events = answer.agentEvents ?? [];
+  const latest = [...events].reverse().find((item) => item.type === "tool_called" && item.status === "running");
+  if (latest) {
+    latest.label = "知识库检索完成";
+    latest.detail = detail.slice(0, 140);
+    latest.status = status;
+  }
+}
+
 function consumeSSEBlock(block: string, answerIndex: number, researchMode = false) {
   const answer = messages.value[answerIndex];
   if (!answer) return;
@@ -589,6 +608,7 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         answer.content += payload.delta ?? "";
         break;
       case "run_started":
+        if (!researchMode) recordAgentEvent(answer, event, "Agent 开始运行", "正在分析问题", payload.step_number, "running");
         answer.activity = researchMode ? "协作研究已启动…" : "正在理解问题…";
         break;
       case "research_started":
@@ -629,19 +649,42 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         answer.activity = "资料不足，已安全结束。";
         break;
       case "tool_called":
+        if (!researchMode) {
+          const toolName = dataString("tool_name") || "knowledge_search";
+          recordAgentEvent(answer, event, "调用知识库工具", toolName, payload.step_number, "running");
+        }
         answer.activity = dataString("tool_name") === "knowledge_search" ? "正在查找资料…" : "正在调用工具…";
         break;
       case "tool_finished":
+        if (!researchMode) {
+          const sources = parseSources(eventData.sources);
+          answer.sources = mergeSources(answer.sources ?? [], sources);
+          finishLastAgentToolEvent(answer, eventData.no_relevant_results === true ? "没有找到足够相关资料" : `${sources.length || "已"} 条结果已返回`);
+        }
         if (Object.prototype.hasOwnProperty.call(eventData, "sources")) {
           answer.sources = mergeSources(answer.sources ?? [], parseSources(eventData.sources));
         }
         answer.activity = "资料查找完成，正在组织答案…";
         break;
       case "message_delta":
+        if (!researchMode && !answer.agentEvents?.some((item) => item.type === "answer_started")) {
+          recordAgentEvent(answer, "answer_started", "开始生成答案", "模型正在根据检索结果组织回答", payload.step_number, "running");
+        }
         answer.content += dataString("content") || payload.content || "";
         answer.activity = "正在组织答案…";
         break;
       case "run_finished":
+        if (!researchMode) {
+          for (const agentEvent of answer.agentEvents ?? []) {
+            if (agentEvent.status === "running") agentEvent.status = "done";
+          }
+          const answerEvent = answer.agentEvents?.find((item) => item.type === "answer_started");
+          if (answerEvent) {
+            answerEvent.detail = "最终回答已生成";
+            answerEvent.status = "done";
+          }
+          recordAgentEvent(answer, event, "Agent 完成", "本轮运行成功", payload.step_number, "done");
+        }
         if (researchMode) answer.sources = mergeSources(answer.sources ?? [], parseSources(eventData.sources));
         answer.content ||= dataString("answer") || payload.answer || "";
         answer.activity = "";
@@ -667,11 +710,18 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         break;
       case "run_failed":
       case "error":
+        if (!researchMode) {
+          for (const agentEvent of answer.agentEvents ?? []) {
+            if (agentEvent.status === "running") agentEvent.status = "error";
+          }
+          recordAgentEvent(answer, event, "Agent 运行失败", dataString("error") || payload.error || "执行失败", payload.step_number, "error");
+        }
         answer.status = "error";
         answer.activity = "";
         answer.content = dataString("error") || payload.error || "问答失败。";
         break;
       case "run_canceled":
+        if (!researchMode) recordAgentEvent(answer, event, "Agent 已取消", "请求被取消", payload.step_number, "error");
         answer.status = "error";
         answer.activity = "";
         answer.content = "请求已取消。";
@@ -867,6 +917,14 @@ onUnmounted(() => {
               <div v-if="message.role === 'assistant' && message.status === 'streaming' && message.activity" class="message-activity">
                 <span class="message-activity-dot" />
                 <span>{{ message.activity }}</span>
+              </div>
+              <div v-if="message.role === 'assistant' && message.agentEvents?.length" class="agent-trace">
+                <div class="agent-trace-head"><span>Agent 运行轨迹</span><small>{{ message.agentEvents.length }} EVENTS</small></div>
+                <div v-for="trace in message.agentEvents" :key="`${trace.type}-${trace.step}-${trace.label}-${trace.detail}`" class="agent-trace-row" :class="`agent-trace-row--${trace.status}`">
+                  <span class="agent-trace-marker">{{ trace.status === 'done' ? '✓' : trace.status === 'error' ? '!' : '·' }}</span>
+                  <span class="agent-trace-label">{{ trace.label }}</span>
+                  <small v-if="trace.detail">{{ trace.detail }}</small>
+                </div>
               </div>
               <div v-if="message.role === 'assistant' && message.researchEvents?.length" class="research-trace">
                 <div class="research-trace-head"><span>研究轨迹</span><small>{{ message.researchEvents.length }} EVENTS</small></div>
