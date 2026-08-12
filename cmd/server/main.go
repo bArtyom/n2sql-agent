@@ -16,6 +16,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/app"
 	"github.com/bArtyom/n2sql-agent/internal/config"
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
+	"github.com/bArtyom/n2sql-agent/internal/diagnostics"
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
@@ -125,6 +126,17 @@ func main() {
 	}
 	runContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	var pprofDone chan struct{}
+	if cfg.PprofAddress != "" {
+		pprofServer := &http.Server{Addr: cfg.PprofAddress, Handler: diagnostics.NewPprofHandler()}
+		pprofDone = make(chan struct{})
+		go func() {
+			defer close(pprofDone)
+			if err := app.RunServer(runContext, pprofServer, 0); err != nil {
+				slog.ErrorContext(runContext, "pprof_server_error", "error", err)
+			}
+		}()
+	}
 	workerDone := make(chan struct{})
 	a2aRunner := a2a.NewRunnerWithCleanup(a2aStore, multiAgentAnswers, cfg.AgentTimeout, cfg.A2ATaskRetention, cfg.A2ACleanupInterval, metricsRegistry)
 	a2aDone := make(chan struct{})
@@ -146,6 +158,9 @@ func main() {
 	stop()
 	<-workerDone
 	<-a2aDone
+	if pprofDone != nil {
+		<-pprofDone
+	}
 	if serveErr != nil {
 		log.Fatal(serveErr)
 	}

@@ -88,6 +88,24 @@ func TestLoadReadsA2ACleanupSettings(t *testing.T) {
 	}
 }
 
+func TestLoadReadsPprofAddress(t *testing.T) {
+	t.Setenv("PPROF_ADDRESS", "127.0.0.1:6060")
+
+	cfg := config.Load()
+	if cfg.PprofAddress != "127.0.0.1:6060" {
+		t.Fatalf("pprof address = %q, want 127.0.0.1:6060", cfg.PprofAddress)
+	}
+}
+
+func TestLoadDisablesPprofByDefault(t *testing.T) {
+	t.Setenv("PPROF_ADDRESS", "")
+
+	cfg := config.Load()
+	if cfg.PprofAddress != "" {
+		t.Fatalf("pprof address = %q, want disabled", cfg.PprofAddress)
+	}
+}
+
 func TestLoadUsesDefaultA2ACleanupSettingsForInvalidValues(t *testing.T) {
 	t.Setenv("A2A_TASK_RETENTION", "not-a-duration")
 	t.Setenv("A2A_CLEANUP_INTERVAL", "0s")

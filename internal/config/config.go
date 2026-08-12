@@ -36,6 +36,7 @@ type Config struct {
 	ModelProviderAllowedHosts  []string
 	UploadDir                  string
 	WorkerPollInterval         time.Duration
+	PprofAddress               string
 	A2ATaskRetention           time.Duration
 	A2ACleanupInterval         time.Duration
 	OCRModel                   string
@@ -74,6 +75,7 @@ func Load() Config {
 		ModelProviderAllowedHosts:  allowedHosts,
 		UploadDir:                  uploadDir(),
 		WorkerPollInterval:         workerPollInterval(),
+		PprofAddress:               strings.TrimSpace(os.Getenv("PPROF_ADDRESS")),
 		A2ATaskRetention:           durationEnv("A2A_TASK_RETENTION", defaultA2ATaskRetention),
 		A2ACleanupInterval:         durationEnv("A2A_CLEANUP_INTERVAL", defaultA2ACleanupInterval),
 		OCRModel:                   strings.TrimSpace(os.Getenv("OCR_MODEL")),
