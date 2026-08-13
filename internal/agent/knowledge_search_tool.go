@@ -22,7 +22,7 @@ var (
 )
 
 const (
-	DefaultMaxToolResultBytes = 32 * 1024
+	DefaultMaxToolResultBytes = retrieval.DefaultPromptContextBytes
 	// DefaultMaxKnowledgeDistance is the largest pgvector cosine distance
 	// accepted as evidence for an Agent answer. Larger values are treated as
 	// unrelated search hits rather than being passed to the model as facts.
@@ -288,8 +288,10 @@ func limitKnowledgeSearchResults(results []retrieval.Result, maxBytes int) ([]by
 		return nil, nil, false, ErrInvalidMaxResultBytes
 	}
 	visible := make([]retrieval.Result, 0, len(results))
+	context := retrieval.NewPromptContext()
 	for _, result := range results {
-		candidate := appendSearchResult(visible, retrieval.ResultForPrompt(result))
+		promptResult := context.ResultForPrompt(result)
+		candidate := appendSearchResult(visible, promptResult)
 		encoded, err := json.Marshal(candidate)
 		if err != nil {
 			return nil, nil, false, err
@@ -299,7 +301,7 @@ func limitKnowledgeSearchResults(results []retrieval.Result, maxBytes int) ([]by
 			continue
 		}
 
-		shortened, fits, err := shortenSearchResult(visible, retrieval.ResultForPrompt(result), maxBytes)
+		shortened, fits, err := shortenSearchResult(visible, promptResult, maxBytes)
 		if err != nil {
 			return nil, nil, false, err
 		}

@@ -25,17 +25,56 @@ var (
 )
 
 const (
-	DefaultResults          = 5
-	MaxResults              = 20
-	MaxDocumentIDs          = 100
-	MaxQueryVariants        = 2
-	MaxConcurrentQueries    = MaxQueryVariants + 1
-	DefaultMaxDistance      = 0.65
-	DefaultKeywordThreshold = 0.10
-	rrfConstant             = 60
+	DefaultResults            = 5
+	MaxResults                = 20
+	DefaultPromptContextBytes = 32 << 10
+	MaxDocumentIDs            = 100
+	MaxQueryVariants          = 2
+	MaxConcurrentQueries      = MaxQueryVariants + 1
+	DefaultMaxDistance        = 0.65
+	DefaultKeywordThreshold   = 0.10
+	rrfConstant               = 60
 )
 
 type Result = documentchunk.SearchResult
+
+// PromptContext keeps parent text out of a model prompt after it has already
+// been included once. The original search results remain unchanged, so every
+// child citation can still be returned to the caller.
+type PromptContext struct {
+	seenParents map[string]struct{}
+}
+
+func NewPromptContext() *PromptContext {
+	return &PromptContext{seenParents: make(map[string]struct{})}
+}
+
+func (c *PromptContext) Content(result Result) string {
+	if c == nil {
+		return ContextContent(result)
+	}
+	if c.seenParents == nil {
+		c.seenParents = make(map[string]struct{})
+	}
+	if result.ParentContent == "" {
+		return ContextContent(result)
+	}
+	key := fmt.Sprintf("%d:%d", result.DocumentID, result.ParentPosition)
+	if _, seen := c.seenParents[key]; seen {
+		return "[命中片段]\n" + result.Content
+	}
+	c.seenParents[key] = struct{}{}
+	return "[父块上下文]\n" + result.ParentContent + "\n\n[命中片段]\n" + result.Content
+}
+
+func (c *PromptContext) ResultForPrompt(result Result) Result {
+	result.Content = c.Content(result)
+	result.ContextBefore = nil
+	result.ContextAfter = nil
+	result.ParentContent = ""
+	result.ParentPosition = 0
+	return result
+}
 
 type Embedder interface {
 	Embed(context.Context, []string) (modelclient.EmbeddingResponse, error)
@@ -333,12 +372,7 @@ func ContextContent(result Result) string {
 // ResultForPrompt keeps citation metadata while putting the nearby text into
 // the content field that a model already understands.
 func ResultForPrompt(result Result) Result {
-	result.Content = ContextContent(result)
-	result.ContextBefore = nil
-	result.ContextAfter = nil
-	result.ParentContent = ""
-	result.ParentPosition = 0
-	return result
+	return NewPromptContext().ResultForPrompt(result)
 }
 
 func (s *Service) expandContext(ctx context.Context, knowledgeBaseID int64, results []Result) ([]Result, error) {
