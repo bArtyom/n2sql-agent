@@ -22,11 +22,12 @@ const (
 var ErrNoTask = errors.New("no pending document processing task")
 
 type Task struct {
-	ID           int64
-	DocumentID   int64
-	AttemptCount int
-	StoragePath  string
-	ContentType  string
+	ID              int64
+	DocumentID      int64
+	KnowledgeBaseID int64
+	AttemptCount    int
+	StoragePath     string
+	ContentType     string
 }
 
 type Store interface {
@@ -41,6 +42,10 @@ type RetryStore interface {
 }
 
 type Processor func(context.Context, Task) error
+
+type CacheInvalidator interface {
+	ClearCache(int64)
+}
 
 type TextExtractor interface {
 	Extract(context.Context, string, string) (string, error)
@@ -120,6 +125,7 @@ type Runner struct {
 	processor   Processor
 	metrics     *metrics.Registry
 	retryPolicy RetryPolicy
+	invalidator CacheInvalidator
 }
 
 func NewRunner(store Store, processor Processor) *Runner {
@@ -130,15 +136,23 @@ func NewRunnerWithMetrics(store Store, processor Processor, registry *metrics.Re
 	return NewRunnerWithMetricsAndPolicy(store, processor, registry, DefaultRetryPolicy)
 }
 
+func NewRunnerWithMetricsAndInvalidator(store Store, processor Processor, registry *metrics.Registry, invalidator CacheInvalidator) *Runner {
+	return NewRunnerWithMetricsAndPolicyAndInvalidator(store, processor, registry, DefaultRetryPolicy, invalidator)
+}
+
 func NewRunnerWithPolicy(store Store, processor Processor, policy RetryPolicy) *Runner {
 	return NewRunnerWithMetricsAndPolicy(store, processor, nil, policy)
 }
 
 func NewRunnerWithMetricsAndPolicy(store Store, processor Processor, registry *metrics.Registry, policy RetryPolicy) *Runner {
+	return NewRunnerWithMetricsAndPolicyAndInvalidator(store, processor, registry, policy, nil)
+}
+
+func NewRunnerWithMetricsAndPolicyAndInvalidator(store Store, processor Processor, registry *metrics.Registry, policy RetryPolicy, invalidator CacheInvalidator) *Runner {
 	if policy.MaxAttempts <= 0 {
 		policy = DefaultRetryPolicy
 	}
-	return &Runner{store: store, processor: processor, metrics: registry, retryPolicy: policy}
+	return &Runner{store: store, processor: processor, metrics: registry, retryPolicy: policy, invalidator: invalidator}
 }
 
 func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
@@ -174,6 +188,10 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 			return true, markErr
 		}
 		return true, nil
+	}
+	if r.invalidator != nil && task.KnowledgeBaseID > 0 {
+		// Replace has succeeded, so old retrieval results are no longer valid.
+		r.invalidator.ClearCache(task.KnowledgeBaseID)
 	}
 	if err := r.store.MarkSucceeded(context.WithoutCancel(ctx), task.ID); err != nil {
 		if r.metrics != nil {
@@ -297,8 +315,8 @@ func (s *PostgresStore) ClaimNext(ctx context.Context) (Task, error) {
 		FROM next_task, documents AS document
 		WHERE task.id = next_task.id
 		  AND document.id = task.document_id
-			RETURNING task.id, document.id, task.attempt_count, document.storage_path, document.content_type`).Scan(
-		&task.ID, &task.DocumentID, &task.AttemptCount, &task.StoragePath, &task.ContentType,
+			RETURNING task.id, document.id, document.knowledge_base_id, task.attempt_count, document.storage_path, document.content_type`).Scan(
+		&task.ID, &task.DocumentID, &task.KnowledgeBaseID, &task.AttemptCount, &task.StoragePath, &task.ContentType,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, ErrNoTask

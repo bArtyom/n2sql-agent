@@ -140,22 +140,46 @@ type Service struct {
 	keyword  KeywordSearcher
 	reranker Reranker
 	rewriter QueryRewriter
+	cache    *resultCache
 }
 
 func NewService(embedder Embedder, chunks ChunkSearcher) *Service {
-	return &Service{embedder: embedder, chunks: chunks}
+	return newService(embedder, chunks, nil, nil, nil, DefaultCacheConfig())
 }
 
 func NewHybridService(embedder Embedder, chunks ChunkSearcher, keyword KeywordSearcher) *Service {
-	return &Service{embedder: embedder, chunks: chunks, keyword: keyword}
+	return newService(embedder, chunks, keyword, nil, nil, DefaultCacheConfig())
 }
 
 func NewHybridServiceWithReranker(embedder Embedder, chunks ChunkSearcher, keyword KeywordSearcher, reranker Reranker) *Service {
-	return &Service{embedder: embedder, chunks: chunks, keyword: keyword, reranker: reranker}
+	return newService(embedder, chunks, keyword, reranker, nil, DefaultCacheConfig())
 }
 
 func NewHybridServiceWithRerankerAndRewriter(embedder Embedder, chunks ChunkSearcher, keyword KeywordSearcher, reranker Reranker, rewriter QueryRewriter) *Service {
-	return &Service{embedder: embedder, chunks: chunks, keyword: keyword, reranker: reranker, rewriter: rewriter}
+	return NewHybridServiceWithRerankerAndRewriterAndCache(embedder, chunks, keyword, reranker, rewriter, DefaultCacheConfig())
+}
+
+func NewHybridServiceWithRerankerAndRewriterAndCache(embedder Embedder, chunks ChunkSearcher, keyword KeywordSearcher, reranker Reranker, rewriter QueryRewriter, cacheConfig CacheConfig) *Service {
+	return newService(embedder, chunks, keyword, reranker, rewriter, cacheConfig)
+}
+
+func newService(embedder Embedder, chunks ChunkSearcher, keyword KeywordSearcher, reranker Reranker, rewriter QueryRewriter, cacheConfig CacheConfig) *Service {
+	return &Service{
+		embedder: embedder,
+		chunks:   chunks,
+		keyword:  keyword,
+		reranker: reranker,
+		rewriter: rewriter,
+		cache:    newResultCache(cacheConfig),
+	}
+}
+
+// ClearCache removes cached results for one knowledge base. Call it after a
+// document is successfully re-indexed so the next question sees new chunks.
+func (s *Service) ClearCache(knowledgeBaseID int64) {
+	if s.cache != nil {
+		s.cache.clear(knowledgeBaseID)
+	}
 }
 
 func (s *Service) Search(ctx context.Context, knowledgeBaseID int64, query string, limit int) ([]Result, error) {
@@ -180,23 +204,65 @@ func (s *Service) searchWithOptions(ctx context.Context, knowledgeBaseID int64, 
 	if err != nil {
 		return nil, err
 	}
+	options.DocumentIDs = documentIDs
+	key := makeResultCacheKey(knowledgeBaseID, query, limit, documentIDs, options.QueryRewrite)
+	if s.cache != nil {
+		if value, ok := s.cache.get(key); ok {
+			usage.ObserveQueryRewrite(ctx, value.rewriteState)
+			return value.results, nil
+		}
+		flight, owner := s.cache.begin(key)
+		if !owner {
+			value, waitErr := s.cache.wait(ctx, flight)
+			if waitErr != nil {
+				return nil, waitErr
+			}
+			usage.ObserveQueryRewrite(ctx, value.rewriteState)
+			return value.results, nil
+		}
+		// The first get and begin are separate operations. Recheck after
+		// claiming the flight so a request that raced with a just-finished
+		// loader does not repeat the provider calls unnecessarily.
+		if value, ok := s.cache.get(key); ok {
+			s.cache.finish(key, flight, value, nil)
+			usage.ObserveQueryRewrite(ctx, value.rewriteState)
+			return value.results, nil
+		}
+		value, searchErr := s.searchUncached(ctx, knowledgeBaseID, query, limit, options, documentIDs)
+		s.cache.finish(key, flight, value, searchErr)
+		if searchErr != nil {
+			return nil, searchErr
+		}
+		return value.results, nil
+	}
+	value, err := s.searchUncached(ctx, knowledgeBaseID, query, limit, options, documentIDs)
+	if err != nil {
+		return nil, err
+	}
+	return value.results, nil
+}
+
+func (s *Service) searchUncached(ctx context.Context, knowledgeBaseID int64, query string, limit int, options SearchOptions, documentIDs []int64) (cachedResult, error) {
 	queries := []string{query}
+	rewriteState := usage.QueryRewriteObservation{}
 	if options.QueryRewrite {
+		rewriteState.Enabled = true
 		if s.rewriter == nil {
-			usage.ObserveQueryRewrite(ctx, usage.QueryRewriteObservation{Enabled: true, Fallback: true})
+			rewriteState.Fallback = true
 		} else {
 			variants, rewriteErr := s.rewriter.Rewrite(ctx, query, MaxQueryVariants)
 			if rewriteErr != nil {
 				if errors.Is(rewriteErr, context.Canceled) || errors.Is(rewriteErr, context.DeadlineExceeded) {
-					return nil, fmt.Errorf("rewrite search query: %w", rewriteErr)
+					return cachedResult{}, fmt.Errorf("rewrite search query: %w", rewriteErr)
 				}
-				usage.ObserveQueryRewrite(ctx, usage.QueryRewriteObservation{Enabled: true, Fallback: true})
+				rewriteState.Fallback = true
 			} else {
 				variants = normalizeQueryVariants(query, variants)
 				if len(variants) == 0 {
-					usage.ObserveQueryRewrite(ctx, usage.QueryRewriteObservation{Enabled: true, Fallback: true})
+					rewriteState.Fallback = true
 				} else {
-					usage.ObserveQueryRewrite(ctx, usage.QueryRewriteObservation{Enabled: true, Applied: true, VariantCount: len(variants)})
+					rewriteState.Applied = true
+					rewriteState.VariantCount = len(variants)
 					queries = append(queries, variants...)
 				}
 			}
@@ -233,7 +299,7 @@ func (s *Service) searchWithOptions(ctx context.Context, knowledgeBaseID int64, 
 	}
 	waitGroup.Wait()
 	if firstErr != nil {
-		return nil, firstErr
+		return cachedResult{}, firstErr
 	}
 	var merged []Result
 	for _, queryResult := range queryResults {
@@ -245,20 +311,24 @@ func (s *Service) searchWithOptions(ctx context.Context, knowledgeBaseID int64, 
 		merged = mergeCandidateResults(merged, queryResult.results, MaxResults)
 	}
 	if s.reranker == nil {
-		return merged[:min(len(merged), limit)], nil
+		results := merged[:min(len(merged), limit)]
+		usage.ObserveQueryRewrite(ctx, rewriteState)
+		return cachedResult{results: results, rewriteState: rewriteState}, nil
 	}
 	if len(merged) == 0 {
-		return nil, nil
+		usage.ObserveQueryRewrite(ctx, rewriteState)
+		return cachedResult{rewriteState: rewriteState}, nil
 	}
 	rankLimit := min(len(merged), limit)
 	ranked, err := s.reranker.Rerank(ctx, query, merged, rankLimit)
 	if err != nil {
-		return nil, fmt.Errorf("rerank search results: %w", err)
+		return cachedResult{}, fmt.Errorf("rerank search results: %w", err)
 	}
 	if len(ranked) > rankLimit {
-		return ranked[:rankLimit], nil
+		ranked = ranked[:rankLimit]
 	}
-	return ranked, nil
+	usage.ObserveQueryRewrite(ctx, rewriteState)
+	return cachedResult{results: ranked, rewriteState: rewriteState}, nil
 }
 
 type querySearchResult struct {

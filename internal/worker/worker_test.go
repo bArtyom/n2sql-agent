@@ -33,6 +33,14 @@ type taskStoreStub struct {
 	failedErr error
 }
 
+type cacheInvalidatorStub struct {
+	knowledgeBaseIDs []int64
+}
+
+func (s *cacheInvalidatorStub) ClearCache(knowledgeBaseID int64) {
+	s.knowledgeBaseIDs = append(s.knowledgeBaseIDs, knowledgeBaseID)
+}
+
 func captureLogs(t *testing.T) *strings.Builder {
 	t.Helper()
 	var output strings.Builder
@@ -234,6 +242,19 @@ func TestRunnerMarksSuccessfulTask(t *testing.T) {
 	processed, err := runner.RunOnce(context.Background())
 	if err != nil || !processed || store.succeeded != 9 {
 		t.Fatalf("processed=%v err=%v succeeded=%d", processed, err, store.succeeded)
+	}
+}
+
+func TestRunnerClearsRetrievalCacheAfterSuccessfulProcessing(t *testing.T) {
+	store := &taskStoreStub{task: worker.Task{ID: 9, DocumentID: 4, KnowledgeBaseID: 7}}
+	invalidator := &cacheInvalidatorStub{}
+	runner := worker.NewRunnerWithMetricsAndInvalidator(store, func(context.Context, worker.Task) error { return nil }, nil, invalidator)
+
+	if _, err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+	if len(invalidator.knowledgeBaseIDs) != 1 || invalidator.knowledgeBaseIDs[0] != 7 {
+		t.Fatalf("invalidated knowledge bases = %#v, want [7]", invalidator.knowledgeBaseIDs)
 	}
 }
 

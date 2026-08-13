@@ -78,6 +78,16 @@ func TestLoadReadsAgentSettings(t *testing.T) {
 	}
 }
 
+func TestLoadReadsRetrievalCacheSettings(t *testing.T) {
+	t.Setenv("RETRIEVAL_CACHE_ENTRIES", "32")
+	t.Setenv("RETRIEVAL_CACHE_TTL", "45s")
+
+	cfg := config.Load()
+	if cfg.RetrievalCacheEntries != 32 || cfg.RetrievalCacheTTL != 45*time.Second {
+		t.Fatalf("retrieval cache settings = %d/%s, want 32/45s", cfg.RetrievalCacheEntries, cfg.RetrievalCacheTTL)
+	}
+}
+
 func TestLoadReadsA2ACleanupSettings(t *testing.T) {
 	t.Setenv("A2A_TASK_RETENTION", "48h")
 	t.Setenv("A2A_CLEANUP_INTERVAL", "15m")

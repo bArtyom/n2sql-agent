@@ -64,8 +64,15 @@ func main() {
 	processor := worker.NewEmbeddingChunkingProcessor(extractor, documentchunk.NewSplitter(1000, 150), chunkStore, embeddingService)
 	metricsRegistry := metrics.New()
 	a2aStore := a2a.NewPostgresStore(db)
-	runner := worker.NewRunnerWithMetrics(worker.NewPostgresStore(db), processor, metricsRegistry)
-	searchService := retrieval.NewHybridServiceWithRerankerAndRewriter(embeddingService, chunkStore, chunkStore, rerankService, queryRewriteService)
+	searchService := retrieval.NewHybridServiceWithRerankerAndRewriterAndCache(
+		embeddingService,
+		chunkStore,
+		chunkStore,
+		rerankService,
+		queryRewriteService,
+		retrieval.CacheConfig{MaxEntries: cfg.RetrievalCacheEntries, TTL: cfg.RetrievalCacheTTL},
+	)
+	runner := worker.NewRunnerWithMetricsAndInvalidator(worker.NewPostgresStore(db), processor, metricsRegistry, searchService)
 	answerService := rag.NewService(searchService, chatService)
 	var historySummarizer agentservice.HistorySummarizer
 	if cfg.AgentHistorySummaryEnabled {

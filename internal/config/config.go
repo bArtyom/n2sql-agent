@@ -27,6 +27,8 @@ const (
 	defaultAgentMaxToolResultBytes    = 32 * 1024
 	defaultAgentHistorySummary        = true
 	defaultAgentHistorySummaryTimeout = 10 * time.Second
+	defaultRetrievalCacheEntries      = 128
+	defaultRetrievalCacheTTL          = 2 * time.Minute
 )
 
 type Config struct {
@@ -52,6 +54,8 @@ type Config struct {
 	AgentMaxHistoryBytes       int
 	AgentHistorySummaryEnabled bool
 	AgentHistorySummaryTimeout time.Duration
+	RetrievalCacheEntries      int
+	RetrievalCacheTTL          time.Duration
 }
 
 func Load() Config {
@@ -91,6 +95,8 @@ func Load() Config {
 		AgentMaxHistoryBytes:       positiveIntEnv("AGENT_MAX_HISTORY_BYTES", agent.DefaultMaxHistoryBytes),
 		AgentHistorySummaryEnabled: boolEnv("AGENT_HISTORY_SUMMARY_ENABLED", defaultAgentHistorySummary),
 		AgentHistorySummaryTimeout: time.Duration(positiveIntEnv("AGENT_HISTORY_SUMMARY_TIMEOUT_MS", int(defaultAgentHistorySummaryTimeout/time.Millisecond))) * time.Millisecond,
+		RetrievalCacheEntries:      positiveIntEnv("RETRIEVAL_CACHE_ENTRIES", defaultRetrievalCacheEntries),
+		RetrievalCacheTTL:          durationEnv("RETRIEVAL_CACHE_TTL", defaultRetrievalCacheTTL),
 	}
 }
 
