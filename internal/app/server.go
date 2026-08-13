@@ -83,9 +83,6 @@ func New(dependencies Dependencies) http.Handler {
 		if reader, ok := dependencies.Documents.(document.Reader); ok {
 			mux.Handle("GET /api/knowledge-bases/{id}/documents", handler.NewDocumentList(reader))
 		}
-		if reprocessor, ok := dependencies.Documents.(document.Reprocessor); ok {
-			mux.Handle("POST /api/knowledge-bases/{id}/documents/{documentId}/reprocess", handler.NewDocumentReprocess(reprocessor))
-		}
 	}
 	if dependencies.Embeddings != nil {
 		mux.Handle("POST /api/model-provider/embedding-test", handler.NewModelProviderEmbeddingTest(dependencies.Embeddings))

@@ -18,7 +18,6 @@ const MaxFileBytes int64 = 10 << 20
 
 var (
 	ErrKnowledgeBaseNotFound = errors.New("knowledge base not found")
-	ErrDocumentNotFound      = errors.New("document not found")
 	ErrUnsupportedFile       = errors.New("unsupported file")
 	ErrFileTooLarge          = errors.New("file is too large")
 )
@@ -55,10 +54,6 @@ type Store interface {
 	EnsureKnowledgeBase(context.Context, int64) error
 	List(context.Context, int64) ([]Document, error)
 	Create(context.Context, CreateInput) (Document, error)
-}
-
-type Reprocessor interface {
-	Reprocess(context.Context, int64, int64) (Document, error)
 }
 
 type Reader interface {
@@ -122,22 +117,6 @@ func (s *Service) List(ctx context.Context, knowledgeBaseID int64) ([]Document, 
 		return nil, err
 	}
 	return documents, nil
-}
-
-// Reprocess queues the document again so the worker rebuilds its chunks and
-// embeddings. The existing file is reused; no duplicate document is created.
-func (s *Service) Reprocess(ctx context.Context, knowledgeBaseID, documentID int64) (Document, error) {
-	if knowledgeBaseID <= 0 || documentID <= 0 {
-		return Document{}, ErrKnowledgeBaseNotFound
-	}
-	if err := s.store.EnsureKnowledgeBase(ctx, knowledgeBaseID); err != nil {
-		return Document{}, err
-	}
-	reprocessor, ok := s.store.(Reprocessor)
-	if !ok {
-		return Document{}, errors.New("document reprocessing is unavailable")
-	}
-	return reprocessor.Reprocess(ctx, knowledgeBaseID, documentID)
 }
 
 type LocalFileStore struct{ root string }
@@ -283,43 +262,6 @@ func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Document
 		return Document{}, fmt.Errorf("commit document transaction: %w", err)
 	}
 	document.ProcessingStatus = "pending"
-	return document, nil
-}
-
-func (s *PostgresStore) Reprocess(ctx context.Context, knowledgeBaseID, documentID int64) (Document, error) {
-	var document Document
-	err := s.db.QueryRowContext(ctx, `
-		WITH target AS (
-			SELECT d.id, d.knowledge_base_id, d.original_filename, d.content_type, d.size_bytes
-			FROM documents AS d
-			WHERE d.id = $2
-			  AND d.knowledge_base_id = $1
-			  AND d.knowledge_base_id IN (
-				SELECT id FROM knowledge_bases
-				WHERE administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
-			  )
-		), queued AS (
-			INSERT INTO document_processing_tasks (document_id)
-			SELECT id FROM target
-			ON CONFLICT (document_id) WHERE status IN ('pending', 'processing') DO NOTHING
-			RETURNING document_id
-		)
-		SELECT target.id, target.knowledge_base_id, target.original_filename, target.content_type, target.size_bytes,
-			CASE WHEN queued.document_id IS NOT NULL THEN 'pending' ELSE active.status END
-		FROM target
-		LEFT JOIN queued ON queued.document_id = target.id
-		LEFT JOIN document_processing_tasks AS active
-		  ON active.document_id = target.id
-		 AND active.status IN ('pending', 'processing')`, knowledgeBaseID, documentID).Scan(
-		&document.ID, &document.KnowledgeBaseID, &document.OriginalFilename,
-		&document.ContentType, &document.SizeBytes, &document.ProcessingStatus,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return Document{}, ErrDocumentNotFound
-	}
-	if err != nil {
-		return Document{}, fmt.Errorf("reprocess document: %w", err)
-	}
 	return document, nil
 }
 

@@ -87,7 +87,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus
 .document-copy strong { color: #31483f; font-size: 12px; font-weight: 700; }
 .document-copy span { margin-top: 5px; color: #9aa59d; font-size: 10px; }
 .processing-status { display: flex; align-items: center; gap: 5px; color: #788880; font-size: 10px; white-space: nowrap; }
-.document-reprocess { margin-left: 4px; color: #a26c3c; white-space: nowrap; }
 .processing-status i { display: block; width: 5px; height: 5px; background: #b0bdb3; border-radius: 50%; }
 .processing-status--succeeded { color: #51866a; }.processing-status--succeeded i { background: #69a77f; }
 .processing-status--processing i { background: #d18c4b; animation: pulse 1.3s infinite; }.processing-status--failed { color: #a46157; }.processing-status--failed i { background: #be6e63; }
