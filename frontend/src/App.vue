@@ -29,6 +29,10 @@ type ChatMessage = {
   researchEvents?: ResearchEvent[];
   agentEvents?: AgentEvent[];
   queryRewrite?: QueryRewriteStatus;
+  requestMessage?: string;
+  conversationId?: number | null;
+  mode?: ChatMode;
+  retryable?: boolean;
 };
 type QueryRewriteStatus = { enabled: boolean; applied: boolean; fallback: boolean; variant_count: number };
 type ResearchEvent = { type: string; round?: number; label: string; detail?: string };
@@ -554,7 +558,15 @@ async function askQuestion() {
   question.value = "";
   closeSource();
   messages.value.push({ role: "user", content: prompt });
-  const answer: ChatMessage = { role: "assistant", content: "", sources: [], status: "streaming" };
+  const answer: ChatMessage = {
+    role: "assistant",
+    content: "",
+    sources: [],
+    status: "streaming",
+    requestMessage: prompt,
+    conversationId: activeConversationID,
+    mode: chatMode.value,
+  };
   messages.value.push(answer);
   const answerIndex = messages.value.length - 1;
   streaming.value = true;
@@ -563,54 +575,87 @@ async function askQuestion() {
       await askA2ATask(prompt, answerIndex);
       return;
     }
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
-    };
-    if (!useResearchMode) headers["Idempotency-Key"] = crypto.randomUUID();
-    const streamPath = useResearchMode ? "multi-agent-chat/stream" : "agent-chat/stream";
-    const response = await fetch(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/${streamPath}`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(useResearchMode
-        ? { message: prompt, topK: topK.value, document_ids: selectedDocumentIDs.value, query_rewrite: queryRewrite.value }
-        : {
-            message: prompt,
-            top_k: topK.value,
-            similarity_threshold: similarityThreshold.value,
-            document_ids: selectedDocumentIDs.value,
-            query_rewrite: queryRewrite.value,
-            conversation_id: activeConversationID,
-          }),
-    });
-    if (!response.ok || !response.body) {
-      const payload = await response.json().catch(() => null);
-      throw new Error(payload?.error || "问答服务暂不可用");
-    }
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    while (true) {
-      const { value, done } = await reader.read();
-      buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
-      const blocks = buffer.split(/\r?\n\r?\n/);
-      buffer = blocks.pop() ?? "";
-      blocks.forEach((block) => consumeSSEBlock(block, answerIndex, useResearchMode));
-      if (done) break;
-    }
-    if (buffer.trim()) consumeSSEBlock(buffer, answerIndex, useResearchMode);
-    const currentAnswer = messages.value[answerIndex];
-    if (currentAnswer?.status === "streaming") {
-      currentAnswer.status = "error";
-      currentAnswer.activity = "";
-      currentAnswer.content = currentAnswer.content || "流式响应提前结束，请重试。";
-    }
+    await streamAgentQuestion(prompt, answerIndex, activeConversationID, useResearchMode);
   } catch (error) {
-    const currentAnswer = messages.value[answerIndex];
-    if (currentAnswer) {
-      currentAnswer.status = "error";
-      currentAnswer.content = error instanceof Error ? error.message : "问答失败，请稍后重试。";
-    }
+    markAnswerFailure(answerIndex, error);
+    showError(error);
+  } finally {
+    streaming.value = false;
+  }
+}
+
+async function streamAgentQuestion(prompt: string, answerIndex: number, activeConversationID: number | null, researchMode: boolean) {
+  if (!selectedKnowledgeBaseId.value) throw new Error("请先选择知识库。");
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+  };
+  if (!researchMode) headers["Idempotency-Key"] = crypto.randomUUID();
+  const streamPath = researchMode ? "multi-agent-chat/stream" : "agent-chat/stream";
+  const response = await fetch(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/${streamPath}`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(researchMode
+      ? { message: prompt, topK: topK.value, document_ids: selectedDocumentIDs.value, query_rewrite: queryRewrite.value }
+      : {
+          message: prompt,
+          top_k: topK.value,
+          similarity_threshold: similarityThreshold.value,
+          document_ids: selectedDocumentIDs.value,
+          query_rewrite: queryRewrite.value,
+          conversation_id: activeConversationID,
+        }),
+  });
+  if (!response.ok || !response.body) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.error || "问答服务暂不可用");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+    const blocks = buffer.split(/\r?\n\r?\n/);
+    buffer = blocks.pop() ?? "";
+    blocks.forEach((block) => consumeSSEBlock(block, answerIndex, researchMode));
+    if (done) break;
+  }
+  if (buffer.trim()) consumeSSEBlock(buffer, answerIndex, researchMode);
+  const currentAnswer = messages.value[answerIndex];
+  if (currentAnswer?.status === "streaming") {
+    currentAnswer.status = "error";
+    currentAnswer.retryable = !researchMode;
+    currentAnswer.activity = "";
+    currentAnswer.content = currentAnswer.content || "流式响应提前结束，请重试。";
+  }
+}
+
+function markAnswerFailure(answerIndex: number, error: unknown) {
+  const answer = messages.value[answerIndex];
+  if (!answer) return;
+  answer.status = "error";
+  answer.retryable = answer.mode === "agent";
+  answer.activity = "";
+  answer.content = error instanceof Error ? error.message : "问答失败，请稍后重试。";
+}
+
+async function retryAnswer(answer: ChatMessage, answerIndex: number) {
+  if (streaming.value || answer.mode !== "agent" || !answer.retryable || !answer.requestMessage) return;
+  if (!selectedKnowledgeBaseId.value) return;
+  answer.content = "";
+  answer.sources = [];
+  answer.agentEvents = [];
+  answer.queryRewrite = undefined;
+  answer.status = "streaming";
+  answer.retryable = false;
+  answer.activity = "正在重新生成回答…";
+  closeSource();
+  streaming.value = true;
+  try {
+    await streamAgentQuestion(answer.requestMessage, answerIndex, answer.conversationId ?? conversationId.value, false);
+  } catch (error) {
+    markAnswerFailure(answerIndex, error);
     showError(error);
   } finally {
     streaming.value = false;
@@ -806,6 +851,7 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         answer.content ||= dataString("answer") || payload.answer || "";
         answer.activity = "";
         answer.status = "done";
+        answer.retryable = false;
         break;
       case "conversation_saved":
         answer.activity = "已保存到会话";
@@ -818,10 +864,12 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         }
         answer.activity = "已恢复之前的回答";
         answer.status = "done";
+        answer.retryable = false;
         break;
       }
       case "conversation_save_failed":
         answer.status = "error";
+        answer.retryable = false;
         answer.activity = "";
         answer.content += answer.content ? "\n\n（回答已生成，但保存会话失败）" : "回答已生成，但保存会话失败。";
         break;
@@ -834,12 +882,14 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
           recordAgentEvent(answer, event, "Agent 运行失败", dataString("error") || payload.error || "执行失败", payload.step_number, "error");
         }
         answer.status = "error";
+        answer.retryable = true;
         answer.activity = "";
         answer.content = dataString("error") || payload.error || "问答失败。";
         break;
       case "run_canceled":
         if (!researchMode) recordAgentEvent(answer, event, "Agent 已取消", "请求被取消", payload.step_number, "error");
         answer.status = "error";
+        answer.retryable = true;
         answer.activity = "";
         answer.content = "请求已取消。";
         break;
@@ -1081,6 +1131,7 @@ onUnmounted(() => {
               </div>
               <div v-if="message.role === 'assistant' && message.content && message.status !== 'streaming'" class="message-actions">
                 <button type="button" @click="copyAnswer(message, index)">{{ copiedMessageIndex === index ? "已复制回答" : "复制回答" }}</button>
+                <button v-if="message.retryable && message.mode === 'agent'" type="button" @click="retryAnswer(message, index)">重新生成</button>
               </div>
               <div v-if="message.role === 'assistant' && message.sources?.length" class="sources">
                 <div class="sources-heading"><span class="sources-label">引用 {{ message.sources.length }}</span><span>点击查看原文</span></div>
