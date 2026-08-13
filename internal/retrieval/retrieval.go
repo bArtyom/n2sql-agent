@@ -71,6 +71,12 @@ type ParentSearcher interface {
 	ParentForChunk(context.Context, int64, int64, int) (documentchunk.ParentChunk, bool, error)
 }
 
+// BatchParentSearcher is an optional store capability. It avoids one SQL
+// query per hit when a retrieval response contains several child chunks.
+type BatchParentSearcher interface {
+	ParentsForChunks(context.Context, int64, []documentchunk.ChunkReference) (map[documentchunk.ChunkReference]documentchunk.ParentChunk, error)
+}
+
 const (
 	DefaultContextBefore = 1
 	DefaultContextAfter  = 1
@@ -337,16 +343,41 @@ func ResultForPrompt(result Result) Result {
 
 func (s *Service) expandContext(ctx context.Context, knowledgeBaseID int64, results []Result) ([]Result, error) {
 	parentSearcher, hasParentSearch := s.chunks.(ParentSearcher)
+	batchParentSearcher, hasBatchParentSearch := s.chunks.(BatchParentSearcher)
 	neighborSearcher, hasNeighborSearch := s.chunks.(NeighborSearcher)
-	if (!hasParentSearch && !hasNeighborSearch) || len(results) == 0 {
+	if (!hasParentSearch && !hasBatchParentSearch && !hasNeighborSearch) || len(results) == 0 {
 		return results, nil
 	}
 	expanded := append([]Result(nil), results...)
+	parents := make(map[documentchunk.ChunkReference]documentchunk.ParentChunk)
+	if hasBatchParentSearch {
+		references := make([]documentchunk.ChunkReference, 0, len(results))
+		seen := make(map[documentchunk.ChunkReference]struct{}, len(results))
+		for _, result := range results {
+			reference := documentchunk.ChunkReference{DocumentID: result.DocumentID, Position: result.Position}
+			if _, exists := seen[reference]; exists {
+				continue
+			}
+			seen[reference] = struct{}{}
+			references = append(references, reference)
+		}
+		var err error
+		parents, err = batchParentSearcher.ParentsForChunks(ctx, knowledgeBaseID, references)
+		if err != nil {
+			return nil, fmt.Errorf("expand parent contexts: %w", err)
+		}
+	}
 	for index, result := range expanded {
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("expand retrieval context: %w", err)
 		}
-		if hasParentSearch {
+		reference := documentchunk.ChunkReference{DocumentID: result.DocumentID, Position: result.Position}
+		if parent, found := parents[reference]; found {
+			expanded[index].ParentContent = parent.Content
+			expanded[index].ParentPosition = parent.Position
+			continue
+		}
+		if hasParentSearch && !hasBatchParentSearch {
 			parent, found, err := parentSearcher.ParentForChunk(ctx, knowledgeBaseID, result.DocumentID, result.Position)
 			if err != nil {
 				return nil, fmt.Errorf("expand parent context for document %d position %d: %w", result.DocumentID, result.Position, err)

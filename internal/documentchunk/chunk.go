@@ -63,6 +63,13 @@ type ChildChunk struct {
 	Content        string
 }
 
+// ChunkReference identifies one child chunk in a document. It is used by
+// retrieval when loading several parent chunks in one database query.
+type ChunkReference struct {
+	DocumentID int64
+	Position   int
+}
+
 type SearchResult struct {
 	DocumentID        int64          `json:"documentId"`
 	OriginalFilename  string         `json:"originalFilename,omitempty"`
@@ -179,6 +186,49 @@ func (s *PostgresStore) ParentForChunk(ctx context.Context, knowledgeBaseID, doc
 		return ParentChunk{}, false, fmt.Errorf("query parent chunk: %w", err)
 	}
 	return parent, true, nil
+}
+
+// ParentsForChunks loads all parents for the requested children in one query.
+// Missing rows are omitted so callers can keep their legacy fallback path.
+func (s *PostgresStore) ParentsForChunks(ctx context.Context, knowledgeBaseID int64, references []ChunkReference) (map[ChunkReference]ParentChunk, error) {
+	parents := make(map[ChunkReference]ParentChunk, len(references))
+	if len(references) == 0 {
+		return parents, nil
+	}
+	documentIDs := make([]int64, len(references))
+	positions := make([]int64, len(references))
+	for index, reference := range references {
+		documentIDs[index] = reference.DocumentID
+		positions[index] = int64(reference.Position)
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		WITH requested AS (
+			SELECT * FROM unnest($2::bigint[], $3::bigint[]) AS requested(document_id, child_position)
+		)
+		SELECT chunks.document_id, chunks.position, parents.position, parents.content
+		FROM requested
+		JOIN document_chunks AS chunks
+		  ON chunks.document_id = requested.document_id
+		 AND chunks.position = requested.child_position::integer
+		JOIN document_parent_chunks AS parents ON parents.id = chunks.parent_chunk_id
+		JOIN documents ON documents.id = chunks.document_id
+		WHERE documents.knowledge_base_id = $1`, knowledgeBaseID, documentIDs, positions)
+	if err != nil {
+		return nil, fmt.Errorf("query parent chunks: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var reference ChunkReference
+		var parent ParentChunk
+		if err := rows.Scan(&reference.DocumentID, &reference.Position, &parent.Position, &parent.Content); err != nil {
+			return nil, fmt.Errorf("scan parent chunk: %w", err)
+		}
+		parents[reference] = parent
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate parent chunks: %w", err)
+	}
+	return parents, nil
 }
 
 func (s *PostgresStore) Search(ctx context.Context, knowledgeBaseID int64, embedding []float32, limit int) ([]SearchResult, error) {
