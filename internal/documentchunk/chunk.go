@@ -52,11 +52,24 @@ type Store interface {
 	Replace(context.Context, int64, []string, [][]float32) error
 }
 
+type ParentChunk struct {
+	Position int
+	Content  string
+}
+
+type ChildChunk struct {
+	Position       int
+	ParentPosition int
+	Content        string
+}
+
 type SearchResult struct {
 	DocumentID        int64          `json:"documentId"`
 	OriginalFilename  string         `json:"originalFilename,omitempty"`
 	Position          int            `json:"position"`
 	Content           string         `json:"content"`
+	ParentContent     string         `json:"parentContent,omitempty"`
+	ParentPosition    int            `json:"parentPosition,omitempty"`
 	ContextBefore     []ContextChunk `json:"contextBefore,omitempty"`
 	ContextAfter      []ContextChunk `json:"contextAfter,omitempty"`
 	Distance          float64        `json:"distance"`
@@ -90,6 +103,9 @@ func (s *PostgresStore) Replace(ctx context.Context, documentID int64, chunks []
 	if _, err := tx.ExecContext(ctx, `DELETE FROM document_chunks WHERE document_id = $1`, documentID); err != nil {
 		return fmt.Errorf("delete document chunks: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM document_parent_chunks WHERE document_id = $1`, documentID); err != nil {
+		return fmt.Errorf("delete document parent chunks: %w", err)
+	}
 	for position, content := range chunks {
 		var embedding any
 		if len(embeddings) != 0 {
@@ -103,6 +119,66 @@ func (s *PostgresStore) Replace(ctx context.Context, documentID int64, chunks []
 		return fmt.Errorf("commit chunk transaction: %w", err)
 	}
 	return nil
+}
+
+// ReplaceHierarchical stores parent chunks without embeddings and child chunks
+// with embeddings. Parent positions are local to one document; child positions
+// remain the citation positions exposed by the existing search API.
+func (s *PostgresStore) ReplaceHierarchical(ctx context.Context, documentID int64, parents []ParentChunk, children []ChildChunk, embeddings [][]float32) error {
+	if documentID <= 0 || len(parents) == 0 || len(children) == 0 || len(embeddings) != len(children) {
+		return fmt.Errorf("invalid hierarchical chunk data")
+	}
+	parentByPosition := make(map[int]int64, len(parents))
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin hierarchical chunk transaction: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM document_chunks WHERE document_id = $1`, documentID); err != nil {
+		return fmt.Errorf("delete document chunks: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM document_parent_chunks WHERE document_id = $1`, documentID); err != nil {
+		return fmt.Errorf("delete document parent chunks: %w", err)
+	}
+	for _, parent := range parents {
+		var parentID int64
+		err := tx.QueryRowContext(ctx, `INSERT INTO document_parent_chunks (document_id, position, content) VALUES ($1, $2, $3) RETURNING id`, documentID, parent.Position, parent.Content).Scan(&parentID)
+		if err != nil {
+			return fmt.Errorf("create document parent chunk: %w", err)
+		}
+		parentByPosition[parent.Position] = parentID
+	}
+	for index, child := range children {
+		parentID, ok := parentByPosition[child.ParentPosition]
+		if !ok {
+			return fmt.Errorf("child position %d references unknown parent position %d", child.Position, child.ParentPosition)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO document_chunks (document_id, position, parent_chunk_id, content, embedding) VALUES ($1, $2, $3, $4, $5::vector)`, documentID, child.Position, parentID, child.Content, vectorLiteral(embeddings[index])); err != nil {
+			return fmt.Errorf("create document child chunk: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit hierarchical chunk transaction: %w", err)
+	}
+	return nil
+}
+
+// ParentForChunk returns the parent context for a child. A missing parent is
+// not an error so legacy chunks can continue through neighbor expansion.
+func (s *PostgresStore) ParentForChunk(ctx context.Context, knowledgeBaseID, documentID int64, position int) (ParentChunk, bool, error) {
+	var parent ParentChunk
+	err := s.db.QueryRowContext(ctx, `SELECT parents.position, parents.content
+		FROM document_chunks AS chunks
+		JOIN document_parent_chunks AS parents ON parents.id = chunks.parent_chunk_id
+		JOIN documents AS documents ON documents.id = chunks.document_id
+		WHERE documents.knowledge_base_id = $1 AND chunks.document_id = $2 AND chunks.position = $3`, knowledgeBaseID, documentID, position).Scan(&parent.Position, &parent.Content)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ParentChunk{}, false, nil
+	}
+	if err != nil {
+		return ParentChunk{}, false, fmt.Errorf("query parent chunk: %w", err)
+	}
+	return parent, true, nil
 }
 
 func (s *PostgresStore) Search(ctx context.Context, knowledgeBaseID int64, embedding []float32, limit int) ([]SearchResult, error) {

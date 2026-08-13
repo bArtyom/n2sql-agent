@@ -67,6 +67,10 @@ type NeighborSearcher interface {
 	SearchNeighbors(context.Context, int64, int64, int, int, int) ([]Result, error)
 }
 
+type ParentSearcher interface {
+	ParentForChunk(context.Context, int64, int64, int) (documentchunk.ParentChunk, bool, error)
+}
+
 const (
 	DefaultContextBefore = 1
 	DefaultContextAfter  = 1
@@ -299,6 +303,9 @@ func (s *Service) searchWithOptions(ctx context.Context, knowledgeBaseID int64, 
 // ContextContent formats one hit and its nearby chunks for a model prompt.
 // Ranking fields stay on the original result; only the prompt text expands.
 func ContextContent(result Result) string {
+	if result.ParentContent != "" {
+		return "[父块上下文]\n" + result.ParentContent + "\n\n[命中片段]\n" + result.Content
+	}
 	if len(result.ContextBefore) == 0 && len(result.ContextAfter) == 0 {
 		return result.Content
 	}
@@ -323,18 +330,35 @@ func ResultForPrompt(result Result) Result {
 	result.Content = ContextContent(result)
 	result.ContextBefore = nil
 	result.ContextAfter = nil
+	result.ParentContent = ""
+	result.ParentPosition = 0
 	return result
 }
 
 func (s *Service) expandContext(ctx context.Context, knowledgeBaseID int64, results []Result) ([]Result, error) {
-	neighborSearcher, ok := s.chunks.(NeighborSearcher)
-	if !ok || len(results) == 0 {
+	parentSearcher, hasParentSearch := s.chunks.(ParentSearcher)
+	neighborSearcher, hasNeighborSearch := s.chunks.(NeighborSearcher)
+	if (!hasParentSearch && !hasNeighborSearch) || len(results) == 0 {
 		return results, nil
 	}
 	expanded := append([]Result(nil), results...)
 	for index, result := range expanded {
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("expand retrieval context: %w", err)
+		}
+		if hasParentSearch {
+			parent, found, err := parentSearcher.ParentForChunk(ctx, knowledgeBaseID, result.DocumentID, result.Position)
+			if err != nil {
+				return nil, fmt.Errorf("expand parent context for document %d position %d: %w", result.DocumentID, result.Position, err)
+			}
+			if found {
+				expanded[index].ParentContent = parent.Content
+				expanded[index].ParentPosition = parent.Position
+				continue
+			}
+		}
+		if !hasNeighborSearch {
+			continue
 		}
 		neighbors, err := neighborSearcher.SearchNeighbors(ctx, knowledgeBaseID, result.DocumentID, result.Position, DefaultContextBefore, DefaultContextAfter)
 		if err != nil {

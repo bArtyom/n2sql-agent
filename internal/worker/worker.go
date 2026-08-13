@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
@@ -55,6 +56,10 @@ type TextSplitter interface{ Split(string) []string }
 type ChunkStore interface {
 	Replace(context.Context, int64, []string, [][]float32) error
 }
+
+type HierarchicalChunkStore interface {
+	ReplaceHierarchical(context.Context, int64, []documentchunk.ParentChunk, []documentchunk.ChildChunk, [][]float32) error
+}
 type Embedder interface {
 	Embed(context.Context, []string) (modelclient.EmbeddingResponse, error)
 }
@@ -88,6 +93,43 @@ func NewEmbeddingChunkingProcessor(extractor TextExtractor, splitter TextSplitte
 			return fmt.Errorf("embed document chunks: %w", err)
 		}
 		return chunks.Replace(ctx, task.DocumentID, parts, embeddings)
+	}
+}
+
+// NewEmbeddingHierarchicalChunkingProcessor keeps parent chunks as complete
+// context and embeds only their smaller child chunks. The old processor above
+// remains available for callers and documents that do not use this strategy.
+func NewEmbeddingHierarchicalChunkingProcessor(extractor TextExtractor, parentSplitter, childSplitter TextSplitter, chunks HierarchicalChunkStore, embedder Embedder) Processor {
+	return func(ctx context.Context, task Task) error {
+		text, err := extractor.Extract(ctx, task.StoragePath, task.ContentType)
+		if err != nil {
+			return err
+		}
+		parentParts := parentSplitter.Split(text)
+		if len(parentParts) == 0 {
+			return Permanent(errors.New("document contains no parent chunks"))
+		}
+		parents := make([]documentchunk.ParentChunk, len(parentParts))
+		children := make([]documentchunk.ChildChunk, 0)
+		for parentPosition, parentContent := range parentParts {
+			parents[parentPosition] = documentchunk.ParentChunk{Position: parentPosition, Content: parentContent}
+			childParts := childSplitter.Split(parentContent)
+			for _, childContent := range childParts {
+				children = append(children, documentchunk.ChildChunk{Position: len(children), ParentPosition: parentPosition, Content: childContent})
+			}
+		}
+		if len(children) == 0 {
+			return Permanent(errors.New("document contains no child chunks"))
+		}
+		childTexts := make([]string, len(children))
+		for index, child := range children {
+			childTexts[index] = child.Content
+		}
+		embeddings, err := embedChunks(ctx, embedder, childTexts)
+		if err != nil {
+			return fmt.Errorf("embed document child chunks: %w", err)
+		}
+		return chunks.ReplaceHierarchical(ctx, task.DocumentID, parents, children, embeddings)
 	}
 }
 

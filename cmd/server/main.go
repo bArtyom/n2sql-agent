@@ -62,7 +62,9 @@ func main() {
 		extractor = documentextractor.NewWithOCR(cfg.UploadDir, scannedPDF)
 		log.Printf("scanned PDF OCR enabled: model=%s renderer=%s max_pages=%d concurrency=%d", cfg.OCRModel, cfg.OCRRendererBinary, cfg.OCRMaxPages, cfg.OCRConcurrency)
 	}
-	processor := worker.NewEmbeddingChunkingProcessor(extractor, documentchunk.NewSplitter(1000, 150), chunkStore, embeddingService)
+	parentSplitter := documentchunk.NewSplitter(3000, 300)
+	childSplitter := documentchunk.NewSplitter(1000, 150)
+	processor := worker.NewEmbeddingHierarchicalChunkingProcessor(extractor, parentSplitter, childSplitter, chunkStore, embeddingService)
 	metricsRegistry := metrics.New()
 	agentStreamHub := agentstream.NewHub()
 	a2aStore := a2a.NewPostgresStore(db)

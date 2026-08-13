@@ -16,6 +16,8 @@ type Source = {
   originalFilename?: string;
   position: number;
   content: string;
+  parentContent?: string;
+  parentPosition?: number;
   contextBefore?: { position: number; content: string }[];
   contextAfter?: { position: number; content: string }[];
   distance: number;
@@ -214,9 +216,10 @@ function sourcePreview(content: string): string {
 }
 
 function sourceDisplayContent(source: Source): string {
+  const parent = source.parentContent ? `[父块上下文]\n${source.parentContent}` : "";
   const before = (source.contextBefore ?? []).map((chunk) => `[前置上下文]\n${chunk.content}`).join("\n");
   const after = (source.contextAfter ?? []).map((chunk) => `[后置上下文]\n${chunk.content}`).join("\n");
-  return [before, `[命中片段]\n${source.content}`, after].filter(Boolean).join("\n");
+  return [parent, before, `[命中子块]\n${source.content}`, after].filter(Boolean).join("\n");
 }
 
 function matchTypeLabel(matchType?: string): string {

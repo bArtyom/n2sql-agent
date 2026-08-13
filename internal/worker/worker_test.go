@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -67,6 +68,17 @@ func (s fixedSplitter) Split(string) []string { return s.chunks }
 type chunkStoreStub struct {
 	chunks     []string
 	embeddings [][]float32
+}
+
+type hierarchicalChunkStoreStub struct {
+	parents    []documentchunk.ParentChunk
+	children   []documentchunk.ChildChunk
+	embeddings [][]float32
+}
+
+func (s *hierarchicalChunkStoreStub) ReplaceHierarchical(_ context.Context, _ int64, parents []documentchunk.ParentChunk, children []documentchunk.ChildChunk, embeddings [][]float32) error {
+	s.parents, s.children, s.embeddings = parents, children, embeddings
+	return nil
 }
 
 func (s *chunkStoreStub) Replace(_ context.Context, _ int64, chunks []string, embeddings [][]float32) error {
@@ -152,6 +164,34 @@ func TestEmbeddingChunkingProcessorBatchesEmbeddingRequests(t *testing.T) {
 	}
 	if len(store.embeddings) != len(parts) || store.embeddings[0][0] != 0 || store.embeddings[10][0] != 10 {
 		t.Fatalf("embeddings = %#v", store.embeddings)
+	}
+}
+
+func TestEmbeddingHierarchicalProcessorEmbedsOnlyChildren(t *testing.T) {
+	store := &hierarchicalChunkStoreStub{}
+	embedder := &recordingEmbedderStub{}
+	processor := worker.NewEmbeddingHierarchicalChunkingProcessor(
+		extractorStub{},
+		fixedSplitter{chunks: []string{"parent one", "parent two"}},
+		fixedSplitter{chunks: []string{"child"}},
+		store,
+		embedder,
+	)
+
+	if err := processor(context.Background(), worker.Task{DocumentID: 4}); err != nil {
+		t.Fatalf("processor error = %v", err)
+	}
+	if len(store.parents) != 2 || len(store.children) != 2 || len(store.embeddings) != 2 {
+		t.Fatalf("parents=%#v children=%#v embeddings=%#v", store.parents, store.children, store.embeddings)
+	}
+	if store.children[0].ParentPosition != 0 || store.children[1].ParentPosition != 1 {
+		t.Fatalf("child parent positions = %#v", store.children)
+	}
+	if store.children[0].Content != "child" || store.children[1].Content != "child" {
+		t.Fatalf("child contents = %#v", store.children)
+	}
+	if len(embedder.batches) != 1 || !reflect.DeepEqual(embedder.batches[0], []string{"child", "child"}) {
+		t.Fatalf("embedding input = %#v", embedder.batches)
 	}
 }
 

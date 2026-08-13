@@ -95,6 +95,8 @@ type hybridChunkStoreStub struct{}
 
 type neighborChunkStoreStub struct{}
 
+type parentChunkStoreStub struct{}
+
 func (neighborChunkStoreStub) Search(context.Context, int64, []float32, int) ([]documentchunk.SearchResult, error) {
 	return []documentchunk.SearchResult{{DocumentID: 9, Position: 1, Content: "命中片段", Distance: 0.2}}, nil
 }
@@ -105,6 +107,14 @@ func (neighborChunkStoreStub) SearchNeighbors(context.Context, int64, int64, int
 		{Position: 1, Content: "命中片段"},
 		{Position: 2, Content: "后一个片段"},
 	}, nil
+}
+
+func (parentChunkStoreStub) Search(context.Context, int64, []float32, int) ([]documentchunk.SearchResult, error) {
+	return []documentchunk.SearchResult{{DocumentID: 9, Position: 1, Content: "命中子块", Distance: 0.2}}, nil
+}
+
+func (parentChunkStoreStub) ParentForChunk(context.Context, int64, int64, int) (documentchunk.ParentChunk, bool, error) {
+	return documentchunk.ParentChunk{Position: 3, Content: "完整父块上下文"}, true, nil
 }
 
 type rerankerStub struct {
@@ -174,6 +184,25 @@ func TestServiceExpandsNearbyChunkContext(t *testing.T) {
 	}
 	if got := retrieval.ContextContent(results[0]); !strings.Contains(got, "前一个片段") || !strings.Contains(got, "后一个片段") {
 		t.Fatalf("context content = %q", got)
+	}
+}
+
+func TestServiceUsesParentContextBeforeLegacyNeighbors(t *testing.T) {
+	service := retrieval.NewService(&embeddingStub{}, parentChunkStoreStub{})
+
+	results, err := service.Search(context.Background(), 7, "问题", 5)
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(results) != 1 || results[0].ParentPosition != 3 || results[0].ParentContent != "完整父块上下文" {
+		t.Fatalf("parent result = %#v", results)
+	}
+	if len(results[0].ContextBefore) != 0 || len(results[0].ContextAfter) != 0 {
+		t.Fatalf("parent result unexpectedly used neighbors = %#v", results)
+	}
+	content := retrieval.ContextContent(results[0])
+	if !strings.Contains(content, "完整父块上下文") || !strings.Contains(content, "命中子块") {
+		t.Fatalf("context content = %q", content)
 	}
 }
 
