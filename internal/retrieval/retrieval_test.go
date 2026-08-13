@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
@@ -26,10 +27,13 @@ func (s *embeddingStub) Embed(_ context.Context, input []string) (modelclient.Em
 }
 
 type recordingEmbedder struct {
+	mu      sync.Mutex
 	queries []string
 }
 
 func (s *recordingEmbedder) Embed(_ context.Context, input []string) (modelclient.EmbeddingResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.queries = append(s.queries, input...)
 	return modelclient.EmbeddingResponse{Data: []modelclient.Embedding{{Index: 0, Vector: []float32{0.1, 0.2}}}}, nil
 }
@@ -47,10 +51,13 @@ func (s *queryRewriterStub) Rewrite(_ context.Context, query string, maxVariants
 }
 
 type multiQueryChunkStore struct {
+	mu      sync.Mutex
 	queries int
 }
 
 func (s *multiQueryChunkStore) Search(_ context.Context, _ int64, _ []float32, _ int) ([]retrieval.Result, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.queries++
 	return []retrieval.Result{{DocumentID: int64(s.queries), Position: 0, Content: "候选"}}, nil
 }
@@ -169,11 +176,32 @@ func TestServiceExpandsAndDeduplicatesQueryRewriteVariants(t *testing.T) {
 	}
 }
 
-func TestServiceRejectsRewriteWhenRewriterIsUnavailable(t *testing.T) {
+func TestServiceFallsBackToOriginalQueryWhenRewriterIsUnavailable(t *testing.T) {
 	service := retrieval.NewService(&embeddingStub{}, &chunkStoreStub{})
-	_, err := service.SearchWithOptions(context.Background(), 7, "问题", 5, retrieval.SearchOptions{QueryRewrite: true})
-	if !errors.Is(err, retrieval.ErrQueryRewriteUnavailable) {
-		t.Fatalf("SearchWithOptions() error = %v, want ErrQueryRewriteUnavailable", err)
+	results, err := service.SearchWithOptions(context.Background(), 7, "问题", 5, retrieval.SearchOptions{QueryRewrite: true})
+	if err != nil {
+		t.Fatalf("SearchWithOptions() error = %v, want original-query fallback", err)
+	}
+	if len(results) != 1 || results[0].Content != "Go 后端" {
+		t.Fatalf("fallback results = %#v", results)
+	}
+}
+
+type failingQueryRewriter struct{}
+
+func (failingQueryRewriter) Rewrite(context.Context, string, int) ([]string, error) {
+	return nil, errors.New("rewrite provider unavailable")
+}
+
+func TestServiceFallsBackWhenQueryRewriteFails(t *testing.T) {
+	embedder := &recordingEmbedder{}
+	service := retrieval.NewHybridServiceWithRerankerAndRewriter(embedder, &chunkStoreStub{}, nil, nil, failingQueryRewriter{})
+	results, err := service.SearchWithOptions(context.Background(), 7, "原始问题", 5, retrieval.SearchOptions{QueryRewrite: true})
+	if err != nil {
+		t.Fatalf("SearchWithOptions() error = %v, want fallback", err)
+	}
+	if len(results) != 1 || len(embedder.queries) != 1 || embedder.queries[0] != "原始问题" {
+		t.Fatalf("fallback results=%#v embedded=%#v", results, embedder.queries)
 	}
 }
 

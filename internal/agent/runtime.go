@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/usage"
@@ -83,26 +84,29 @@ type AgentRun struct {
 	embeddingTokens  int
 	totalTokens      int
 	failure          FailureCategory
+	queryRewrite     usage.QueryRewriteObservation
+	mu               sync.Mutex
 }
 
 // RunStats is a safe, bounded summary of one Agent execution. PromptTokens
 // and CompletionTokens describe chat calls; EmbeddingTokens is kept separate,
 // while TotalTokens is the sum of all reported chat and embedding tokens.
 type RunStats struct {
-	Status              RunStatus       `json:"status"`
-	StartedAt           time.Time       `json:"started_at"`
-	FinishedAt          time.Time       `json:"finished_at"`
-	DurationMS          int64           `json:"duration_ms"`
-	StepCount           int             `json:"step_count"`
-	ModelCalls          int             `json:"model_calls"`
-	ToolCalls           int             `json:"tool_calls"`
-	SuccessfulToolCalls int             `json:"successful_tool_calls"`
-	FailedToolCalls     int             `json:"failed_tool_calls"`
-	PromptTokens        int             `json:"prompt_tokens"`
-	CompletionTokens    int             `json:"completion_tokens"`
-	EmbeddingTokens     int             `json:"embedding_tokens"`
-	TotalTokens         int             `json:"total_tokens"`
-	FailureCategory     FailureCategory `json:"failure_category,omitempty"`
+	Status              RunStatus                      `json:"status"`
+	StartedAt           time.Time                      `json:"started_at"`
+	FinishedAt          time.Time                      `json:"finished_at"`
+	DurationMS          int64                          `json:"duration_ms"`
+	StepCount           int                            `json:"step_count"`
+	ModelCalls          int                            `json:"model_calls"`
+	ToolCalls           int                            `json:"tool_calls"`
+	SuccessfulToolCalls int                            `json:"successful_tool_calls"`
+	FailedToolCalls     int                            `json:"failed_tool_calls"`
+	PromptTokens        int                            `json:"prompt_tokens"`
+	CompletionTokens    int                            `json:"completion_tokens"`
+	EmbeddingTokens     int                            `json:"embedding_tokens"`
+	TotalTokens         int                            `json:"total_tokens"`
+	FailureCategory     FailureCategory                `json:"failure_category,omitempty"`
+	QueryRewrite        *usage.QueryRewriteObservation `json:"query_rewrite,omitempty"`
 }
 
 func NewAgentRun(id string) (*AgentRun, error) {
@@ -216,7 +220,12 @@ func (r *AgentRun) RecordToolCall(success bool) error {
 
 // ObserveChatTokens adds provider-reported chat usage to this running Agent.
 func (r *AgentRun) ObserveChatTokens(tokenUsage usage.TokenUsage) {
-	if r == nil || r.status != RunRunning {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.status != RunRunning {
 		return
 	}
 	r.promptTokens += nonNegative(tokenUsage.PromptTokens)
@@ -226,7 +235,12 @@ func (r *AgentRun) ObserveChatTokens(tokenUsage usage.TokenUsage) {
 
 // ObserveEmbeddingTokens adds provider-reported embedding usage to this run.
 func (r *AgentRun) ObserveEmbeddingTokens(tokenUsage usage.TokenUsage) {
-	if r == nil || r.status != RunRunning {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.status != RunRunning {
 		return
 	}
 	total := tokenUsage.EffectiveTotal()
@@ -234,10 +248,38 @@ func (r *AgentRun) ObserveEmbeddingTokens(tokenUsage usage.TokenUsage) {
 	r.totalTokens += total
 }
 
+// ObserveQueryRewrite records bounded retrieval strategy information for the
+// run. It is intentionally separate from token usage and contains no query.
+func (r *AgentRun) ObserveQueryRewrite(observation usage.QueryRewriteObservation) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.status != RunRunning {
+		return
+	}
+	r.queryRewrite.Enabled = r.queryRewrite.Enabled || observation.Enabled
+	r.queryRewrite.Applied = r.queryRewrite.Applied || observation.Applied
+	r.queryRewrite.Fallback = r.queryRewrite.Fallback || observation.Fallback
+	r.queryRewrite.VariantCount += nonNegative(observation.VariantCount)
+}
+
+func (r *AgentRun) QueryRewriteSnapshot() usage.QueryRewriteObservation {
+	if r == nil {
+		return usage.QueryRewriteObservation{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.queryRewrite
+}
+
 func (r *AgentRun) Stats() RunStats {
 	if r == nil {
 		return RunStats{}
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	finishedAt := r.finishedAt
 	if r.status == RunRunning {
 		finishedAt = time.Now().UTC()
@@ -246,7 +288,7 @@ func (r *AgentRun) Stats() RunStats {
 	if !r.startedAt.IsZero() && !finishedAt.IsZero() && finishedAt.After(r.startedAt) {
 		durationMS = finishedAt.Sub(r.startedAt).Milliseconds()
 	}
-	return RunStats{
+	stats := RunStats{
 		Status:              r.status,
 		StartedAt:           r.startedAt,
 		FinishedAt:          finishedAt,
@@ -262,6 +304,11 @@ func (r *AgentRun) Stats() RunStats {
 		TotalTokens:         r.totalTokens,
 		FailureCategory:     r.failure,
 	}
+	if r.queryRewrite.Enabled {
+		queryRewrite := r.queryRewrite
+		stats.QueryRewrite = &queryRewrite
+	}
+	return stats
 }
 
 func (r *AgentRun) AddStep(step Step) error {

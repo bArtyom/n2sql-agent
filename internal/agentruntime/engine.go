@@ -111,6 +111,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 		return Result{Run: run}, err
 	}
 	ctx = usage.WithObserver(ctx, run)
+	ctx = usage.WithQueryRewriteObserver(ctx, run)
 
 	result := Result{Run: run}
 	emitter := newEventEmitter(runID, sink)
@@ -227,6 +228,9 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			}
 			if truncated, ok := toolResult.Metadata["truncated"].(bool); ok {
 				toolFinishedData["truncated"] = truncated
+			}
+			if queryRewrite := run.QueryRewriteSnapshot(); queryRewrite.Enabled {
+				toolFinishedData["query_rewrite"] = queryRewrite
 			}
 			toolFinishedData["no_relevant_results"] = toolResult.NoRelevantResults
 			if err := emitter.emit(agent.EventToolFinished, len(run.Steps()), toolFinishedData); err != nil {

@@ -16,6 +16,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 	"github.com/bArtyom/n2sql-agent/internal/security"
+	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
 const (
@@ -136,9 +137,10 @@ type Answerer interface {
 }
 
 type Response struct {
-	Answer  string             `json:"answer"`
-	Sources []retrieval.Result `json:"sources"`
-	Steps   []Step             `json:"steps"`
+	Answer       string                         `json:"answer"`
+	Sources      []retrieval.Result             `json:"sources"`
+	Steps        []Step                         `json:"steps"`
+	QueryRewrite *usage.QueryRewriteObservation `json:"query_rewrite,omitempty"`
 }
 
 // Supervisor coordinates the in-process Researcher -> Answerer workflow.
@@ -248,11 +250,15 @@ func (s *Supervisor) AnswerWithEventsAndSearchOptions(ctx context.Context, knowl
 	runID := fmt.Sprintf("multi-agent-%d", time.Now().UnixNano())
 	emitter := newEventEmitter(runID, sink)
 	response := Response{Sources: make([]retrieval.Result, 0), Steps: make([]Step, 0, 2)}
+	queryRewriteTracker := usage.NewQueryRewriteTracker()
 	if err := emitter.emit(EventRunStarted, "", 0, map[string]any{"status": "running"}); err != nil {
 		return response, err
 	}
 	runContext, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
+	if options.QueryRewrite {
+		runContext = usage.WithQueryRewriteObserver(runContext, queryRewriteTracker)
+	}
 	if err := runContext.Err(); err != nil {
 		return response, s.finishError(response, emitter, err)
 	}
@@ -283,6 +289,9 @@ func (s *Supervisor) AnswerWithEventsAndSearchOptions(ctx context.Context, knowl
 		return response, s.finishError(response, emitter, fmt.Errorf("researcher failed: %w", err))
 	}
 	response.Sources = append(response.Sources, report.Sources...)
+	if snapshot := queryRewriteTracker.QueryRewriteSnapshot(); snapshot.Enabled {
+		response.QueryRewrite = &snapshot
+	}
 	response.Steps = append(response.Steps, Step{Number: 1, Role: RoleResearcher, Status: StepSucceeded})
 	if err := emitter.emit(EventResearchFinished, RoleResearcher, 1, map[string]any{
 		"sources":             report.Sources,

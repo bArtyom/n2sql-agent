@@ -31,3 +31,13 @@ func TestObserverContextRoundTrip(t *testing.T) {
 		t.Fatal("ObserverFromContext() without observer is non-nil")
 	}
 }
+
+func TestQueryRewriteTrackerAggregatesParallelObservations(t *testing.T) {
+	tracker := usage.NewQueryRewriteTracker()
+	tracker.ObserveQueryRewrite(usage.QueryRewriteObservation{Enabled: true, Applied: true, VariantCount: 2})
+	tracker.ObserveQueryRewrite(usage.QueryRewriteObservation{Enabled: true, Fallback: true})
+	got := tracker.QueryRewriteSnapshot()
+	if !got.Enabled || !got.Applied || !got.Fallback || got.VariantCount != 2 {
+		t.Fatalf("query rewrite snapshot = %#v", got)
+	}
+}

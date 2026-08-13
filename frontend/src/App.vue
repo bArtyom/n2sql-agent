@@ -28,7 +28,9 @@ type ChatMessage = {
   activity?: string;
   researchEvents?: ResearchEvent[];
   agentEvents?: AgentEvent[];
+  queryRewrite?: QueryRewriteStatus;
 };
+type QueryRewriteStatus = { enabled: boolean; applied: boolean; fallback: boolean; variant_count: number };
 type ResearchEvent = { type: string; round?: number; label: string; detail?: string };
 type AgentEvent = { type: string; step?: number; label: string; detail?: string; status: "running" | "done" | "error" };
 type ChatMode = "agent" | "research" | "a2a";
@@ -53,6 +55,7 @@ type StreamPayload = {
   role?: string;
   round?: number;
   step_number?: number;
+  query_rewrite?: QueryRewriteStatus;
 };
 type ModelProvider = {
   name: string;
@@ -636,11 +639,12 @@ async function askA2ATask(prompt: string, answerIndex: number) {
       } else if (current.status === "failed") {
         throw new Error(current.error || "后台 Agent 任务失败。");
       } else if (current.status === "completed") {
-        const result = await requestJSON<{ answer?: string; sources?: Source[] }>(
+        const result = await requestJSON<{ answer?: string; sources?: Source[]; query_rewrite?: QueryRewriteStatus }>(
           `/api/a2a/tasks/${encodeURIComponent(task.id)}/result`,
         );
         answer.content = typeof result.answer === "string" ? result.answer : "";
         answer.sources = mergeSources(answer.sources ?? [], parseSources(result.sources));
+        if (result.query_rewrite) answer.queryRewrite = result.query_rewrite;
         answer.activity = "后台任务已完成";
         answer.status = "done";
         return;
@@ -700,6 +704,10 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
     switch (event) {
       case "sources":
         answer.sources = mergeSources(answer.sources ?? [], parseSources(payload.sources));
+        if (payload.query_rewrite) {
+          answer.queryRewrite = payload.query_rewrite;
+          answer.activity = payload.query_rewrite.fallback ? "改写不可用，已使用原问题检索…" : "检索完成，正在组织答案…";
+        }
         break;
       case "delta":
         answer.content += payload.delta ?? "";
@@ -719,6 +727,10 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
       case "research_tool_finished": {
         const sources = parseSources(eventData.sources);
         answer.sources = mergeSources(answer.sources ?? [], sources);
+        const rewrite = eventData.query_rewrite;
+        if (rewrite && typeof rewrite === "object" && (rewrite as Record<string, unknown>).enabled === true) {
+          answer.queryRewrite = rewrite as QueryRewriteStatus;
+        }
         recordResearchEvent(answer, event, "检索完成", sources.length ? `${sources.length} 条引用` : "继续评估当前证据", payload.round);
         answer.activity = "研究员正在判断是否需要继续…";
         break;
@@ -783,6 +795,14 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
           recordAgentEvent(answer, event, "Agent 完成", "本轮运行成功", payload.step_number, "done");
         }
         if (researchMode) answer.sources = mergeSources(answer.sources ?? [], parseSources(eventData.sources));
+        if (payload.query_rewrite) answer.queryRewrite = payload.query_rewrite;
+        const runStats = eventData.stats;
+        if (!answer.queryRewrite && runStats && typeof runStats === "object") {
+          const rewrite = (runStats as Record<string, unknown>).query_rewrite;
+          if (rewrite && typeof rewrite === "object" && (rewrite as Record<string, unknown>).enabled === true) {
+            answer.queryRewrite = rewrite as QueryRewriteStatus;
+          }
+        }
         answer.content ||= dataString("answer") || payload.answer || "";
         answer.activity = "";
         answer.status = "done";
@@ -1052,6 +1072,12 @@ onUnmounted(() => {
               <div class="message-bubble" :class="{ 'message-bubble--error': message.status === 'error' }">
                 <span v-if="message.role === 'assistant' && !message.content && message.status === 'streaming'" class="typing"><i /><i /><i /></span>
                 <span v-else>{{ message.content }}</span>
+              </div>
+              <div v-if="message.role === 'assistant' && message.queryRewrite" class="query-rewrite-status">
+                <span class="query-rewrite-status-dot" />
+                <span v-if="message.queryRewrite.fallback">多查询改写不可用，已自动使用原问题检索</span>
+                <span v-else-if="message.queryRewrite.applied">已使用 {{ message.queryRewrite.variant_count }} 个改写查询扩大召回</span>
+                <span v-else>已启用多查询改写，本次使用原问题检索</span>
               </div>
               <div v-if="message.role === 'assistant' && message.content && message.status !== 'streaming'" class="message-actions">
                 <button type="button" @click="copyAnswer(message, index)">{{ copiedMessageIndex === index ? "已复制回答" : "复制回答" }}</button>

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
@@ -23,11 +24,12 @@ var (
 )
 
 const (
-	DefaultResults     = 5
-	MaxResults         = 20
-	MaxDocumentIDs     = 100
-	MaxQueryVariants   = 2
-	DefaultMaxDistance = 0.65
+	DefaultResults       = 5
+	MaxResults           = 20
+	MaxDocumentIDs       = 100
+	MaxQueryVariants     = 2
+	MaxConcurrentQueries = MaxQueryVariants + 1
+	DefaultMaxDistance   = 0.65
 )
 
 type Result = documentchunk.SearchResult
@@ -161,6 +163,9 @@ func (s *Service) Search(ctx context.Context, knowledgeBaseID int64, query strin
 }
 
 func (s *Service) searchWithOptions(ctx context.Context, knowledgeBaseID int64, query string, limit int, options SearchOptions) ([]Result, error) {
+	if ctx == nil {
+		return nil, errors.New("retrieval context is required")
+	}
 	if knowledgeBaseID <= 0 {
 		return nil, ErrInvalidKnowledgeBase
 	}
@@ -178,13 +183,24 @@ func (s *Service) searchWithOptions(ctx context.Context, knowledgeBaseID int64, 
 	queries := []string{query}
 	if options.QueryRewrite {
 		if s.rewriter == nil {
-			return nil, ErrQueryRewriteUnavailable
+			usage.ObserveQueryRewrite(ctx, usage.QueryRewriteObservation{Enabled: true, Fallback: true})
+		} else {
+			variants, rewriteErr := s.rewriter.Rewrite(ctx, query, MaxQueryVariants)
+			if rewriteErr != nil {
+				if errors.Is(rewriteErr, context.Canceled) || errors.Is(rewriteErr, context.DeadlineExceeded) {
+					return nil, fmt.Errorf("rewrite search query: %w", rewriteErr)
+				}
+				usage.ObserveQueryRewrite(ctx, usage.QueryRewriteObservation{Enabled: true, Fallback: true})
+			} else {
+				variants = normalizeQueryVariants(query, variants)
+				if len(variants) == 0 {
+					usage.ObserveQueryRewrite(ctx, usage.QueryRewriteObservation{Enabled: true, Fallback: true})
+				} else {
+					usage.ObserveQueryRewrite(ctx, usage.QueryRewriteObservation{Enabled: true, Applied: true, VariantCount: len(variants)})
+					queries = append(queries, variants...)
+				}
+			}
 		}
-		variants, rewriteErr := s.rewriter.Rewrite(ctx, query, MaxQueryVariants)
-		if rewriteErr != nil {
-			return nil, fmt.Errorf("rewrite search query: %w", rewriteErr)
-		}
-		queries = append(queries, normalizeQueryVariants(query, variants)...)
 	}
 	candidateLimit := limit
 	if s.reranker != nil && candidateLimit < MaxResults {
@@ -193,49 +209,40 @@ func (s *Service) searchWithOptions(ctx context.Context, knowledgeBaseID int64, 
 			candidateLimit = MaxResults
 		}
 	}
+	queryResults := make([]querySearchResult, len(queries))
+	queryContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var waitGroup sync.WaitGroup
+	var firstErr error
+	var firstErrOnce sync.Once
+	for index, searchQuery := range queries {
+		index, searchQuery := index, searchQuery
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			results, searchErr := s.searchOneQuery(queryContext, knowledgeBaseID, searchQuery, candidateLimit, documentIDs)
+			if searchErr != nil {
+				firstErrOnce.Do(func() {
+					firstErr = searchErr
+					cancel()
+				})
+				return
+			}
+			queryResults[index] = results
+		}()
+	}
+	waitGroup.Wait()
+	if firstErr != nil {
+		return nil, firstErr
+	}
 	var merged []Result
-	for _, searchQuery := range queries {
-		response, embedErr := s.embedder.Embed(ctx, []string{searchQuery})
-		if embedErr != nil {
-			return nil, fmt.Errorf("embed search query: %w", embedErr)
-		}
-		if observer := usage.ObserverFromContext(ctx); observer != nil && response.Usage != nil {
-			observer.ObserveEmbeddingTokens(*response.Usage)
-		}
-		if len(response.Data) != 1 || len(response.Data[0].Vector) == 0 {
-			return nil, errors.New("embedding response does not contain one non-empty query vector")
-		}
-		var vectorResults []Result
-		if len(documentIDs) == 0 {
-			vectorResults, err = s.chunks.Search(ctx, knowledgeBaseID, response.Data[0].Vector, candidateLimit)
-		} else {
-			filtered, ok := s.chunks.(FilteredChunkSearcher)
-			if !ok {
-				return nil, ErrDocumentFilterUnavailable
+	for _, queryResult := range queryResults {
+		if queryResult.usage != nil {
+			if observer := usage.ObserverFromContext(ctx); observer != nil {
+				observer.ObserveEmbeddingTokens(*queryResult.usage)
 			}
-			vectorResults, err = filtered.SearchWithDocuments(ctx, knowledgeBaseID, response.Data[0].Vector, candidateLimit, documentIDs)
 		}
-		if err != nil {
-			return nil, fmt.Errorf("search document chunks: %w", err)
-		}
-		queryResults := vectorResults
-		if s.keyword != nil {
-			var keywordResults []Result
-			if len(documentIDs) == 0 {
-				keywordResults, err = s.keyword.SearchKeyword(ctx, knowledgeBaseID, searchQuery, candidateLimit)
-			} else {
-				filtered, ok := s.keyword.(FilteredKeywordSearcher)
-				if !ok {
-					return nil, ErrDocumentFilterUnavailable
-				}
-				keywordResults, err = filtered.SearchKeywordWithDocuments(ctx, knowledgeBaseID, searchQuery, candidateLimit, documentIDs)
-			}
-			if err != nil {
-				return nil, fmt.Errorf("search keyword document chunks: %w", err)
-			}
-			queryResults = mergeResults(vectorResults, keywordResults, candidateLimit)
-		}
-		merged = mergeCandidateResults(merged, queryResults, MaxResults)
+		merged = mergeCandidateResults(merged, queryResult.results, MaxResults)
 	}
 	if s.reranker == nil {
 		return merged[:min(len(merged), limit)], nil
@@ -252,6 +259,53 @@ func (s *Service) searchWithOptions(ctx context.Context, knowledgeBaseID int64, 
 		return ranked[:rankLimit], nil
 	}
 	return ranked, nil
+}
+
+type querySearchResult struct {
+	results []Result
+	usage   *modelclient.TokenUsage
+}
+
+func (s *Service) searchOneQuery(ctx context.Context, knowledgeBaseID int64, searchQuery string, candidateLimit int, documentIDs []int64) (querySearchResult, error) {
+	response, embedErr := s.embedder.Embed(ctx, []string{searchQuery})
+	if embedErr != nil {
+		return querySearchResult{}, fmt.Errorf("embed search query: %w", embedErr)
+	}
+	if len(response.Data) != 1 || len(response.Data[0].Vector) == 0 {
+		return querySearchResult{}, errors.New("embedding response does not contain one non-empty query vector")
+	}
+	var vectorResults []Result
+	var err error
+	if len(documentIDs) == 0 {
+		vectorResults, err = s.chunks.Search(ctx, knowledgeBaseID, response.Data[0].Vector, candidateLimit)
+	} else {
+		filtered, ok := s.chunks.(FilteredChunkSearcher)
+		if !ok {
+			return querySearchResult{}, ErrDocumentFilterUnavailable
+		}
+		vectorResults, err = filtered.SearchWithDocuments(ctx, knowledgeBaseID, response.Data[0].Vector, candidateLimit, documentIDs)
+	}
+	if err != nil {
+		return querySearchResult{}, fmt.Errorf("search document chunks: %w", err)
+	}
+	queryResults := vectorResults
+	if s.keyword != nil {
+		var keywordResults []Result
+		if len(documentIDs) == 0 {
+			keywordResults, err = s.keyword.SearchKeyword(ctx, knowledgeBaseID, searchQuery, candidateLimit)
+		} else {
+			filtered, ok := s.keyword.(FilteredKeywordSearcher)
+			if !ok {
+				return querySearchResult{}, ErrDocumentFilterUnavailable
+			}
+			keywordResults, err = filtered.SearchKeywordWithDocuments(ctx, knowledgeBaseID, searchQuery, candidateLimit, documentIDs)
+		}
+		if err != nil {
+			return querySearchResult{}, fmt.Errorf("search keyword document chunks: %w", err)
+		}
+		queryResults = mergeResults(vectorResults, keywordResults, candidateLimit)
+	}
+	return querySearchResult{results: queryResults, usage: response.Usage}, nil
 }
 
 func normalizeQueryVariants(original string, variants []string) []string {
