@@ -85,6 +85,7 @@ type AgentRun struct {
 	totalTokens      int
 	failure          FailureCategory
 	queryRewrite     usage.QueryRewriteObservation
+	retrieval        usage.RetrievalObservation
 	mu               sync.Mutex
 }
 
@@ -107,6 +108,7 @@ type RunStats struct {
 	TotalTokens         int                            `json:"total_tokens"`
 	FailureCategory     FailureCategory                `json:"failure_category,omitempty"`
 	QueryRewrite        *usage.QueryRewriteObservation `json:"query_rewrite,omitempty"`
+	Retrieval           *usage.RetrievalObservation    `json:"retrieval,omitempty"`
 }
 
 func NewAgentRun(id string) (*AgentRun, error) {
@@ -265,6 +267,37 @@ func (r *AgentRun) ObserveQueryRewrite(observation usage.QueryRewriteObservation
 	r.queryRewrite.VariantCount += nonNegative(observation.VariantCount)
 }
 
+// ObserveRetrieval records bounded recall/rerank counts for this Agent run.
+func (r *AgentRun) ObserveRetrieval(observation usage.RetrievalObservation) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.status != RunRunning {
+		return
+	}
+	r.retrieval.VectorCandidates += nonNegative(observation.VectorCandidates)
+	r.retrieval.KeywordCandidates += nonNegative(observation.KeywordCandidates)
+	r.retrieval.KeywordAfterThreshold += nonNegative(observation.KeywordAfterThreshold)
+	r.retrieval.KeywordRejected += nonNegative(observation.KeywordRejected)
+	r.retrieval.DeduplicatedCandidates += nonNegative(observation.DeduplicatedCandidates)
+	r.retrieval.RerankBefore += nonNegative(observation.RerankBefore)
+	r.retrieval.RerankAfter += nonNegative(observation.RerankAfter)
+	r.retrieval.FinalResults += nonNegative(observation.FinalResults)
+	r.retrieval.FinalFiltered += nonNegative(observation.FinalFiltered)
+	r.retrieval.RerankFallback = r.retrieval.RerankFallback || observation.RerankFallback
+}
+
+func (r *AgentRun) RetrievalSnapshot() usage.RetrievalObservation {
+	if r == nil {
+		return usage.RetrievalObservation{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.retrieval
+}
+
 func (r *AgentRun) QueryRewriteSnapshot() usage.QueryRewriteObservation {
 	if r == nil {
 		return usage.QueryRewriteObservation{}
@@ -307,6 +340,10 @@ func (r *AgentRun) Stats() RunStats {
 	if r.queryRewrite.Enabled {
 		queryRewrite := r.queryRewrite
 		stats.QueryRewrite = &queryRewrite
+	}
+	if r.retrieval.HasData() {
+		retrieval := r.retrieval
+		stats.Retrieval = &retrieval
 	}
 	return stats
 }

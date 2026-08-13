@@ -30,13 +30,13 @@ func NewMultiAgentChat(answerer multiagent.Answerer) http.Handler {
 		}
 		var response multiagent.Response
 		var err error
-		if len(request.DocumentIDs) > 0 || request.QueryRewrite {
+		if len(request.DocumentIDs) > 0 || request.QueryRewrite || request.KeywordThreshold != 0 {
 			optionsAnswerer, available := answerer.(multiagent.OptionsAnswerer)
 			if !available {
 				writeMultiAgentChatError(w, retrieval.ErrDocumentFilterUnavailable)
 				return
 			}
-			response, err = optionsAnswerer.AnswerWithSearchOptions(r.Context(), knowledgeBaseID, request.Message, request.TopK, retrieval.SearchOptions{DocumentIDs: request.DocumentIDs, QueryRewrite: request.QueryRewrite})
+			response, err = optionsAnswerer.AnswerWithSearchOptions(r.Context(), knowledgeBaseID, request.Message, request.TopK, retrieval.SearchOptions{DocumentIDs: request.DocumentIDs, QueryRewrite: request.QueryRewrite, KeywordThreshold: request.KeywordThreshold})
 		} else {
 			response, err = answerer.Answer(r.Context(), knowledgeBaseID, request.Message, request.TopK)
 		}
@@ -79,12 +79,12 @@ func NewMultiAgentChatStream(answerer multiagent.EventAnswerer) http.Handler {
 			return writeMultiAgentSSEEvent(w, flusher, event)
 		}
 		var err error
-		if len(request.DocumentIDs) > 0 || request.QueryRewrite {
+		if len(request.DocumentIDs) > 0 || request.QueryRewrite || request.KeywordThreshold != 0 {
 			optionsAnswerer, available := answerer.(multiagent.OptionsEventAnswerer)
 			if !available {
 				err = retrieval.ErrDocumentFilterUnavailable
 			} else {
-				_, err = optionsAnswerer.AnswerWithEventsAndSearchOptions(r.Context(), knowledgeBaseID, request.Message, request.TopK, retrieval.SearchOptions{DocumentIDs: request.DocumentIDs, QueryRewrite: request.QueryRewrite}, emit)
+				_, err = optionsAnswerer.AnswerWithEventsAndSearchOptions(r.Context(), knowledgeBaseID, request.Message, request.TopK, retrieval.SearchOptions{DocumentIDs: request.DocumentIDs, QueryRewrite: request.QueryRewrite, KeywordThreshold: request.KeywordThreshold}, emit)
 			}
 		} else {
 			_, err = answerer.AnswerWithEvents(r.Context(), knowledgeBaseID, request.Message, request.TopK, emit)
@@ -132,6 +132,8 @@ func multiAgentChatError(err error) (string, int) {
 		return "invalid multi-agent chat request", http.StatusBadRequest
 	case errors.Is(err, retrieval.ErrInvalidDocumentIDs):
 		return "invalid multi-agent document filter", http.StatusBadRequest
+	case errors.Is(err, retrieval.ErrInvalidKeywordThreshold):
+		return "invalid multi-agent keyword threshold", http.StatusBadRequest
 	case errors.Is(err, retrieval.ErrDocumentFilterUnavailable):
 		return "multi-agent document filter is unavailable", http.StatusInternalServerError
 	case errors.Is(err, retrieval.ErrQueryRewriteUnavailable):

@@ -112,6 +112,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 	}
 	ctx = usage.WithObserver(ctx, run)
 	ctx = usage.WithQueryRewriteObserver(ctx, run)
+	ctx = usage.WithRetrievalObserver(ctx, run)
 
 	result := Result{Run: run}
 	emitter := newEventEmitter(runID, sink)

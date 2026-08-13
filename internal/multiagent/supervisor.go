@@ -141,6 +141,7 @@ type Response struct {
 	Sources      []retrieval.Result             `json:"sources"`
 	Steps        []Step                         `json:"steps"`
 	QueryRewrite *usage.QueryRewriteObservation `json:"query_rewrite,omitempty"`
+	Retrieval    *usage.RetrievalObservation    `json:"retrieval,omitempty"`
 }
 
 // Supervisor coordinates the in-process Researcher -> Answerer workflow.
@@ -246,16 +247,21 @@ func (s *Supervisor) AnswerWithEventsAndSearchOptions(ctx context.Context, knowl
 	if topK == 0 {
 		topK = retrieval.DefaultResults
 	}
+	if err := retrieval.ValidateKeywordThreshold(options.KeywordThreshold); err != nil {
+		return Response{}, err
+	}
 
 	runID := fmt.Sprintf("multi-agent-%d", time.Now().UnixNano())
 	emitter := newEventEmitter(runID, sink)
 	response := Response{Sources: make([]retrieval.Result, 0), Steps: make([]Step, 0, 2)}
 	queryRewriteTracker := usage.NewQueryRewriteTracker()
+	retrievalTracker := usage.NewRetrievalTracker()
 	if err := emitter.emit(EventRunStarted, "", 0, map[string]any{"status": "running"}); err != nil {
 		return response, err
 	}
 	runContext, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
+	runContext = usage.WithRetrievalObserver(runContext, retrievalTracker)
 	if options.QueryRewrite {
 		runContext = usage.WithQueryRewriteObserver(runContext, queryRewriteTracker)
 	}
@@ -292,10 +298,14 @@ func (s *Supervisor) AnswerWithEventsAndSearchOptions(ctx context.Context, knowl
 	if snapshot := queryRewriteTracker.QueryRewriteSnapshot(); snapshot.Enabled {
 		response.QueryRewrite = &snapshot
 	}
+	if snapshot := retrievalTracker.RetrievalSnapshot(); snapshot.HasData() {
+		response.Retrieval = &snapshot
+	}
 	response.Steps = append(response.Steps, Step{Number: 1, Role: RoleResearcher, Status: StepSucceeded})
 	if err := emitter.emit(EventResearchFinished, RoleResearcher, 1, map[string]any{
 		"sources":             report.Sources,
 		"no_relevant_results": report.NoRelevantResults,
+		"retrieval":           response.Retrieval,
 	}); err != nil {
 		return response, err
 	}
@@ -382,7 +392,11 @@ func (r *KnowledgeSearchResearcher) ResearchWithSearchOptions(ctx context.Contex
 	if knowledgeBaseID <= 0 || question == "" || topK < 1 || topK > retrieval.MaxResults {
 		return ResearchReport{}, ErrInvalidRequest
 	}
-	tool, err := agent.NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewrite(r.searcher, knowledgeBaseID, r.maxResultBytes, retrieval.MaxResults, agent.DefaultMaxKnowledgeDistance, options.DocumentIDs, options.QueryRewrite)
+	keywordThreshold := options.KeywordThreshold
+	if keywordThreshold == 0 {
+		keywordThreshold = retrieval.DefaultKeywordThreshold
+	}
+	tool, err := agent.NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewriteAndKeywordThreshold(r.searcher, knowledgeBaseID, r.maxResultBytes, retrieval.MaxResults, agent.DefaultMaxKnowledgeDistance, keywordThreshold, options.DocumentIDs, options.QueryRewrite)
 	if err != nil {
 		return ResearchReport{}, fmt.Errorf("create scoped knowledge search tool: %w", err)
 	}
@@ -461,7 +475,11 @@ func (r *AutonomousKnowledgeSearchResearcher) ResearchWithEventsAndSearchOptions
 		return ResearchReport{}, ErrInvalidRequest
 	}
 
-	tool, err := agent.NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewrite(r.searcher, knowledgeBaseID, r.maxResultBytes, retrieval.MaxResults, agent.DefaultMaxKnowledgeDistance, options.DocumentIDs, options.QueryRewrite)
+	keywordThreshold := options.KeywordThreshold
+	if keywordThreshold == 0 {
+		keywordThreshold = retrieval.DefaultKeywordThreshold
+	}
+	tool, err := agent.NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewriteAndKeywordThreshold(r.searcher, knowledgeBaseID, r.maxResultBytes, retrieval.MaxResults, agent.DefaultMaxKnowledgeDistance, keywordThreshold, options.DocumentIDs, options.QueryRewrite)
 	if err != nil {
 		return ResearchReport{}, fmt.Errorf("create scoped knowledge search tool: %w", err)
 	}

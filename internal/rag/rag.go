@@ -26,6 +26,7 @@ type Response struct {
 	Answer       string                         `json:"answer"`
 	Sources      []retrieval.Result             `json:"sources"`
 	QueryRewrite *usage.QueryRewriteObservation `json:"query_rewrite,omitempty"`
+	Retrieval    *usage.RetrievalObservation    `json:"retrieval,omitempty"`
 }
 
 type Searcher interface {
@@ -59,6 +60,7 @@ type StreamEvent struct {
 	Delta        string                         `json:"delta,omitempty"`
 	Sources      []retrieval.Result             `json:"sources,omitempty"`
 	QueryRewrite *usage.QueryRewriteObservation `json:"query_rewrite,omitempty"`
+	Retrieval    *usage.RetrievalObservation    `json:"retrieval,omitempty"`
 }
 
 type StreamAnswerer interface {
@@ -99,6 +101,8 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, question st
 		return Response{}, errors.New("chat question is too large")
 	}
 	tracker := usage.NewQueryRewriteTracker()
+	retrievalTracker := usage.NewRetrievalTracker()
+	ctx = usage.WithRetrievalObserver(ctx, retrievalTracker)
 	if options.QueryRewrite {
 		ctx = usage.WithQueryRewriteObserver(ctx, tracker)
 	}
@@ -114,7 +118,7 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, question st
 	if strings.TrimSpace(response.Message) == "" {
 		return Response{}, errors.New("chat response does not contain an answer")
 	}
-	return Response{Answer: response.Message, Sources: sources, QueryRewrite: queryRewritePointer(tracker)}, nil
+	return Response{Answer: response.Message, Sources: sources, QueryRewrite: queryRewritePointer(tracker), Retrieval: retrievalPointer(retrievalTracker)}, nil
 }
 
 func (s *Service) Stream(ctx context.Context, knowledgeBaseID int64, question string, topK int, emit func(StreamEvent) error) error {
@@ -141,6 +145,8 @@ func (s *Service) stream(ctx context.Context, knowledgeBaseID int64, question st
 		return ErrStreamingUnavailable
 	}
 	tracker := usage.NewQueryRewriteTracker()
+	retrievalTracker := usage.NewRetrievalTracker()
+	ctx = usage.WithRetrievalObserver(ctx, retrievalTracker)
 	if options.QueryRewrite {
 		ctx = usage.WithQueryRewriteObserver(ctx, tracker)
 	}
@@ -148,7 +154,7 @@ func (s *Service) stream(ctx context.Context, knowledgeBaseID int64, question st
 	if err != nil {
 		return err
 	}
-	if err := emit(StreamEvent{Type: "sources", Sources: sources, QueryRewrite: queryRewritePointer(tracker)}); err != nil {
+	if err := emit(StreamEvent{Type: "sources", Sources: sources, QueryRewrite: queryRewritePointer(tracker), Retrieval: retrievalPointer(retrievalTracker)}); err != nil {
 		return fmt.Errorf("emit answer sources: %w", err)
 	}
 	if err := streamer.StreamMessages(ctx, groundedMessages(question, sources), func(delta string) error {
@@ -157,6 +163,17 @@ func (s *Service) stream(ctx context.Context, knowledgeBaseID int64, question st
 		return fmt.Errorf("stream grounded answer: %w", err)
 	}
 	return nil
+}
+
+func retrievalPointer(tracker *usage.RetrievalTracker) *usage.RetrievalObservation {
+	if tracker == nil {
+		return nil
+	}
+	observation := tracker.RetrievalSnapshot()
+	if !observation.HasData() {
+		return nil
+	}
+	return &observation
 }
 
 func queryRewritePointer(tracker *usage.QueryRewriteTracker) *usage.QueryRewriteObservation {
@@ -187,7 +204,7 @@ func (s *Service) retrieveSources(ctx context.Context, knowledgeBaseID int64, qu
 	if err != nil {
 		return nil, fmt.Errorf("retrieve answer sources: %w", err)
 	}
-	sources, err = retrieval.FilterByMaxDistance(sources, maxDistance)
+	sources, err = retrieval.FilterByMaxDistanceWithStats(ctx, sources, maxDistance)
 	if err != nil {
 		return nil, fmt.Errorf("filter answer sources: %w", err)
 	}

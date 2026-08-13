@@ -123,6 +123,9 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	if request.TopK < 1 || request.TopK > retrieval.MaxResults {
 		return Response{}, ErrInvalidRequest
 	}
+	if err := retrieval.ValidateKeywordThreshold(request.KeywordThreshold); err != nil {
+		return Response{}, ErrInvalidRequest
+	}
 	maxDistance := agent.DefaultMaxKnowledgeDistance
 	if request.SimilarityThreshold != 0 {
 		if err := agent.ValidateMaxKnowledgeDistance(request.SimilarityThreshold); err != nil {
@@ -137,7 +140,11 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		return Response{}, err
 	}
 
-	registry, err := agent.NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewrite(s.searcher, knowledgeBaseID, s.maxToolResultBytes, request.TopK, maxDistance, request.DocumentIDs, request.QueryRewrite)
+	keywordThreshold := request.KeywordThreshold
+	if keywordThreshold == 0 {
+		keywordThreshold = retrieval.DefaultKeywordThreshold
+	}
+	registry, err := agent.NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewriteAndKeywordThreshold(s.searcher, knowledgeBaseID, s.maxToolResultBytes, request.TopK, maxDistance, keywordThreshold, request.DocumentIDs, request.QueryRewrite)
 	if err != nil {
 		return Response{}, fmt.Errorf("create knowledge search registry: %w", err)
 	}

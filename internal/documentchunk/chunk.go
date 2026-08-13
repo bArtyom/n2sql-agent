@@ -52,14 +52,16 @@ type Store interface {
 }
 
 type SearchResult struct {
-	DocumentID       int64   `json:"documentId"`
-	OriginalFilename string  `json:"originalFilename,omitempty"`
-	Position         int     `json:"position"`
-	Content          string  `json:"content"`
-	Distance         float64 `json:"distance"`
-	MatchType        string  `json:"matchType,omitempty"`
-	KeywordScore     float64 `json:"keywordScore,omitempty"`
-	RerankScore      float64 `json:"rerankScore,omitempty"`
+	DocumentID        int64   `json:"documentId"`
+	OriginalFilename  string  `json:"originalFilename,omitempty"`
+	Position          int     `json:"position"`
+	Content           string  `json:"content"`
+	Distance          float64 `json:"distance"`
+	MatchType         string  `json:"matchType,omitempty"`
+	KeywordScore      float64 `json:"keywordScore,omitempty"`
+	KeywordScoreKnown bool    `json:"-"`
+	FusionScore       float64 `json:"fusionScore,omitempty"`
+	RerankScore       float64 `json:"rerankScore,omitempty"`
 }
 
 type PostgresStore struct{ db *sql.DB }
@@ -144,7 +146,7 @@ func (s *PostgresStore) SearchKeywordWithDocuments(ctx context.Context, knowledg
 		"CROSS JOIN search_query WHERE documents.knowledge_base_id = $1 " +
 		"AND (chunks.content_search @@ search_query.terms OR lower(chunks.content) LIKE $3 ESCAPE E'\\\\') " +
 		"AND ($4::bigint[] IS NULL OR chunks.document_id = ANY($4::bigint[]))" +
-		") SELECT document_id, original_filename, position, content, 0::float8 AS distance, keyword_score " +
+		") SELECT document_id, original_filename, position, content, 0::float8 AS distance, GREATEST(keyword_score, exact_score) AS keyword_score " +
 		"FROM scored ORDER BY exact_score DESC, keyword_score DESC, position, document_id LIMIT $5"
 	rows, err := s.db.QueryContext(ctx, sqlQuery, knowledgeBaseID, query, exactPattern, documentIDsArgument(documentIDs), limit)
 	if err != nil {
@@ -159,6 +161,7 @@ func (s *PostgresStore) SearchKeywordWithDocuments(ctx context.Context, knowledg
 			return nil, fmt.Errorf("scan filtered keyword document chunk: %w", err)
 		}
 		result.MatchType = "keyword"
+		result.KeywordScoreKnown = true
 		results = append(results, result)
 	}
 	if err := rows.Err(); err != nil {

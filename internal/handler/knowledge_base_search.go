@@ -11,6 +11,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
+	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
 const (
@@ -31,10 +32,11 @@ func NewKnowledgeBaseSearch(searcher retrieval.Searcher) http.Handler {
 		}
 
 		var request struct {
-			Query        string  `json:"query"`
-			Limit        int     `json:"limit"`
-			DocumentIDs  []int64 `json:"document_ids,omitempty"`
-			QueryRewrite bool    `json:"query_rewrite,omitempty"`
+			Query            string  `json:"query"`
+			Limit            int     `json:"limit"`
+			DocumentIDs      []int64 `json:"document_ids,omitempty"`
+			QueryRewrite     bool    `json:"query_rewrite,omitempty"`
+			KeywordThreshold float64 `json:"keyword_threshold,omitempty"`
 		}
 		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSearchBody))
 		decoder.DisallowUnknownFields()
@@ -58,6 +60,10 @@ func NewKnowledgeBaseSearch(searcher retrieval.Searcher) http.Handler {
 			http.Error(w, `{"error":"invalid search limit"}`, http.StatusBadRequest)
 			return
 		}
+		if err := retrieval.ValidateKeywordThreshold(request.KeywordThreshold); err != nil {
+			http.Error(w, `{"error":"invalid search keyword_threshold"}`, http.StatusBadRequest)
+			return
+		}
 		normalizedDocumentIDs, err := retrieval.NormalizeDocumentIDs(request.DocumentIDs)
 		if err != nil {
 			http.Error(w, `{"error":"invalid search document_ids"}`, http.StatusBadRequest)
@@ -65,29 +71,37 @@ func NewKnowledgeBaseSearch(searcher retrieval.Searcher) http.Handler {
 		}
 
 		var results []retrieval.Result
-		if len(normalizedDocumentIDs) == 0 && !request.QueryRewrite {
-			results, err = searcher.Search(r.Context(), knowledgeBaseID, request.Query, request.Limit)
+		retrievalTracker := usage.NewRetrievalTracker()
+		searchContext := usage.WithRetrievalObserver(r.Context(), retrievalTracker)
+		if len(normalizedDocumentIDs) == 0 && !request.QueryRewrite && request.KeywordThreshold == 0 {
+			results, err = searcher.Search(searchContext, knowledgeBaseID, request.Query, request.Limit)
 		} else {
 			filtered, ok := searcher.(retrieval.FilteredSearcher)
 			if !ok {
 				writeSearchError(w, retrieval.ErrDocumentFilterUnavailable)
 				return
 			}
-			results, err = filtered.SearchWithOptions(r.Context(), knowledgeBaseID, request.Query, request.Limit, retrieval.SearchOptions{DocumentIDs: normalizedDocumentIDs, QueryRewrite: request.QueryRewrite})
+			results, err = filtered.SearchWithOptions(searchContext, knowledgeBaseID, request.Query, request.Limit, retrieval.SearchOptions{DocumentIDs: normalizedDocumentIDs, QueryRewrite: request.QueryRewrite, KeywordThreshold: request.KeywordThreshold})
 		}
 		if err != nil {
 			writeSearchError(w, err)
 			return
 		}
+		stats := retrievalTracker.RetrievalSnapshot()
+		var statsPointer *usage.RetrievalObservation
+		if stats.HasData() {
+			statsPointer = &stats
+		}
 		writeJSON(w, struct {
-			Results []retrieval.Result `json:"results"`
-		}{Results: results})
+			Results   []retrieval.Result          `json:"results"`
+			Retrieval *usage.RetrievalObservation `json:"retrieval,omitempty"`
+		}{Results: results, Retrieval: statsPointer})
 	})
 }
 
 func writeSearchError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, retrieval.ErrInvalidKnowledgeBase), errors.Is(err, retrieval.ErrInvalidQuery), errors.Is(err, retrieval.ErrInvalidLimit), errors.Is(err, retrieval.ErrInvalidDocumentIDs):
+	case errors.Is(err, retrieval.ErrInvalidKnowledgeBase), errors.Is(err, retrieval.ErrInvalidQuery), errors.Is(err, retrieval.ErrInvalidLimit), errors.Is(err, retrieval.ErrInvalidDocumentIDs), errors.Is(err, retrieval.ErrInvalidKeywordThreshold):
 		http.Error(w, `{"error":"invalid search request"}`, http.StatusBadRequest)
 	case errors.Is(err, retrieval.ErrQueryRewriteUnavailable):
 		http.Error(w, `{"error":"query rewrite is unavailable"}`, http.StatusInternalServerError)

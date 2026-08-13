@@ -18,18 +18,21 @@ var (
 	ErrInvalidQuery              = errors.New("invalid search query")
 	ErrInvalidLimit              = errors.New("invalid search result limit")
 	ErrInvalidMaxDistance        = errors.New("search distance threshold must be greater than 0 and at most 1")
+	ErrInvalidKeywordThreshold   = errors.New("keyword score threshold must be between 0 and 1")
 	ErrInvalidDocumentIDs        = errors.New("invalid document filter")
 	ErrDocumentFilterUnavailable = errors.New("document filter is unavailable")
 	ErrQueryRewriteUnavailable   = errors.New("query rewrite is unavailable")
 )
 
 const (
-	DefaultResults       = 5
-	MaxResults           = 20
-	MaxDocumentIDs       = 100
-	MaxQueryVariants     = 2
-	MaxConcurrentQueries = MaxQueryVariants + 1
-	DefaultMaxDistance   = 0.65
+	DefaultResults          = 5
+	MaxResults              = 20
+	MaxDocumentIDs          = 100
+	MaxQueryVariants        = 2
+	MaxConcurrentQueries    = MaxQueryVariants + 1
+	DefaultMaxDistance      = 0.65
+	DefaultKeywordThreshold = 0.10
+	rrfConstant             = 60
 )
 
 type Result = documentchunk.SearchResult
@@ -59,8 +62,9 @@ type FilteredKeywordSearcher interface {
 }
 
 type SearchOptions struct {
-	DocumentIDs  []int64
-	QueryRewrite bool
+	DocumentIDs      []int64
+	QueryRewrite     bool
+	KeywordThreshold float64
 }
 
 type FilteredSearcher interface {
@@ -83,6 +87,20 @@ func ValidateMaxDistance(maxDistance float64) error {
 		return ErrInvalidMaxDistance
 	}
 	return nil
+}
+
+func ValidateKeywordThreshold(threshold float64) error {
+	if threshold < 0 || threshold > 1 {
+		return ErrInvalidKeywordThreshold
+	}
+	return nil
+}
+
+func effectiveKeywordThreshold(threshold float64) float64 {
+	if threshold == 0 {
+		return DefaultKeywordThreshold
+	}
+	return threshold
 }
 
 func NormalizeDocumentIDs(documentIDs []int64) ([]int64, error) {
@@ -112,6 +130,14 @@ func (s *Service) SearchWithOptions(ctx context.Context, knowledgeBaseID int64, 
 // FilterByMaxDistance keeps only results close enough to the query. pgvector
 // cosine distance is lower for more similar vectors, so this is an upper bound.
 func FilterByMaxDistance(results []Result, maxDistance float64) ([]Result, error) {
+	return FilterByMaxDistanceWithStats(context.Background(), results, maxDistance)
+}
+
+// FilterByMaxDistanceWithStats applies the final semantic-distance boundary
+// and reports how many results survived it. Keyword-only results have no
+// vector distance and are kept here; their keyword threshold is applied in
+// the recall stage.
+func FilterByMaxDistanceWithStats(ctx context.Context, results []Result, maxDistance float64) ([]Result, error) {
 	if maxDistance == 0 {
 		maxDistance = DefaultMaxDistance
 	}
@@ -131,6 +157,7 @@ func FilterByMaxDistance(results []Result, maxDistance float64) ([]Result, error
 			filtered = append(filtered, result)
 		}
 	}
+	usage.ObserveRetrieval(ctx, usage.RetrievalObservation{FinalFiltered: len(filtered)})
 	return filtered, nil
 }
 
@@ -205,10 +232,15 @@ func (s *Service) searchWithOptions(ctx context.Context, knowledgeBaseID int64, 
 		return nil, err
 	}
 	options.DocumentIDs = documentIDs
-	key := makeResultCacheKey(knowledgeBaseID, query, limit, documentIDs, options.QueryRewrite)
+	if err := ValidateKeywordThreshold(options.KeywordThreshold); err != nil {
+		return nil, err
+	}
+	options.KeywordThreshold = effectiveKeywordThreshold(options.KeywordThreshold)
+	key := makeResultCacheKey(knowledgeBaseID, query, limit, documentIDs, options.QueryRewrite, options.KeywordThreshold)
 	if s.cache != nil {
 		if value, ok := s.cache.get(key); ok {
 			usage.ObserveQueryRewrite(ctx, value.rewriteState)
+			usage.ObserveRetrieval(ctx, value.observation)
 			return value.results, nil
 		}
 		flight, owner := s.cache.begin(key)
@@ -218,6 +250,7 @@ func (s *Service) searchWithOptions(ctx context.Context, knowledgeBaseID int64, 
 				return nil, waitErr
 			}
 			usage.ObserveQueryRewrite(ctx, value.rewriteState)
+			usage.ObserveRetrieval(ctx, value.observation)
 			return value.results, nil
 		}
 		// The first get and begin are separate operations. Recheck after
@@ -226,6 +259,7 @@ func (s *Service) searchWithOptions(ctx context.Context, knowledgeBaseID int64, 
 		if value, ok := s.cache.get(key); ok {
 			s.cache.finish(key, flight, value, nil)
 			usage.ObserveQueryRewrite(ctx, value.rewriteState)
+			usage.ObserveRetrieval(ctx, value.observation)
 			return value.results, nil
 		}
 		value, searchErr := s.searchUncached(ctx, knowledgeBaseID, query, limit, options, documentIDs)
@@ -233,12 +267,14 @@ func (s *Service) searchWithOptions(ctx context.Context, knowledgeBaseID int64, 
 		if searchErr != nil {
 			return nil, searchErr
 		}
+		usage.ObserveRetrieval(ctx, value.observation)
 		return value.results, nil
 	}
 	value, err := s.searchUncached(ctx, knowledgeBaseID, query, limit, options, documentIDs)
 	if err != nil {
 		return nil, err
 	}
+	usage.ObserveRetrieval(ctx, value.observation)
 	return value.results, nil
 }
 
@@ -286,7 +322,7 @@ func (s *Service) searchUncached(ctx context.Context, knowledgeBaseID int64, que
 		waitGroup.Add(1)
 		go func() {
 			defer waitGroup.Done()
-			results, searchErr := s.searchOneQuery(queryContext, knowledgeBaseID, searchQuery, candidateLimit, documentIDs)
+			results, searchErr := s.searchOneQuery(queryContext, knowledgeBaseID, searchQuery, candidateLimit, documentIDs, options.KeywordThreshold)
 			if searchErr != nil {
 				firstErrOnce.Do(func() {
 					firstErr = searchErr
@@ -302,41 +338,62 @@ func (s *Service) searchUncached(ctx context.Context, knowledgeBaseID int64, que
 		return cachedResult{}, firstErr
 	}
 	var merged []Result
+	var observation usage.RetrievalObservation
 	for _, queryResult := range queryResults {
 		if queryResult.usage != nil {
 			if observer := usage.ObserverFromContext(ctx); observer != nil {
 				observer.ObserveEmbeddingTokens(*queryResult.usage)
 			}
 		}
+		observation.VectorCandidates += queryResult.observation.VectorCandidates
+		observation.KeywordCandidates += queryResult.observation.KeywordCandidates
+		observation.KeywordAfterThreshold += queryResult.observation.KeywordAfterThreshold
+		observation.KeywordRejected += queryResult.observation.KeywordRejected
 		merged = mergeCandidateResults(merged, queryResult.results, MaxResults)
 	}
+	observation.DeduplicatedCandidates = len(merged)
+	observation.FinalResults = min(len(merged), limit)
 	if s.reranker == nil {
 		results := merged[:min(len(merged), limit)]
 		usage.ObserveQueryRewrite(ctx, rewriteState)
-		return cachedResult{results: results, rewriteState: rewriteState}, nil
+		observation.FinalResults = len(results)
+		return cachedResult{results: results, rewriteState: rewriteState, observation: observation}, nil
 	}
 	if len(merged) == 0 {
 		usage.ObserveQueryRewrite(ctx, rewriteState)
-		return cachedResult{rewriteState: rewriteState}, nil
+		return cachedResult{rewriteState: rewriteState, observation: observation}, nil
 	}
 	rankLimit := min(len(merged), limit)
+	observation.RerankBefore = len(merged)
 	ranked, err := s.reranker.Rerank(ctx, query, merged, rankLimit)
 	if err != nil {
-		return cachedResult{}, fmt.Errorf("rerank search results: %w", err)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return cachedResult{}, fmt.Errorf("rerank search results: %w", err)
+		}
+		// Rerank is an optional quality pass. A provider failure must not throw
+		// away the already useful hybrid recall result.
+		observation.RerankFallback = true
+		observation.RerankAfter = rankLimit
+		observation.FinalResults = rankLimit
+		usage.ObserveQueryRewrite(ctx, rewriteState)
+		return cachedResult{results: append([]Result(nil), merged[:rankLimit]...), rewriteState: rewriteState, observation: observation}, nil
 	}
 	if len(ranked) > rankLimit {
 		ranked = ranked[:rankLimit]
 	}
 	usage.ObserveQueryRewrite(ctx, rewriteState)
-	return cachedResult{results: ranked, rewriteState: rewriteState}, nil
+	observation.RerankAfter = len(ranked)
+	observation.FinalResults = len(ranked)
+	return cachedResult{results: ranked, rewriteState: rewriteState, observation: observation}, nil
 }
 
 type querySearchResult struct {
-	results []Result
-	usage   *modelclient.TokenUsage
+	results     []Result
+	usage       *modelclient.TokenUsage
+	observation usage.RetrievalObservation
 }
 
-func (s *Service) searchOneQuery(ctx context.Context, knowledgeBaseID int64, searchQuery string, candidateLimit int, documentIDs []int64) (querySearchResult, error) {
+func (s *Service) searchOneQuery(ctx context.Context, knowledgeBaseID int64, searchQuery string, candidateLimit int, documentIDs []int64, keywordThreshold float64) (querySearchResult, error) {
 	response, embedErr := s.embedder.Embed(ctx, []string{searchQuery})
 	if embedErr != nil {
 		return querySearchResult{}, fmt.Errorf("embed search query: %w", embedErr)
@@ -358,6 +415,7 @@ func (s *Service) searchOneQuery(ctx context.Context, knowledgeBaseID int64, sea
 	if err != nil {
 		return querySearchResult{}, fmt.Errorf("search document chunks: %w", err)
 	}
+	observation := usage.RetrievalObservation{VectorCandidates: len(vectorResults)}
 	queryResults := vectorResults
 	if s.keyword != nil {
 		var keywordResults []Result
@@ -373,9 +431,13 @@ func (s *Service) searchOneQuery(ctx context.Context, knowledgeBaseID int64, sea
 		if err != nil {
 			return querySearchResult{}, fmt.Errorf("search keyword document chunks: %w", err)
 		}
-		queryResults = mergeResults(vectorResults, keywordResults, candidateLimit)
+		observation.KeywordCandidates = len(keywordResults)
+		filteredKeywordResults := filterKeywordResults(keywordResults, keywordThreshold)
+		observation.KeywordAfterThreshold = len(filteredKeywordResults)
+		observation.KeywordRejected = len(keywordResults) - len(filteredKeywordResults)
+		queryResults = mergeResults(vectorResults, filteredKeywordResults, candidateLimit)
 	}
-	return querySearchResult{results: queryResults, usage: response.Usage}, nil
+	return querySearchResult{results: queryResults, usage: response.Usage, observation: observation}, nil
 }
 
 func normalizeQueryVariants(original string, variants []string) []string {
@@ -406,34 +468,48 @@ func min(left, right int) int {
 	return right
 }
 
+func filterKeywordResults(results []Result, threshold float64) []Result {
+	if threshold <= 0 {
+		return append([]Result(nil), results...)
+	}
+	filtered := make([]Result, 0, len(results))
+	for _, result := range results {
+		if !result.KeywordScoreKnown || result.KeywordScore >= threshold {
+			filtered = append(filtered, result)
+		}
+	}
+	return filtered
+}
+
 func mergeResults(vectorResults, keywordResults []Result, limit int) []Result {
 	merged := make([]Result, 0, limit)
-	seen := make(map[string]struct{}, limit)
-	add := func(result Result, matchType string) {
-		key := fmt.Sprintf("%d:%d", result.DocumentID, result.Position)
-		if _, ok := seen[key]; ok {
-			for index := range merged {
-				if fmt.Sprintf("%d:%d", merged[index].DocumentID, merged[index].Position) == key {
-					merged[index].MatchType = "hybrid"
-					break
-				}
+	seen := make(map[string]int, limit)
+	add := func(result Result, matchType string, rank int) {
+		key := resultKey(result)
+		contribution := 1 / float64(rrfConstant+rank+1)
+		if index, ok := seen[key]; ok {
+			merged[index].MatchType = "hybrid"
+			merged[index].FusionScore += contribution
+			if result.KeywordScoreKnown && !merged[index].KeywordScoreKnown {
+				merged[index].KeywordScore = result.KeywordScore
+				merged[index].KeywordScoreKnown = true
 			}
 			return
 		}
 		result.MatchType = matchType
-		seen[key] = struct{}{}
+		result.FusionScore = contribution
+		seen[key] = len(merged)
 		merged = append(merged, result)
 	}
-	for index := 0; len(merged) < limit && (index < len(vectorResults) || index < len(keywordResults)); index++ {
-		if index < len(vectorResults) {
-			add(vectorResults[index], "vector")
-		}
-		if len(merged) >= limit {
-			break
-		}
-		if index < len(keywordResults) {
-			add(keywordResults[index], "keyword")
-		}
+	for index, result := range vectorResults {
+		add(result, "vector", index)
+	}
+	for index, result := range keywordResults {
+		add(result, "keyword", index)
+	}
+	sort.SliceStable(merged, func(left, right int) bool { return merged[left].FusionScore > merged[right].FusionScore })
+	if len(merged) > limit {
+		merged = merged[:limit]
 	}
 	return merged
 }
@@ -450,6 +526,7 @@ func mergeCandidateResults(existing, incoming []Result, limit int) []Result {
 			if merged[index].MatchType != result.MatchType {
 				merged[index].MatchType = "hybrid"
 			}
+			merged[index].FusionScore += result.FusionScore
 			continue
 		}
 		if len(merged) >= limit {
@@ -458,6 +535,7 @@ func mergeCandidateResults(existing, incoming []Result, limit int) []Result {
 		seen[key] = len(merged)
 		merged = append(merged, result)
 	}
+	sort.SliceStable(merged, func(left, right int) bool { return merged[left].FusionScore > merged[right].FusionScore })
 	return merged
 }
 

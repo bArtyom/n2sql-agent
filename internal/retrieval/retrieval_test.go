@@ -99,6 +99,12 @@ type rerankerStub struct {
 	topN       int
 }
 
+type failingReranker struct{}
+
+func (failingReranker) Rerank(context.Context, string, []retrieval.Result, int) ([]retrieval.Result, error) {
+	return nil, errors.New("rerank provider unavailable")
+}
+
 func (s *rerankerStub) Rerank(_ context.Context, query string, candidates []retrieval.Result, topN int) ([]retrieval.Result, error) {
 	s.query, s.candidates, s.topN = query, candidates, topN
 	return []retrieval.Result{{DocumentID: 2, Content: "重排第一"}, {DocumentID: 1, Content: "重排第二"}}, nil
@@ -228,6 +234,31 @@ func TestHybridServiceExpandsCandidatesBeforeReranking(t *testing.T) {
 	}
 	if len(results) != 2 || results[0].DocumentID != 2 || store.limit != 6 || reranker.query != "服务" || reranker.topN != 2 {
 		t.Fatalf("results=%#v store=%#v reranker=%#v", results, store, reranker)
+	}
+}
+
+func TestHybridServiceFallsBackToFusedResultsWhenRerankFails(t *testing.T) {
+	service := retrieval.NewHybridServiceWithReranker(&embeddingStub{}, hybridChunkStoreStub{}, hybridChunkStoreStub{}, failingReranker{})
+
+	results, err := service.Search(context.Background(), 7, "错误码", 2)
+	if err != nil {
+		t.Fatalf("Search() error = %v, want hybrid fallback", err)
+	}
+	if len(results) != 2 || results[0].FusionScore <= 0 {
+		t.Fatalf("fallback results = %#v, want fused candidates", results)
+	}
+}
+
+func TestHybridServiceReportsRetrievalCounts(t *testing.T) {
+	tracker := usage.NewRetrievalTracker()
+	service := retrieval.NewHybridService(&embeddingStub{}, hybridChunkStoreStub{}, hybridChunkStoreStub{})
+
+	if _, err := service.Search(usage.WithRetrievalObserver(context.Background(), tracker), 7, "错误码", 2); err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	stats := tracker.RetrievalSnapshot()
+	if stats.VectorCandidates != 1 || stats.KeywordCandidates != 2 || stats.DeduplicatedCandidates != 2 || stats.FinalResults != 2 {
+		t.Fatalf("retrieval stats = %#v", stats)
 	}
 }
 

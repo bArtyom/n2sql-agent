@@ -33,12 +33,12 @@ func NewKnowledgeBaseChatStream(answerer rag.StreamAnswerer) http.Handler {
 			return writeSSEEvent(w, flusher, event.Type, event)
 		}
 		var err error
-		if len(request.DocumentIDs) > 0 || request.QueryRewrite {
+		if len(request.DocumentIDs) > 0 || request.QueryRewrite || request.KeywordThreshold != 0 {
 			optionsAnswerer, ok := answerer.(rag.OptionsStreamAnswerer)
 			if !ok {
 				err = rag.ErrThresholdUnavailable
 			} else {
-				err = optionsAnswerer.StreamWithSearchOptions(r.Context(), knowledgeBaseID, request.Message, request.TopK, request.SimilarityThreshold, retrieval.SearchOptions{DocumentIDs: request.DocumentIDs, QueryRewrite: request.QueryRewrite}, emit)
+				err = optionsAnswerer.StreamWithSearchOptions(r.Context(), knowledgeBaseID, request.Message, request.TopK, request.SimilarityThreshold, retrieval.SearchOptions{DocumentIDs: request.DocumentIDs, QueryRewrite: request.QueryRewrite, KeywordThreshold: request.KeywordThreshold}, emit)
 			}
 		} else if request.SimilarityThreshold != 0 {
 			thresholdAnswerer, ok := answerer.(rag.ThresholdStreamAnswerer)

@@ -37,6 +37,73 @@ type QueryRewriteObservation struct {
 	VariantCount int  `json:"variant_count"`
 }
 
+// RetrievalObservation is a bounded summary of one or more retrieval calls.
+// It deliberately contains counts and status only, never query text or source
+// content, so it is safe to expose in Agent/RAG responses.
+type RetrievalObservation struct {
+	VectorCandidates       int  `json:"vector_candidates"`
+	KeywordCandidates      int  `json:"keyword_candidates"`
+	KeywordAfterThreshold  int  `json:"keyword_after_threshold"`
+	KeywordRejected        int  `json:"keyword_rejected"`
+	DeduplicatedCandidates int  `json:"deduplicated_candidates"`
+	RerankBefore           int  `json:"rerank_before"`
+	RerankAfter            int  `json:"rerank_after"`
+	FinalResults           int  `json:"final_results"`
+	FinalFiltered          int  `json:"final_filtered"`
+	RerankFallback         bool `json:"rerank_fallback"`
+}
+
+func (o RetrievalObservation) HasData() bool {
+	return o.VectorCandidates > 0 || o.KeywordCandidates > 0 || o.KeywordAfterThreshold > 0 || o.KeywordRejected > 0 ||
+		o.DeduplicatedCandidates > 0 || o.RerankBefore > 0 || o.RerankAfter > 0 ||
+		o.FinalResults > 0 || o.FinalFiltered > 0 || o.RerankFallback
+}
+
+// RetrievalObserver receives bounded retrieval pipeline statistics.
+type RetrievalObserver interface {
+	ObserveRetrieval(RetrievalObservation)
+}
+
+type RetrievalSnapshotter interface {
+	RetrievalSnapshot() RetrievalObservation
+}
+
+// RetrievalTracker collects retrieval observations for a non-Agent request.
+// AgentRun implements the same interface for Agent requests.
+type RetrievalTracker struct {
+	mu          sync.Mutex
+	observation RetrievalObservation
+}
+
+func NewRetrievalTracker() *RetrievalTracker { return &RetrievalTracker{} }
+
+func (t *RetrievalTracker) ObserveRetrieval(observation RetrievalObservation) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.observation.VectorCandidates += nonNegative(observation.VectorCandidates)
+	t.observation.KeywordCandidates += nonNegative(observation.KeywordCandidates)
+	t.observation.KeywordAfterThreshold += nonNegative(observation.KeywordAfterThreshold)
+	t.observation.KeywordRejected += nonNegative(observation.KeywordRejected)
+	t.observation.DeduplicatedCandidates += nonNegative(observation.DeduplicatedCandidates)
+	t.observation.RerankBefore += nonNegative(observation.RerankBefore)
+	t.observation.RerankAfter += nonNegative(observation.RerankAfter)
+	t.observation.FinalResults += nonNegative(observation.FinalResults)
+	t.observation.FinalFiltered += nonNegative(observation.FinalFiltered)
+	t.observation.RerankFallback = t.observation.RerankFallback || observation.RerankFallback
+}
+
+func (t *RetrievalTracker) RetrievalSnapshot() RetrievalObservation {
+	if t == nil {
+		return RetrievalObservation{}
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.observation
+}
+
 // QueryRewriteObserver is an optional request observer. Keeping it separate
 // from Observer lets existing token observers remain source-compatible.
 type QueryRewriteObserver interface {
@@ -83,6 +150,7 @@ func (t *QueryRewriteTracker) QueryRewriteSnapshot() QueryRewriteObservation {
 
 type observerContextKey struct{}
 type queryRewriteObserverContextKey struct{}
+type retrievalObserverContextKey struct{}
 
 // WithObserver associates a usage observer with a request context.
 func WithObserver(ctx context.Context, observer Observer) context.Context {
@@ -146,6 +214,74 @@ func QueryRewriteObserverFromContext(ctx context.Context) QueryRewriteObserver {
 	}
 	observer, _ := ctx.Value(queryRewriteObserverContextKey{}).(QueryRewriteObserver)
 	return observer
+}
+
+func WithRetrievalObserver(ctx context.Context, observer RetrievalObserver) context.Context {
+	if ctx == nil || observer == nil {
+		return ctx
+	}
+	if existing := RetrievalObserverFromContext(ctx); existing != nil {
+		observer = combinedRetrievalObserver{first: existing, second: observer}
+	}
+	return context.WithValue(ctx, retrievalObserverContextKey{}, observer)
+}
+
+type combinedRetrievalObserver struct {
+	first  RetrievalObserver
+	second RetrievalObserver
+}
+
+func (o combinedRetrievalObserver) ObserveRetrieval(observation RetrievalObservation) {
+	o.first.ObserveRetrieval(observation)
+	o.second.ObserveRetrieval(observation)
+}
+
+func (o combinedRetrievalObserver) RetrievalSnapshot() RetrievalObservation {
+	var result RetrievalObservation
+	if first, ok := o.first.(RetrievalSnapshotter); ok {
+		result = mergeRetrievalObservation(result, first.RetrievalSnapshot())
+	}
+	if second, ok := o.second.(RetrievalSnapshotter); ok {
+		result = mergeRetrievalObservation(result, second.RetrievalSnapshot())
+	}
+	return result
+}
+
+func mergeRetrievalObservation(current, next RetrievalObservation) RetrievalObservation {
+	current.VectorCandidates += nonNegative(next.VectorCandidates)
+	current.KeywordCandidates += nonNegative(next.KeywordCandidates)
+	current.KeywordAfterThreshold += nonNegative(next.KeywordAfterThreshold)
+	current.KeywordRejected += nonNegative(next.KeywordRejected)
+	current.DeduplicatedCandidates += nonNegative(next.DeduplicatedCandidates)
+	current.RerankBefore += nonNegative(next.RerankBefore)
+	current.RerankAfter += nonNegative(next.RerankAfter)
+	current.FinalResults += nonNegative(next.FinalResults)
+	current.FinalFiltered += nonNegative(next.FinalFiltered)
+	current.RerankFallback = current.RerankFallback || next.RerankFallback
+	return current
+}
+
+func RetrievalObserverFromContext(ctx context.Context) RetrievalObserver {
+	if ctx == nil {
+		return nil
+	}
+	observer, _ := ctx.Value(retrievalObserverContextKey{}).(RetrievalObserver)
+	return observer
+}
+
+func ObserveRetrieval(ctx context.Context, observation RetrievalObservation) {
+	if observer := RetrievalObserverFromContext(ctx); observer != nil {
+		observer.ObserveRetrieval(observation)
+	}
+}
+
+func RetrievalSnapshotFromContext(ctx context.Context) (RetrievalObservation, bool) {
+	observer := RetrievalObserverFromContext(ctx)
+	snapshotter, ok := observer.(RetrievalSnapshotter)
+	if !ok {
+		return RetrievalObservation{}, false
+	}
+	return snapshotter.RetrievalSnapshot(), true
 }
 
 func QueryRewriteSnapshotFromContext(ctx context.Context) (QueryRewriteObservation, bool) {

@@ -19,6 +19,7 @@ type Source = {
   distance: number;
   matchType?: "vector" | "keyword" | "hybrid" | string;
   keywordScore?: number;
+  fusionScore?: number;
   rerankScore?: number;
 };
 type ChatMessage = {
@@ -30,6 +31,7 @@ type ChatMessage = {
   researchEvents?: ResearchEvent[];
   agentEvents?: AgentEvent[];
   queryRewrite?: QueryRewriteStatus;
+  retrieval?: RetrievalStats;
   requestMessage?: string;
   conversationId?: number | null;
   mode?: ChatMode;
@@ -38,6 +40,18 @@ type ChatMessage = {
   seenEventIDs?: Set<string>;
 };
 type QueryRewriteStatus = { enabled: boolean; applied: boolean; fallback: boolean; variant_count: number };
+type RetrievalStats = {
+  vector_candidates: number;
+  keyword_candidates: number;
+  keyword_after_threshold: number;
+  keyword_rejected: number;
+  deduplicated_candidates: number;
+  rerank_before: number;
+  rerank_after: number;
+  final_results: number;
+  final_filtered: number;
+  rerank_fallback: boolean;
+};
 type ResearchEvent = { type: string; round?: number; label: string; detail?: string };
 type AgentEvent = { type: string; step?: number; label: string; detail?: string; status: "running" | "done" | "error" };
 type ChatMode = "agent" | "research" | "a2a";
@@ -63,6 +77,7 @@ type StreamPayload = {
   round?: number;
   step_number?: number;
   query_rewrite?: QueryRewriteStatus;
+  retrieval?: RetrievalStats;
   id?: string;
 };
 type ModelProvider = {
@@ -113,6 +128,7 @@ const chatMode = ref<ChatMode>("agent");
 const topK = ref(5);
 const similarityThreshold = ref(0.65);
 const queryRewrite = ref(false);
+const keywordThreshold = ref(0.10);
 const selectedDocumentIDs = ref<number[]>([]);
 const selectedSource = ref<Source | null>(null);
 const copiedMessageIndex = ref<number | null>(null);
@@ -189,6 +205,7 @@ function matchTypeLabel(matchType?: string): string {
 function sourceScoreLabel(source: Source): string {
   if (typeof source.rerankScore === "number") return `重排 ${source.rerankScore.toFixed(2)}`;
   if (typeof source.keywordScore === "number" && source.keywordScore > 0) return `关键词 ${source.keywordScore.toFixed(2)}`;
+  if (typeof source.fusionScore === "number" && source.fusionScore > 0) return `融合 ${source.fusionScore.toFixed(3)}`;
   return `距离 ${source.distance.toFixed(2)}`;
 }
 
@@ -605,13 +622,14 @@ async function streamAgentQuestion(prompt: string, answerIndex: number, activeCo
     method: "POST",
     headers,
     body: JSON.stringify(researchMode
-      ? { message: prompt, topK: topK.value, document_ids: selectedDocumentIDs.value, query_rewrite: queryRewrite.value }
+      ? { message: prompt, topK: topK.value, document_ids: selectedDocumentIDs.value, query_rewrite: queryRewrite.value, keyword_threshold: keywordThreshold.value }
       : {
           message: prompt,
           top_k: topK.value,
           similarity_threshold: similarityThreshold.value,
           document_ids: selectedDocumentIDs.value,
           query_rewrite: queryRewrite.value,
+          keyword_threshold: keywordThreshold.value,
           conversation_id: activeConversationID,
         }),
   });
@@ -731,12 +749,13 @@ async function askA2ATask(prompt: string, answerIndex: number) {
       } else if (current.status === "failed") {
         throw new Error(current.error || "后台 Agent 任务失败。");
       } else if (current.status === "completed") {
-        const result = await requestJSON<{ answer?: string; sources?: Source[]; query_rewrite?: QueryRewriteStatus }>(
+        const result = await requestJSON<{ answer?: string; sources?: Source[]; query_rewrite?: QueryRewriteStatus; retrieval?: RetrievalStats }>(
           `/api/a2a/tasks/${encodeURIComponent(task.id)}/result`,
         );
         answer.content = typeof result.answer === "string" ? result.answer : "";
         answer.sources = mergeSources(answer.sources ?? [], parseSources(result.sources));
         if (result.query_rewrite) answer.queryRewrite = result.query_rewrite;
+        if (result.retrieval) answer.retrieval = result.retrieval;
         answer.activity = "后台任务已完成";
         answer.status = "done";
         return;
@@ -801,6 +820,7 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
     switch (event) {
       case "sources":
         answer.sources = mergeSources(answer.sources ?? [], parseSources(payload.sources));
+        if (payload.retrieval) answer.retrieval = payload.retrieval;
         if (payload.query_rewrite) {
           answer.queryRewrite = payload.query_rewrite;
           answer.activity = payload.query_rewrite.fallback ? "改写不可用，已使用原问题检索…" : "检索完成，正在组织答案…";
@@ -892,6 +912,9 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
           recordAgentEvent(answer, event, "Agent 完成", "本轮运行成功", payload.step_number, "done");
         }
         if (researchMode) answer.sources = mergeSources(answer.sources ?? [], parseSources(eventData.sources));
+        if (researchMode && eventData.retrieval && typeof eventData.retrieval === "object") {
+          answer.retrieval = eventData.retrieval as RetrievalStats;
+        }
         if (payload.query_rewrite) answer.queryRewrite = payload.query_rewrite;
         const runStats = eventData.stats;
         if (!answer.queryRewrite && runStats && typeof runStats === "object") {
@@ -899,6 +922,10 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
           if (rewrite && typeof rewrite === "object" && (rewrite as Record<string, unknown>).enabled === true) {
             answer.queryRewrite = rewrite as QueryRewriteStatus;
           }
+        }
+        if (runStats && typeof runStats === "object") {
+          const retrieval = (runStats as Record<string, unknown>).retrieval;
+          if (retrieval && typeof retrieval === "object") answer.retrieval = retrieval as RetrievalStats;
         }
         answer.content ||= dataString("answer") || payload.answer || "";
         answer.activity = "";
@@ -1115,6 +1142,10 @@ onUnmounted(() => {
             <div><strong>检索范围</strong><span>{{ selectedDocumentIDs.length ? `${chatMode === 'research' ? '协作研究' : chatMode === 'a2a' ? '异步任务' : '标准 Agent'} 仅检索 ${selectedDocumentIDs.length} 份已选文档；` : "当前模式检索整个知识库；" }}控制召回数量和证据相关度</span></div>
             <label>召回片段数<select v-model.number="topK" :disabled="streaming"><option v-for="value in [3, 5, 8, 12, 20]" :key="value" :value="value">{{ value }} 条</option></select></label>
             <label class="rewrite-control"><input v-model="queryRewrite" type="checkbox" :disabled="streaming" /> 多查询改写</label>
+            <label v-if="chatMode !== 'a2a'" class="threshold-control">关键词下限
+              <input v-model.number="keywordThreshold" type="range" min="0" max="0.80" step="0.05" :disabled="streaming">
+              <output>{{ keywordThreshold.toFixed(2) }}</output>
+            </label>
             <label v-if="chatMode === 'agent'" class="threshold-control">距离上限
               <input v-model.number="similarityThreshold" type="range" min="0.30" max="0.90" step="0.05" :disabled="streaming">
               <output>{{ similarityThreshold.toFixed(2) }}</output>
@@ -1181,6 +1212,14 @@ onUnmounted(() => {
                 <span v-if="message.queryRewrite.fallback">多查询改写不可用，已自动使用原问题检索</span>
                 <span v-else-if="message.queryRewrite.applied">已使用 {{ message.queryRewrite.variant_count }} 个改写查询扩大召回</span>
                 <span v-else>已启用多查询改写，本次使用原问题检索</span>
+              </div>
+              <div v-if="message.role === 'assistant' && message.retrieval" class="retrieval-stats" aria-label="检索统计">
+                <span>向量 {{ message.retrieval.vector_candidates }}</span>
+                <span>关键词 {{ message.retrieval.keyword_candidates }}→{{ message.retrieval.keyword_after_threshold }}</span>
+                <span>去重 {{ message.retrieval.deduplicated_candidates }}</span>
+                <span v-if="message.retrieval.rerank_before">重排 {{ message.retrieval.rerank_before }}→{{ message.retrieval.rerank_after }}</span>
+                <span>最终 {{ message.retrieval.final_filtered || message.retrieval.final_results }}</span>
+                <span v-if="message.retrieval.rerank_fallback">Rerank 已降级</span>
               </div>
               <div v-if="message.role === 'assistant' && message.content && message.status !== 'streaming'" class="message-actions">
                 <button type="button" @click="copyAnswer(message, index)">{{ copiedMessageIndex === index ? "已复制回答" : "复制回答" }}</button>

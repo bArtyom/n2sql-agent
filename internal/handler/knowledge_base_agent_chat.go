@@ -170,14 +170,15 @@ func decodeIdempotencyKey(w http.ResponseWriter, r *http.Request, conversationID
 
 func idempotencyRequestHash(knowledgeBaseID int64, request agentservice.ChatRequest) (string, error) {
 	payload, err := json.Marshal(struct {
-		KnowledgeBaseID int64   `json:"knowledge_base_id"`
-		ConversationID  int64   `json:"conversation_id"`
-		Message         string  `json:"message"`
-		TopK            int     `json:"top_k"`
-		Threshold       float64 `json:"similarity_threshold"`
-		DocumentIDs     []int64 `json:"document_ids"`
-		QueryRewrite    bool    `json:"query_rewrite"`
-	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message, TopK: request.TopK, Threshold: request.SimilarityThreshold, DocumentIDs: request.DocumentIDs, QueryRewrite: request.QueryRewrite})
+		KnowledgeBaseID  int64   `json:"knowledge_base_id"`
+		ConversationID   int64   `json:"conversation_id"`
+		Message          string  `json:"message"`
+		TopK             int     `json:"top_k"`
+		Threshold        float64 `json:"similarity_threshold"`
+		KeywordThreshold float64 `json:"keyword_threshold"`
+		DocumentIDs      []int64 `json:"document_ids"`
+		QueryRewrite     bool    `json:"query_rewrite"`
+	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message, TopK: request.TopK, Threshold: request.SimilarityThreshold, KeywordThreshold: request.KeywordThreshold, DocumentIDs: request.DocumentIDs, QueryRewrite: request.QueryRewrite})
 	if err != nil {
 		return "", err
 	}
@@ -226,6 +227,10 @@ func decodeKnowledgeBaseAgentChatRequest(w http.ResponseWriter, r *http.Request,
 			http.Error(w, `{"error":"invalid agent chat similarity_threshold"}`, http.StatusBadRequest)
 			return 0, agentservice.ChatRequest{}, false
 		}
+	}
+	if err := retrieval.ValidateKeywordThreshold(request.KeywordThreshold); err != nil {
+		http.Error(w, `{"error":"invalid agent chat keyword_threshold"}`, http.StatusBadRequest)
+		return 0, agentservice.ChatRequest{}, false
 	}
 	normalizedDocumentIDs, err := retrieval.NormalizeDocumentIDs(request.DocumentIDs)
 	if err != nil {

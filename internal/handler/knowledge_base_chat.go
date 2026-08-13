@@ -24,6 +24,7 @@ type knowledgeBaseChatRequest struct {
 	Message             string  `json:"message"`
 	TopK                int     `json:"topK"`
 	SimilarityThreshold float64 `json:"similarity_threshold,omitempty"`
+	KeywordThreshold    float64 `json:"keyword_threshold,omitempty"`
 	DocumentIDs         []int64 `json:"document_ids,omitempty"`
 	QueryRewrite        bool    `json:"query_rewrite,omitempty"`
 }
@@ -41,13 +42,13 @@ func NewKnowledgeBaseChat(answerer rag.Answerer) http.Handler {
 
 		var response rag.Response
 		var err error
-		if len(request.DocumentIDs) > 0 || request.QueryRewrite {
+		if len(request.DocumentIDs) > 0 || request.QueryRewrite || request.KeywordThreshold != 0 {
 			optionsAnswerer, ok := answerer.(rag.OptionsAnswerer)
 			if !ok {
 				writeKnowledgeBaseChatError(w, rag.ErrThresholdUnavailable)
 				return
 			}
-			response, err = optionsAnswerer.AnswerWithSearchOptions(r.Context(), knowledgeBaseID, request.Message, request.TopK, request.SimilarityThreshold, retrieval.SearchOptions{DocumentIDs: request.DocumentIDs, QueryRewrite: request.QueryRewrite})
+			response, err = optionsAnswerer.AnswerWithSearchOptions(r.Context(), knowledgeBaseID, request.Message, request.TopK, request.SimilarityThreshold, retrieval.SearchOptions{DocumentIDs: request.DocumentIDs, QueryRewrite: request.QueryRewrite, KeywordThreshold: request.KeywordThreshold})
 		} else if request.SimilarityThreshold != 0 {
 			thresholdAnswerer, ok := answerer.(rag.ThresholdAnswerer)
 			if !ok {
@@ -79,6 +80,8 @@ func knowledgeBaseChatError(err error) (string, int) {
 		return "invalid chat request", http.StatusBadRequest
 	case errors.Is(err, retrieval.ErrInvalidMaxDistance):
 		return "invalid similarity threshold", http.StatusBadRequest
+	case errors.Is(err, retrieval.ErrInvalidKeywordThreshold):
+		return "invalid keyword threshold", http.StatusBadRequest
 	case errors.Is(err, rag.ErrThresholdUnavailable):
 		return "similarity threshold is unavailable", http.StatusInternalServerError
 	case errors.Is(err, retrieval.ErrQueryRewriteUnavailable):
@@ -132,6 +135,10 @@ func decodeKnowledgeBaseChatRequest(w http.ResponseWriter, r *http.Request) (int
 			http.Error(w, `{"error":"invalid chat similarity_threshold"}`, http.StatusBadRequest)
 			return 0, knowledgeBaseChatRequest{}, false
 		}
+	}
+	if err := retrieval.ValidateKeywordThreshold(request.KeywordThreshold); err != nil {
+		http.Error(w, `{"error":"invalid chat keyword_threshold"}`, http.StatusBadRequest)
+		return 0, knowledgeBaseChatRequest{}, false
 	}
 	normalizedDocumentIDs, err := retrieval.NormalizeDocumentIDs(request.DocumentIDs)
 	if err != nil {

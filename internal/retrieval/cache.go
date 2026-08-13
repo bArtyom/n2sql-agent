@@ -28,16 +28,18 @@ func DefaultCacheConfig() CacheConfig {
 }
 
 type resultCacheKey struct {
-	knowledgeBaseID int64
-	query           string
-	limit           int
-	documentIDs     string
-	queryRewrite    bool
+	knowledgeBaseID  int64
+	query            string
+	limit            int
+	documentIDs      string
+	queryRewrite     bool
+	keywordThreshold float64
 }
 
 type cachedResult struct {
 	results      []Result
 	rewriteState usage.QueryRewriteObservation
+	observation  usage.RetrievalObservation
 }
 
 type cacheEntry struct {
@@ -198,7 +200,11 @@ func cloneCachedResult(value cachedResult) cachedResult {
 	return value
 }
 
-func makeResultCacheKey(knowledgeBaseID int64, query string, limit int, documentIDs []int64, queryRewrite bool) resultCacheKey {
+func makeResultCacheKey(knowledgeBaseID int64, query string, limit int, documentIDs []int64, queryRewrite bool, thresholds ...float64) resultCacheKey {
+	var keywordThreshold float64
+	if len(thresholds) > 0 {
+		keywordThreshold = thresholds[0]
+	}
 	var builder strings.Builder
 	for index, documentID := range documentIDs {
 		if index > 0 {
@@ -207,11 +213,12 @@ func makeResultCacheKey(knowledgeBaseID int64, query string, limit int, document
 		builder.WriteString(strconv.FormatInt(documentID, 10))
 	}
 	return resultCacheKey{
-		knowledgeBaseID: knowledgeBaseID,
-		query:           normalizedCacheQuery(query),
-		limit:           limit,
-		documentIDs:     builder.String(),
-		queryRewrite:    queryRewrite,
+		knowledgeBaseID:  knowledgeBaseID,
+		query:            normalizedCacheQuery(query),
+		limit:            limit,
+		documentIDs:      builder.String(),
+		queryRewrite:     queryRewrite,
+		keywordThreshold: keywordThreshold,
 	}
 }
 

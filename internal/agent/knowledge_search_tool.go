@@ -84,13 +84,14 @@ var scopedKnowledgeSearchParameters = json.RawMessage(`{
 
 // KnowledgeSearchTool adapts the existing retrieval service to the Agent Tool interface.
 type KnowledgeSearchTool struct {
-	searcher        retrieval.Searcher
-	knowledgeBaseID int64
-	maxResultBytes  int
-	maxResults      int
-	maxDistance     float64
-	documentIDs     []int64
-	queryRewrite    bool
+	searcher         retrieval.Searcher
+	knowledgeBaseID  int64
+	maxResultBytes   int
+	maxResults       int
+	maxDistance      float64
+	keywordThreshold float64
+	documentIDs      []int64
+	queryRewrite     bool
 }
 
 var _ Tool = (*KnowledgeSearchTool)(nil)
@@ -133,6 +134,14 @@ func NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocuments(sea
 }
 
 func NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewrite(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxResults int, maxDistance float64, documentIDs []int64, queryRewrite bool) (*KnowledgeSearchTool, error) {
+	return NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewriteAndKeywordThreshold(searcher, knowledgeBaseID, maxResultBytes, maxResults, maxDistance, retrieval.DefaultKeywordThreshold, documentIDs, queryRewrite)
+}
+
+func NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewriteAndKeywordThreshold(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxResults int, maxDistance, keywordThreshold float64, documentIDs []int64, queryRewrite bool) (*KnowledgeSearchTool, error) {
+	return newKnowledgeSearchToolForKnowledgeBase(searcher, knowledgeBaseID, maxResultBytes, maxResults, maxDistance, keywordThreshold, documentIDs, queryRewrite)
+}
+
+func newKnowledgeSearchToolForKnowledgeBase(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxResults int, maxDistance, keywordThreshold float64, documentIDs []int64, queryRewrite bool) (*KnowledgeSearchTool, error) {
 	if searcher == nil {
 		return nil, ErrKnowledgeSearcherUnavailable
 	}
@@ -148,18 +157,22 @@ func NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQ
 	if err := ValidateMaxKnowledgeDistance(maxDistance); err != nil {
 		return nil, err
 	}
+	if err := retrieval.ValidateKeywordThreshold(keywordThreshold); err != nil {
+		return nil, err
+	}
 	normalizedDocumentIDs, err := retrieval.NormalizeDocumentIDs(documentIDs)
 	if err != nil {
 		return nil, err
 	}
 	return &KnowledgeSearchTool{
-		searcher:        searcher,
-		knowledgeBaseID: knowledgeBaseID,
-		maxResultBytes:  maxResultBytes,
-		maxResults:      maxResults,
-		maxDistance:     maxDistance,
-		documentIDs:     normalizedDocumentIDs,
-		queryRewrite:    queryRewrite,
+		searcher:         searcher,
+		knowledgeBaseID:  knowledgeBaseID,
+		maxResultBytes:   maxResultBytes,
+		maxResults:       maxResults,
+		maxDistance:      maxDistance,
+		keywordThreshold: keywordThreshold,
+		documentIDs:      normalizedDocumentIDs,
+		queryRewrite:     queryRewrite,
 	}, nil
 }
 
@@ -231,19 +244,19 @@ func (t *KnowledgeSearchTool) Call(ctx context.Context, raw json.RawMessage) (To
 		results []retrieval.Result
 		err     error
 	)
-	if len(t.documentIDs) == 0 && !t.queryRewrite {
+	if len(t.documentIDs) == 0 && !t.queryRewrite && t.keywordThreshold <= 0 {
 		results, err = t.searcher.Search(ctx, input.KnowledgeBaseID, input.Query, input.Limit)
+	} else if filtered, ok := t.searcher.(retrieval.FilteredSearcher); ok {
+		results, err = filtered.SearchWithOptions(ctx, input.KnowledgeBaseID, input.Query, input.Limit, retrieval.SearchOptions{DocumentIDs: t.documentIDs, QueryRewrite: t.queryRewrite, KeywordThreshold: t.keywordThreshold})
+	} else if len(t.documentIDs) > 0 || t.queryRewrite {
+		return ToolResult{}, retrieval.ErrDocumentFilterUnavailable
 	} else {
-		filtered, ok := t.searcher.(retrieval.FilteredSearcher)
-		if !ok {
-			return ToolResult{}, retrieval.ErrDocumentFilterUnavailable
-		}
-		results, err = filtered.SearchWithOptions(ctx, input.KnowledgeBaseID, input.Query, input.Limit, retrieval.SearchOptions{DocumentIDs: t.documentIDs, QueryRewrite: t.queryRewrite})
+		results, err = t.searcher.Search(ctx, input.KnowledgeBaseID, input.Query, input.Limit)
 	}
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("knowledge search: %w", err)
 	}
-	relevantResults, err := retrieval.FilterByMaxDistance(results, t.maxDistance)
+	relevantResults, err := retrieval.FilterByMaxDistanceWithStats(ctx, results, t.maxDistance)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("filter knowledge search results: %w", err)
 	}
@@ -387,7 +400,11 @@ func NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistanceAndDocuments
 }
 
 func NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewrite(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxResults int, maxDistance float64, documentIDs []int64, queryRewrite bool) (*ToolRegistry, error) {
-	tool, err := NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewrite(searcher, knowledgeBaseID, maxResultBytes, maxResults, maxDistance, documentIDs, queryRewrite)
+	return NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewriteAndKeywordThreshold(searcher, knowledgeBaseID, maxResultBytes, maxResults, maxDistance, retrieval.DefaultKeywordThreshold, documentIDs, queryRewrite)
+}
+
+func NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewriteAndKeywordThreshold(searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxResults int, maxDistance, keywordThreshold float64, documentIDs []int64, queryRewrite bool) (*ToolRegistry, error) {
+	tool, err := NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewriteAndKeywordThreshold(searcher, knowledgeBaseID, maxResultBytes, maxResults, maxDistance, keywordThreshold, documentIDs, queryRewrite)
 	if err != nil {
 		return nil, err
 	}
