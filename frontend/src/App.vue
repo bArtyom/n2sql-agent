@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
+import { renderAnswerMarkdown } from "./utils/markdown";
 
 type KnowledgeBase = { id: number; name: string; description: string };
 type DocumentItem = {
@@ -189,6 +190,10 @@ function sourceScoreLabel(source: Source): string {
   if (typeof source.rerankScore === "number") return `重排 ${source.rerankScore.toFixed(2)}`;
   if (typeof source.keywordScore === "number" && source.keywordScore > 0) return `关键词 ${source.keywordScore.toFixed(2)}`;
   return `距离 ${source.distance.toFixed(2)}`;
+}
+
+function renderCompletedAnswer(message: ChatMessage): string {
+  return renderAnswerMarkdown(message.content);
 }
 
 function openSource(source: Source) {
@@ -1168,7 +1173,8 @@ onUnmounted(() => {
               </div>
               <div class="message-bubble" :class="{ 'message-bubble--error': message.status === 'error' }">
                 <span v-if="message.role === 'assistant' && !message.content && message.status === 'streaming'" class="typing"><i /><i /><i /></span>
-                <span v-else>{{ message.content }}</span>
+                <span v-else-if="message.role === 'user' || message.status === 'streaming' || message.status === 'error'">{{ message.content }}</span>
+                <div v-else class="markdown-content" v-html="renderCompletedAnswer(message)" />
               </div>
               <div v-if="message.role === 'assistant' && message.queryRewrite" class="query-rewrite-status">
                 <span class="query-rewrite-status-dot" />
