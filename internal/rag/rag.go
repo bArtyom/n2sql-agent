@@ -236,7 +236,7 @@ func buildPrompt(question string, sources []retrieval.Result) string {
 		if remaining <= 0 {
 			break
 		}
-		content := source.Content
+		content := retrieval.ContextContent(source)
 		if len(content) > remaining {
 			content = string([]rune(content)[:runeCountWithinBytes(content, remaining)])
 		}

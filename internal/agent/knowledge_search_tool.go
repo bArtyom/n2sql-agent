@@ -289,7 +289,7 @@ func limitKnowledgeSearchResults(results []retrieval.Result, maxBytes int) ([]by
 	}
 	visible := make([]retrieval.Result, 0, len(results))
 	for _, result := range results {
-		candidate := appendSearchResult(visible, result)
+		candidate := appendSearchResult(visible, retrieval.ResultForPrompt(result))
 		encoded, err := json.Marshal(candidate)
 		if err != nil {
 			return nil, nil, false, err
@@ -299,7 +299,7 @@ func limitKnowledgeSearchResults(results []retrieval.Result, maxBytes int) ([]by
 			continue
 		}
 
-		shortened, fits, err := shortenSearchResult(visible, result, maxBytes)
+		shortened, fits, err := shortenSearchResult(visible, retrieval.ResultForPrompt(result), maxBytes)
 		if err != nil {
 			return nil, nil, false, err
 		}

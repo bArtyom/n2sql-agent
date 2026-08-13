@@ -93,6 +93,20 @@ func (s *filteredChunkStoreStub) SearchWithDocuments(_ context.Context, _ int64,
 
 type hybridChunkStoreStub struct{}
 
+type neighborChunkStoreStub struct{}
+
+func (neighborChunkStoreStub) Search(context.Context, int64, []float32, int) ([]documentchunk.SearchResult, error) {
+	return []documentchunk.SearchResult{{DocumentID: 9, Position: 1, Content: "命中片段", Distance: 0.2}}, nil
+}
+
+func (neighborChunkStoreStub) SearchNeighbors(context.Context, int64, int64, int, int, int) ([]retrieval.Result, error) {
+	return []retrieval.Result{
+		{Position: 0, Content: "前一个片段"},
+		{Position: 1, Content: "命中片段"},
+		{Position: 2, Content: "后一个片段"},
+	}, nil
+}
+
 type rerankerStub struct {
 	candidates []retrieval.Result
 	query      string
@@ -145,6 +159,21 @@ func TestServiceEmbedsQueryAndSearchesKnowledgeBase(t *testing.T) {
 	}
 	if store.knowledgeBaseID != 7 || store.limit != 5 || len(store.embedding) != 2 || store.embedding[1] != 0.2 {
 		t.Fatalf("search arguments = %#v", store)
+	}
+}
+
+func TestServiceExpandsNearbyChunkContext(t *testing.T) {
+	service := retrieval.NewService(&embeddingStub{}, neighborChunkStoreStub{})
+
+	results, err := service.Search(context.Background(), 7, "问题", 5)
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(results) != 1 || len(results[0].ContextBefore) != 1 || len(results[0].ContextAfter) != 1 {
+		t.Fatalf("expanded result = %#v", results)
+	}
+	if got := retrieval.ContextContent(results[0]); !strings.Contains(got, "前一个片段") || !strings.Contains(got, "后一个片段") {
+		t.Fatalf("context content = %q", got)
 	}
 }
 

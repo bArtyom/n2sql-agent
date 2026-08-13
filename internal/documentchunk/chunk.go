@@ -3,6 +3,7 @@ package documentchunk
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -52,16 +53,25 @@ type Store interface {
 }
 
 type SearchResult struct {
-	DocumentID        int64   `json:"documentId"`
-	OriginalFilename  string  `json:"originalFilename,omitempty"`
-	Position          int     `json:"position"`
-	Content           string  `json:"content"`
-	Distance          float64 `json:"distance"`
-	MatchType         string  `json:"matchType,omitempty"`
-	KeywordScore      float64 `json:"keywordScore,omitempty"`
-	KeywordScoreKnown bool    `json:"-"`
-	FusionScore       float64 `json:"fusionScore,omitempty"`
-	RerankScore       float64 `json:"rerankScore,omitempty"`
+	DocumentID        int64          `json:"documentId"`
+	OriginalFilename  string         `json:"originalFilename,omitempty"`
+	Position          int            `json:"position"`
+	Content           string         `json:"content"`
+	ContextBefore     []ContextChunk `json:"contextBefore,omitempty"`
+	ContextAfter      []ContextChunk `json:"contextAfter,omitempty"`
+	Distance          float64        `json:"distance"`
+	MatchType         string         `json:"matchType,omitempty"`
+	KeywordScore      float64        `json:"keywordScore,omitempty"`
+	KeywordScoreKnown bool           `json:"-"`
+	FusionScore       float64        `json:"fusionScore,omitempty"`
+	RerankScore       float64        `json:"rerankScore,omitempty"`
+}
+
+// ContextChunk is a nearby chunk loaded after retrieval. It stays separate
+// from Content so callers can distinguish the original hit from its context.
+type ContextChunk struct {
+	Position int    `json:"position"`
+	Content  string `json:"content"`
 }
 
 type PostgresStore struct{ db *sql.DB }
@@ -166,6 +176,40 @@ func (s *PostgresStore) SearchKeywordWithDocuments(ctx context.Context, knowledg
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate filtered keyword document chunks: %w", err)
+	}
+	return results, nil
+}
+
+// SearchNeighbors returns nearby chunks from the same document and knowledge
+// base. The knowledge-base condition prevents context expansion from crossing
+// the retrieval permission boundary.
+func (s *PostgresStore) SearchNeighbors(ctx context.Context, knowledgeBaseID, documentID int64, position, before, after int) ([]SearchResult, error) {
+	if knowledgeBaseID <= 0 || documentID <= 0 || position < 0 || before < 0 || after < 0 {
+		return nil, errors.New("invalid chunk context lookup")
+	}
+	query := `SELECT chunks.position, chunks.content
+		FROM document_chunks AS chunks
+		JOIN documents AS documents ON documents.id = chunks.document_id
+		WHERE documents.knowledge_base_id = $1
+		  AND chunks.document_id = $2
+		  AND chunks.position BETWEEN $3 AND $4
+		ORDER BY chunks.position`
+	rows, err := s.db.QueryContext(ctx, query, knowledgeBaseID, documentID, position-before, position+after)
+	if err != nil {
+		return nil, fmt.Errorf("query neighboring document chunks: %w", err)
+	}
+	defer rows.Close()
+
+	results := make([]SearchResult, 0, before+after+1)
+	for rows.Next() {
+		var result SearchResult
+		if err := rows.Scan(&result.Position, &result.Content); err != nil {
+			return nil, fmt.Errorf("scan neighboring document chunk: %w", err)
+		}
+		results = append(results, result)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate neighboring document chunks: %w", err)
 	}
 	return results, nil
 }

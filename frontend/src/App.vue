@@ -16,6 +16,8 @@ type Source = {
   originalFilename?: string;
   position: number;
   content: string;
+  contextBefore?: { position: number; content: string }[];
+  contextAfter?: { position: number; content: string }[];
   distance: number;
   matchType?: "vector" | "keyword" | "hybrid" | string;
   keywordScore?: number;
@@ -174,13 +176,26 @@ function emptyModelProvider(): ModelProvider {
 
 function parseSources(value: unknown): Source[] {
   if (!Array.isArray(value)) return [];
+  const parseContext = (value: unknown): { position: number; content: string }[] => {
+    if (!Array.isArray(value)) return [];
+    return value.filter((item): item is { position: number; content: string } => {
+      if (!item || typeof item !== "object") return false;
+      const chunk = item as Record<string, unknown>;
+      return typeof chunk.position === "number" && typeof chunk.content === "string";
+    });
+  };
   return value.filter((item): item is Source => {
     if (!item || typeof item !== "object") return false;
     const source = item as Record<string, unknown>;
-    return typeof source.documentId === "number"
+    if (!(typeof source.documentId === "number"
       && typeof source.position === "number"
       && typeof source.content === "string"
-      && typeof source.distance === "number";
+      && typeof source.distance === "number")) return false;
+    const contextBefore = parseContext(source.contextBefore);
+    const contextAfter = parseContext(source.contextAfter);
+    if (contextBefore.length) (source as Record<string, unknown>).contextBefore = contextBefore;
+    if (contextAfter.length) (source as Record<string, unknown>).contextAfter = contextAfter;
+    return true;
   });
 }
 
@@ -196,6 +211,12 @@ function mergeSources(existing: Source[], incoming: Source[]): Source[] {
 function sourcePreview(content: string): string {
   const normalized = content.replace(/\s+/g, " ").trim();
   return normalized.length > 118 ? `${normalized.slice(0, 118)}…` : normalized;
+}
+
+function sourceDisplayContent(source: Source): string {
+  const before = (source.contextBefore ?? []).map((chunk) => `[前置上下文]\n${chunk.content}`).join("\n");
+  const after = (source.contextAfter ?? []).map((chunk) => `[后置上下文]\n${chunk.content}`).join("\n");
+  return [before, `[命中片段]\n${source.content}`, after].filter(Boolean).join("\n");
 }
 
 function matchTypeLabel(matchType?: string): string {
@@ -265,7 +286,7 @@ async function copyAnswer(message: ChatMessage, index: number) {
 }
 
 async function copySource(source: Source) {
-  if (await copyText(source.content)) showCopyFeedback("source", sourceKey(source));
+  if (await copyText(sourceDisplayContent(source))) showCopyFeedback("source", sourceKey(source));
 }
 
 async function openProviderSettings() {
@@ -1288,7 +1309,7 @@ onUnmounted(() => {
           <strong>{{ selectedSource.originalFilename || "未命名文档" }}</strong>
           <span>第 {{ selectedSource.position + 1 }} 段 · {{ matchTypeLabel(selectedSource.matchType) }} · {{ sourceScoreLabel(selectedSource) }}</span>
         </div>
-        <div class="source-panel-content"><p>{{ selectedSource.content }}</p></div>
+        <div class="source-panel-content"><p>{{ sourceDisplayContent(selectedSource) }}</p></div>
         <div class="source-panel-actions"><button class="source-copy-button" type="button" @click="copySource(selectedSource)">{{ copiedSourceKey === sourceKey(selectedSource) ? "已复制原文" : "复制原文" }}</button></div>
         <p class="source-panel-note">这段内容来自知识库检索结果，仅作为回答依据展示，不会被当作操作指令执行。</p>
       </aside>

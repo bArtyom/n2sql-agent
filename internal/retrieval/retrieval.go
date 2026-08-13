@@ -61,6 +61,17 @@ type FilteredKeywordSearcher interface {
 	SearchKeywordWithDocuments(context.Context, int64, string, int, []int64) ([]Result, error)
 }
 
+// NeighborSearcher is an optional store capability. Existing custom stores
+// continue to work; PostgreSQL stores can additionally provide nearby chunks.
+type NeighborSearcher interface {
+	SearchNeighbors(context.Context, int64, int64, int, int, int) ([]Result, error)
+}
+
+const (
+	DefaultContextBefore = 1
+	DefaultContextAfter  = 1
+)
+
 type SearchOptions struct {
 	DocumentIDs      []int64
 	QueryRewrite     bool
@@ -263,6 +274,9 @@ func (s *Service) searchWithOptions(ctx context.Context, knowledgeBaseID int64, 
 			return value.results, nil
 		}
 		value, searchErr := s.searchUncached(ctx, knowledgeBaseID, query, limit, options, documentIDs)
+		if searchErr == nil {
+			value.results, searchErr = s.expandContext(ctx, knowledgeBaseID, value.results)
+		}
 		s.cache.finish(key, flight, value, searchErr)
 		if searchErr != nil {
 			return nil, searchErr
@@ -274,8 +288,68 @@ func (s *Service) searchWithOptions(ctx context.Context, knowledgeBaseID int64, 
 	if err != nil {
 		return nil, err
 	}
+	value.results, err = s.expandContext(ctx, knowledgeBaseID, value.results)
+	if err != nil {
+		return nil, err
+	}
 	usage.ObserveRetrieval(ctx, value.observation)
 	return value.results, nil
+}
+
+// ContextContent formats one hit and its nearby chunks for a model prompt.
+// Ranking fields stay on the original result; only the prompt text expands.
+func ContextContent(result Result) string {
+	if len(result.ContextBefore) == 0 && len(result.ContextAfter) == 0 {
+		return result.Content
+	}
+	var builder strings.Builder
+	for _, chunk := range result.ContextBefore {
+		builder.WriteString("[前置上下文]\n")
+		builder.WriteString(chunk.Content)
+		builder.WriteString("\n")
+	}
+	builder.WriteString("[命中片段]\n")
+	builder.WriteString(result.Content)
+	for _, chunk := range result.ContextAfter {
+		builder.WriteString("\n[后置上下文]\n")
+		builder.WriteString(chunk.Content)
+	}
+	return builder.String()
+}
+
+// ResultForPrompt keeps citation metadata while putting the nearby text into
+// the content field that a model already understands.
+func ResultForPrompt(result Result) Result {
+	result.Content = ContextContent(result)
+	result.ContextBefore = nil
+	result.ContextAfter = nil
+	return result
+}
+
+func (s *Service) expandContext(ctx context.Context, knowledgeBaseID int64, results []Result) ([]Result, error) {
+	neighborSearcher, ok := s.chunks.(NeighborSearcher)
+	if !ok || len(results) == 0 {
+		return results, nil
+	}
+	expanded := append([]Result(nil), results...)
+	for index, result := range expanded {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("expand retrieval context: %w", err)
+		}
+		neighbors, err := neighborSearcher.SearchNeighbors(ctx, knowledgeBaseID, result.DocumentID, result.Position, DefaultContextBefore, DefaultContextAfter)
+		if err != nil {
+			return nil, fmt.Errorf("expand retrieval context for document %d position %d: %w", result.DocumentID, result.Position, err)
+		}
+		for _, neighbor := range neighbors {
+			switch {
+			case neighbor.Position < result.Position:
+				expanded[index].ContextBefore = append(expanded[index].ContextBefore, documentchunk.ContextChunk{Position: neighbor.Position, Content: neighbor.Content})
+			case neighbor.Position > result.Position:
+				expanded[index].ContextAfter = append(expanded[index].ContextAfter, documentchunk.ContextChunk{Position: neighbor.Position, Content: neighbor.Content})
+			}
+		}
+	}
+	return expanded, nil
 }
 
 func (s *Service) searchUncached(ctx context.Context, knowledgeBaseID int64, query string, limit int, options SearchOptions, documentIDs []int64) (cachedResult, error) {

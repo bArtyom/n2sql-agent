@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
@@ -197,6 +198,10 @@ func (c *resultCache) wait(ctx context.Context, flight *cacheFlight) (cachedResu
 
 func cloneCachedResult(value cachedResult) cachedResult {
 	value.results = append([]Result(nil), value.results...)
+	for index := range value.results {
+		value.results[index].ContextBefore = append([]documentchunk.ContextChunk(nil), value.results[index].ContextBefore...)
+		value.results[index].ContextAfter = append([]documentchunk.ContextChunk(nil), value.results[index].ContextAfter...)
+	}
 	return value
 }
 
