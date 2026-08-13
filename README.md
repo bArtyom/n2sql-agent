@@ -103,6 +103,14 @@ npm run dev
 
 问答台可以切换“标准 Agent”和“协作研究”。标准 Agent 会写入当前会话；协作研究会展示 Researcher 的检索轨迹与引用，但结果只保留在当前页面，不写入会话历史。
 
+标准 Agent 的 SSE 响应会带 `X-Agent-Run-ID`。如果浏览器连接中途断开，前端会使用这个 ID 请求：
+
+```text
+GET /api/knowledge-bases/{id}/agent-runs/{runID}/stream
+```
+
+服务端会先重放已产生的事件，再推送后续事件；前端按事件 ID 去重，因此不会重新调用模型。当前事件只在本进程内保留最多 128 个运行、每个运行最多 512 个事件、默认 10 分钟；服务重启或多实例部署不会共享这段短期缓存。
+
 ## 检索阈值评测
 
 `retrieval-eval` 用一组带 `expected_relevant` 标签的问题比较多个 pgvector 距离阈值。它只调用 Embedding 和检索，不调用聊天模型。

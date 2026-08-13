@@ -13,6 +13,7 @@ import (
 
 	"github.com/bArtyom/n2sql-agent/internal/a2a"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
+	"github.com/bArtyom/n2sql-agent/internal/agentstream"
 	"github.com/bArtyom/n2sql-agent/internal/app"
 	"github.com/bArtyom/n2sql-agent/internal/config"
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
@@ -63,6 +64,7 @@ func main() {
 	}
 	processor := worker.NewEmbeddingChunkingProcessor(extractor, documentchunk.NewSplitter(1000, 150), chunkStore, embeddingService)
 	metricsRegistry := metrics.New()
+	agentStreamHub := agentstream.NewHub()
 	a2aStore := a2a.NewPostgresStore(db)
 	searchService := retrieval.NewHybridServiceWithRerankerAndRewriterAndCache(
 		embeddingService,
@@ -118,6 +120,7 @@ func main() {
 			StreamingAnswers:           answerService,
 			AgentAnswers:               agentAnswerService,
 			AgentStreamingAnswers:      agentAnswerService,
+			AgentStreamHub:             agentStreamHub,
 			MultiAgentAnswers:          multiAgentAnswers,
 			MultiAgentStreamingAnswers: multiAgentAnswers,
 			A2AAnswers:                 multiAgentAnswers,

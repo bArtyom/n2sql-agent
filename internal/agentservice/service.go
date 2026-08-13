@@ -146,7 +146,10 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		return Response{}, fmt.Errorf("create agent engine: %w", err)
 	}
 
-	runID := s.nextRunID()
+	runID := request.RunID
+	if runID == "" {
+		runID = s.nextRunID()
+	}
 	messages := []modelclient.ChatMessage{
 		{Role: "system", Content: systemPrompt},
 	}

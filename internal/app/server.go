@@ -7,6 +7,7 @@ import (
 
 	"github.com/bArtyom/n2sql-agent/internal/a2a"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
+	"github.com/bArtyom/n2sql-agent/internal/agentstream"
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/handler"
@@ -34,6 +35,7 @@ type Dependencies struct {
 	StreamingAnswers           rag.StreamAnswerer
 	AgentAnswers               agentservice.Answerer
 	AgentStreamingAnswers      agentservice.EventAnswerer
+	AgentStreamHub             *agentstream.Hub
 	MultiAgentAnswers          multiagent.Answerer
 	MultiAgentStreamingAnswers multiagent.EventAnswerer
 	A2AAnswers                 multiagent.Answerer
@@ -101,7 +103,12 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("POST /api/knowledge-bases/{id}/agent-chat", handler.NewKnowledgeBaseAgentChatWithConversationAndMetrics(dependencies.AgentAnswers, dependencies.Conversations, dependencies.AgentMaxHistoryBytes, registry))
 	}
 	if dependencies.AgentStreamingAnswers != nil {
-		mux.Handle("POST /api/knowledge-bases/{id}/agent-chat/stream", handler.NewKnowledgeBaseAgentChatStreamWithConversationAndMetrics(dependencies.AgentStreamingAnswers, dependencies.Conversations, dependencies.AgentMaxHistoryBytes, registry))
+		hub := dependencies.AgentStreamHub
+		if hub == nil {
+			hub = agentstream.NewHub()
+		}
+		mux.Handle("POST /api/knowledge-bases/{id}/agent-chat/stream", handler.NewKnowledgeBaseAgentChatStreamWithHub(dependencies.AgentStreamingAnswers, dependencies.Conversations, dependencies.AgentMaxHistoryBytes, registry, hub))
+		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}/stream", handler.NewAgentRunStream(hub))
 	}
 	if dependencies.MultiAgentAnswers != nil {
 		mux.Handle("POST /api/knowledge-bases/{id}/multi-agent-chat", handler.NewMultiAgentChat(dependencies.MultiAgentAnswers))

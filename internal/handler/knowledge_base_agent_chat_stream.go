@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -8,6 +10,7 @@ import (
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
+	"github.com/bArtyom/n2sql-agent/internal/agentstream"
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/requestid"
@@ -26,8 +29,17 @@ func NewKnowledgeBaseAgentChatStreamWithConversation(answerer agentservice.Event
 }
 
 func NewKnowledgeBaseAgentChatStreamWithConversationAndMetrics(answerer agentservice.EventAnswerer, conversations *conversation.Service, maxHistoryBytes int, registry *metrics.Registry) http.Handler {
+	return NewKnowledgeBaseAgentChatStreamWithHub(answerer, conversations, maxHistoryBytes, registry, agentstream.NewHub())
+}
+
+// NewKnowledgeBaseAgentChatStreamWithHub injects the short-lived event hub so
+// tests and future durable implementations can control the replay boundary.
+func NewKnowledgeBaseAgentChatStreamWithHub(answerer agentservice.EventAnswerer, conversations *conversation.Service, maxHistoryBytes int, registry *metrics.Registry, hub *agentstream.Hub) http.Handler {
 	if maxHistoryBytes <= 0 {
 		maxHistoryBytes = agent.DefaultMaxHistoryBytes
+	}
+	if hub == nil {
+		hub = agentstream.NewHub()
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -59,6 +71,17 @@ func NewKnowledgeBaseAgentChatStreamWithConversationAndMetrics(answerer agentser
 				return
 			}
 		}
+		runID := agentstream.NewRunID()
+		request.RunID = runID
+		if err := hub.Start(runID, knowledgeBaseID); err != nil {
+			writeKnowledgeBaseAgentChatError(w, fmt.Errorf("start agent stream: %w", err))
+			return
+		}
+		defer func() {
+			if err := hub.Finish(runID); err != nil {
+				slog.WarnContext(r.Context(), "agent_stream_finish_failed", "run_id", runID, "error", err)
+			}
+		}()
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			http.Error(w, `{"error":"streaming is not supported"}`, http.StatusInternalServerError)
@@ -68,62 +91,106 @@ func NewKnowledgeBaseAgentChatStreamWithConversationAndMetrics(answerer agentser
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("X-Accel-Buffering", "no")
+		w.Header().Set("X-Agent-Run-ID", runID)
 		w.WriteHeader(http.StatusOK)
+		transportEventNumber := 0
+		agentEventNumber := 0
+		publishHandlerEvent := func(eventType string, value any) error {
+			transportEventNumber++
+			hubEvent := agentstream.Event{
+				ID:        fmt.Sprintf("%s-transport-%d", runID, transportEventNumber),
+				RunID:     runID,
+				Type:      eventType,
+				Data:      value,
+				CreatedAt: time.Now().UTC(),
+			}
+			if err := hub.Publish(hubEvent); err != nil {
+				return fmt.Errorf("publish transport event: %w", err)
+			}
+			if err := writeAgentSSEEvent(w, flusher, eventType, hubEvent); err != nil {
+				slog.DebugContext(r.Context(), "agent_sse_client_write_failed", "run_id", runID, "event", eventType, "error", err)
+			}
+			return nil
+		}
 
 		emit := func(event agent.Event) error {
-			return writeAgentSSEEvent(w, flusher, string(event.Type), event)
+			// The real Agent Service uses request.RunID. Normalizing here keeps the
+			// transport boundary safe for alternate EventAnswerer implementations.
+			event.RunID = runID
+			if event.ID == "" {
+				agentEventNumber++
+				event.ID = fmt.Sprintf("%s-agent-%d", runID, agentEventNumber)
+			}
+			hubEvent := agentstream.Event{
+				ID:         event.ID,
+				RunID:      event.RunID,
+				Type:       string(event.Type),
+				StepNumber: event.StepNumber,
+				Data:       event.Data,
+				CreatedAt:  event.CreatedAt,
+			}
+			if err := hub.Publish(hubEvent); err != nil {
+				return fmt.Errorf("publish agent event: %w", err)
+			}
+			if err := writeAgentSSEEvent(w, flusher, string(event.Type), event); err != nil {
+				// A disconnected browser must not cancel the underlying Agent run;
+				// the event is already available to a reconnecting client in hub.
+				slog.DebugContext(r.Context(), "agent_sse_client_write_failed", "run_id", runID, "error", err)
+			}
+			return nil
 		}
 		var response agentservice.Response
 		var conversationSaveErr error
-		err = withConversationSummaryLock(r.Context(), conversations, knowledgeBaseID, request.ConversationID, func() error {
+		executionContext := context.WithoutCancel(r.Context())
+		err = withConversationSummaryLock(executionContext, conversations, knowledgeBaseID, request.ConversationID, func() error {
 			if idempotencyKey != "" {
 				if preloaded {
 					replayed = true
 					response = preloadedResponse
-					return writeAgentSSEEvent(w, flusher, "conversation_replayed", struct {
+					return publishHandlerEvent("conversation_replayed", struct {
 						Response agentservice.Response `json:"response"`
 					}{Response: response})
 				}
-				storedResponse, found, err := loadIdempotentResponse(r.Context(), conversations, knowledgeBaseID, request.ConversationID, idempotencyKey, requestHash)
+				storedResponse, found, err := loadIdempotentResponse(executionContext, conversations, knowledgeBaseID, request.ConversationID, idempotencyKey, requestHash)
 				if err != nil {
 					return err
 				}
 				if found {
 					replayed = true
 					response = storedResponse
-					return writeAgentSSEEvent(w, flusher, "conversation_replayed", struct {
+					return publishHandlerEvent("conversation_replayed", struct {
 						Response agentservice.Response `json:"response"`
 					}{Response: response})
 				}
 			}
-			if err := loadConversationHistory(r.Context(), conversations, knowledgeBaseID, &request); err != nil {
+			if err := loadConversationHistory(executionContext, conversations, knowledgeBaseID, &request); err != nil {
 				return err
 			}
 			var err error
-			response, err = answerer.AnswerWithEvents(r.Context(), knowledgeBaseID, request, emit)
+			response, err = answerer.AnswerWithEvents(executionContext, knowledgeBaseID, request, emit)
 			if err != nil {
 				return err
 			}
-			if err := saveConversationExchange(r.Context(), conversations, request, response.Answer); err != nil {
+			if err := saveConversationExchange(executionContext, conversations, request, response.Answer); err != nil {
 				conversationSaveErr = err
 				message, _ := knowledgeBaseAgentChatError(err)
-				if writeErr := writeAgentSSEEvent(w, flusher, "conversation_save_failed", struct {
+				if writeErr := publishHandlerEvent("conversation_save_failed", struct {
 					Error string `json:"error"`
 				}{Error: message}); writeErr != nil {
 					slog.ErrorContext(r.Context(), "agent_sse_conversation_save_error_event_write_failed", "request_id", requestid.FromContext(r.Context()), "conversation_id", request.ConversationID, "error", writeErr)
 				}
 				return nil
 			}
-			if err := saveConversationSummary(r.Context(), conversations, knowledgeBaseID, request, response); err != nil {
+			if err := saveConversationSummary(executionContext, conversations, knowledgeBaseID, request, response); err != nil {
 				slog.WarnContext(r.Context(), "agent_sse_conversation_summary_save_failed", "request_id", requestid.FromContext(r.Context()), "conversation_id", request.ConversationID, "error", err)
 			}
 			if idempotencyKey != "" {
-				if err := saveIdempotentResponse(r.Context(), conversations, knowledgeBaseID, request.ConversationID, idempotencyKey, requestHash, response); err != nil {
+				if err := saveIdempotentResponse(executionContext, conversations, knowledgeBaseID, request.ConversationID, idempotencyKey, requestHash, response); err != nil {
 					slog.WarnContext(r.Context(), "agent_sse_conversation_idempotent_response_save_failed", "request_id", requestid.FromContext(r.Context()), "conversation_id", request.ConversationID, "error", err)
 				}
 			}
 			if request.ConversationID != 0 {
-				if writeErr := writeAgentSSEEvent(w, flusher, "conversation_saved", struct {
+				if writeErr := publishHandlerEvent("conversation_saved", struct {
 					ConversationID int64 `json:"conversation_id"`
 				}{ConversationID: request.ConversationID}); writeErr != nil {
 					slog.ErrorContext(r.Context(), "agent_sse_conversation_saved_event_write_failed", "request_id", requestid.FromContext(r.Context()), "conversation_id", request.ConversationID, "error", writeErr)
@@ -137,7 +204,7 @@ func NewKnowledgeBaseAgentChatStreamWithConversationAndMetrics(answerer agentser
 				return
 			}
 			message, _ := knowledgeBaseAgentChatError(err)
-			if writeErr := writeAgentSSEEvent(w, flusher, "error", struct {
+			if writeErr := publishHandlerEvent("error", struct {
 				Error string `json:"error"`
 			}{Error: message}); writeErr != nil {
 				slog.ErrorContext(r.Context(), "agent_sse_error_event_write_failed", "request_id", requestid.FromContext(r.Context()), "conversation_id", request.ConversationID, "error", writeErr)
@@ -149,6 +216,70 @@ func NewKnowledgeBaseAgentChatStreamWithConversationAndMetrics(answerer agentser
 		}
 		if err == nil {
 			logAgentRequest(r.Context(), started, request, response, nil, registry, !replayed)
+		}
+	})
+}
+
+// NewAgentRunStream serves a replay followed by live events from the same
+// in-process Hub. It is intentionally scoped by knowledge base ID so a run ID
+// cannot be used to read another knowledge base's events.
+func NewAgentRunStream(hub *agentstream.Hub) http.Handler {
+	if hub == nil {
+		hub = agentstream.NewHub()
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		knowledgeBaseID, ok := decodeKnowledgeBaseID(w, r)
+		if !ok {
+			return
+		}
+		runID := r.PathValue("runID")
+		if runID == "" {
+			http.Error(w, `{"error":"invalid agent run ID"}`, http.StatusBadRequest)
+			return
+		}
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, `{"error":"streaming is not supported"}`, http.StatusInternalServerError)
+			return
+		}
+		snapshot, live, cancel, done, err := hub.Subscribe(runID, knowledgeBaseID, r.Context().Done())
+		if err != nil {
+			if errors.Is(err, agentstream.ErrRunNotFound) {
+				http.Error(w, `{"error":"agent run not found or expired"}`, http.StatusNotFound)
+				return
+			}
+			http.Error(w, `{"error":"unable to resume agent run"}`, http.StatusInternalServerError)
+			return
+		}
+		defer cancel()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		for _, event := range snapshot {
+			if err := writeAgentSSEEvent(w, flusher, event.Type, event); err != nil {
+				return
+			}
+		}
+		if done {
+			return
+		}
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case event, ok := <-live:
+				if !ok {
+					return
+				}
+				if err := writeAgentSSEEvent(w, flusher, event.Type, event); err != nil {
+					return
+				}
+			}
 		}
 	})
 }

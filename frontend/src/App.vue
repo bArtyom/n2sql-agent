@@ -33,6 +33,8 @@ type ChatMessage = {
   conversationId?: number | null;
   mode?: ChatMode;
   retryable?: boolean;
+  runID?: string;
+  seenEventIDs?: Set<string>;
 };
 type QueryRewriteStatus = { enabled: boolean; applied: boolean; fallback: boolean; variant_count: number };
 type ResearchEvent = { type: string; round?: number; label: string; detail?: string };
@@ -60,6 +62,7 @@ type StreamPayload = {
   round?: number;
   step_number?: number;
   query_rewrite?: QueryRewriteStatus;
+  id?: string;
 };
 type ModelProvider = {
   name: string;
@@ -566,6 +569,7 @@ async function askQuestion() {
     requestMessage: prompt,
     conversationId: activeConversationID,
     mode: chatMode.value,
+    seenEventIDs: new Set(),
   };
   messages.value.push(answer);
   const answerIndex = messages.value.length - 1;
@@ -610,6 +614,38 @@ async function streamAgentQuestion(prompt: string, answerIndex: number, activeCo
     const payload = await response.json().catch(() => null);
     throw new Error(payload?.error || "问答服务暂不可用");
   }
+  try {
+    const initialRunID = response.headers.get("X-Agent-Run-ID");
+    if (initialRunID) messages.value[answerIndex].runID = initialRunID;
+    await readAgentSSE(response, answerIndex, researchMode);
+  } catch (error) {
+    const currentAnswer = messages.value[answerIndex];
+    if (!researchMode && currentAnswer?.runID) {
+      try {
+        await resumeAgentStream(currentAnswer, answerIndex);
+      } catch {
+        throw error;
+      }
+    } else {
+      throw error;
+    }
+  }
+  const currentAnswer = messages.value[answerIndex];
+  if (currentAnswer?.status === "streaming") {
+    if (!researchMode && currentAnswer.runID) {
+      await resumeAgentStream(currentAnswer, answerIndex);
+    }
+    if (currentAnswer.status === "streaming") {
+      currentAnswer.status = "error";
+      currentAnswer.retryable = !researchMode;
+      currentAnswer.activity = "";
+      currentAnswer.content = currentAnswer.content || "流式响应提前结束，请重试。";
+    }
+  }
+}
+
+async function readAgentSSE(response: Response, answerIndex: number, researchMode: boolean) {
+  if (!response.body) throw new Error("问答服务没有返回流式内容。");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -622,13 +658,19 @@ async function streamAgentQuestion(prompt: string, answerIndex: number, activeCo
     if (done) break;
   }
   if (buffer.trim()) consumeSSEBlock(buffer, answerIndex, researchMode);
-  const currentAnswer = messages.value[answerIndex];
-  if (currentAnswer?.status === "streaming") {
-    currentAnswer.status = "error";
-    currentAnswer.retryable = !researchMode;
-    currentAnswer.activity = "";
-    currentAnswer.content = currentAnswer.content || "流式响应提前结束，请重试。";
+}
+
+async function resumeAgentStream(answer: ChatMessage, answerIndex: number) {
+  if (!selectedKnowledgeBaseId.value || !answer.runID) return;
+  answer.activity = "连接已断开，正在恢复 Agent 运行…";
+  const response = await fetch(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/agent-runs/${encodeURIComponent(answer.runID)}/stream`, {
+    method: "GET",
+    headers: { Accept: "text/event-stream" },
+  });
+  if (!response.ok || !response.body) {
+    throw new Error("无法恢复 Agent 运行，可能已超过保留时间。");
   }
+  await readAgentSSE(response, answerIndex, false);
 }
 
 function markAnswerFailure(answerIndex: number, error: unknown) {
@@ -743,6 +785,11 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
   if (!dataLines.length) return;
   try {
     const payload = JSON.parse(dataLines.join("\n")) as StreamPayload;
+    if (payload.id && answer.seenEventIDs) {
+      if (answer.seenEventIDs.has(payload.id)) return;
+      answer.seenEventIDs.add(payload.id);
+    }
+    if (payload.run_id) answer.runID = payload.run_id;
     const eventData = payload.data && typeof payload.data === "object" ? payload.data : {};
     const dataString = (key: string) => typeof eventData[key] === "string" ? eventData[key] as string : "";
 

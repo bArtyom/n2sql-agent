@@ -22,7 +22,10 @@ type CachedHistorySummary struct {
 
 // ChatRequest contains the current question and an optional bounded conversation history.
 type ChatRequest struct {
-	Message             string                `json:"message"`
+	Message string `json:"message"`
+	// RunID is assigned by the streaming transport when it needs a reconnectable
+	// run. It is intentionally not accepted from JSON clients.
+	RunID               string                `json:"-"`
 	TopK                int                   `json:"top_k,omitempty"`
 	SimilarityThreshold float64               `json:"similarity_threshold,omitempty"`
 	DocumentIDs         []int64               `json:"document_ids,omitempty"`
