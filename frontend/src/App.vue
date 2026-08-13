@@ -115,6 +115,7 @@ const loading = ref(true);
 const loadingDocuments = ref(false);
 const creatingKnowledgeBase = ref(false);
 const uploading = ref(false);
+const reprocessingDocumentID = ref<number | null>(null);
 const streaming = ref(false);
 const errorMessage = ref("");
 const mobileRailOpen = ref(false);
@@ -583,6 +584,19 @@ async function uploadFiles(files: File[]) {
     showError(error);
   } finally {
     uploading.value = false;
+  }
+}
+
+async function reprocessDocument(document: DocumentItem) {
+  if (!selectedKnowledgeBaseId.value || reprocessingDocumentID.value !== null) return;
+  reprocessingDocumentID.value = document.id;
+  try {
+    await requestJSON<DocumentItem>(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/documents/${document.id}/reprocess`, { method: "POST" });
+    await refreshDocuments();
+  } catch (error) {
+    showError(error);
+  } finally {
+    reprocessingDocumentID.value = null;
   }
 }
 
@@ -1142,6 +1156,13 @@ onUnmounted(() => {
               <span class="file-icon">{{ document.contentType === "application/pdf" ? "PDF" : "TXT" }}</span>
               <div class="document-copy"><strong>{{ document.originalFilename }}</strong><span>{{ formatBytes(document.sizeBytes) }} · #{{ document.id }}</span></div>
               <span class="processing-status" :class="`processing-status--${document.processingStatus}`"><i />{{ statusLabel(document.processingStatus) }}</span>
+              <button
+                v-if="!['pending', 'processing'].includes(document.processingStatus)"
+                class="quiet-button document-reprocess"
+                type="button"
+                :disabled="reprocessingDocumentID !== null"
+                @click="reprocessDocument(document)"
+              >{{ reprocessingDocumentID === document.id ? "排队中…" : "重建索引" }}</button>
             </li>
           </ul>
         </div>
