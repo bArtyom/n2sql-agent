@@ -127,6 +127,9 @@ func TestServiceAnswersUsingScopedKnowledgeSearchTool(t *testing.T) {
 	if len(response.Sources) != 1 || response.Sources[0].Content != "年假制度内容" {
 		t.Fatalf("response sources = %#v, want one collected citation", response.Sources)
 	}
+	if len(response.Trace) != 1 || response.Trace[0].ToolName != "knowledge_search" || response.Trace[0].Arguments != `{"query":"年假"}` || response.Trace[0].ResultSummary != "返回 1 条资料" || response.Trace[0].Status != "succeeded" {
+		t.Fatalf("response trace = %#v, want bounded tool call and result summary", response.Trace)
+	}
 	if response.Stats == nil || response.Stats.ModelCalls != 2 || response.Stats.ToolCalls != 1 || response.Stats.SuccessfulToolCalls != 1 {
 		t.Fatalf("response stats = %#v, want model/tool runtime metrics", response.Stats)
 	}

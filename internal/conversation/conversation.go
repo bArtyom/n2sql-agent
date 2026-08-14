@@ -83,9 +83,10 @@ type SourceReference struct {
 // in the conversation UI. It deliberately excludes model reasoning text and
 // raw tool payloads.
 type AgentTrace struct {
-	RunID  string           `json:"run_id,omitempty"`
-	Status string           `json:"status,omitempty"`
-	Steps  []AgentTraceStep `json:"steps,omitempty"`
+	RunID  string            `json:"run_id,omitempty"`
+	Status string            `json:"status,omitempty"`
+	Steps  []AgentTraceStep  `json:"steps,omitempty"`
+	Events []AgentTraceEvent `json:"events,omitempty"`
 }
 
 type AgentTraceStep struct {
@@ -93,6 +94,18 @@ type AgentTraceStep struct {
 	Kind     string `json:"kind"`
 	Status   string `json:"status"`
 	ToolName string `json:"tool_name,omitempty"`
+}
+
+// AgentTraceEvent stores one bounded tool call and its result summary. Raw
+// tool output is deliberately excluded; citations remain in Sources.
+type AgentTraceEvent struct {
+	Type          string `json:"type"`
+	Step          int    `json:"step,omitempty"`
+	ToolCallID    string `json:"tool_call_id,omitempty"`
+	ToolName      string `json:"tool_name,omitempty"`
+	Arguments     string `json:"arguments,omitempty"`
+	ResultSummary string `json:"result_summary,omitempty"`
+	Status        string `json:"status"`
 }
 
 type Summary struct {

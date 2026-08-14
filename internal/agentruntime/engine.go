@@ -10,6 +10,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
+	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 	"github.com/bArtyom/n2sql-agent/internal/security"
 	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
@@ -26,6 +27,8 @@ var (
 )
 
 const untrustedToolResultPrefix = "UNTRUSTED_TOOL_RESULT\n"
+
+const maxToolArgumentsEventBytes = 1024
 
 type untrustedToolResultEnvelope struct {
 	Trusted bool   `json:"trusted"`
@@ -184,6 +187,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			if err := emitter.emit(agent.EventToolCalled, len(run.Steps())+1, map[string]any{
 				"tool_call_id": toolCall.ID,
 				"tool_name":    toolCall.Function.Name,
+				"arguments":    boundedEventText(toolCall.Function.Arguments),
 			}); err != nil {
 				return finishError(result, err)
 			}
@@ -234,6 +238,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				toolFinishedData["query_rewrite"] = queryRewrite
 			}
 			toolFinishedData["no_relevant_results"] = toolResult.NoRelevantResults
+			toolFinishedData["result_summary"] = toolResultSummary(toolResult)
 			if err := emitter.emit(agent.EventToolFinished, len(run.Steps()), toolFinishedData); err != nil {
 				return finishError(result, err)
 			}
@@ -253,6 +258,28 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 	}
 
 	return finishErrorWithCategory(result, ErrMaxStepsExceeded, agent.FailureStepLimit, emitter)
+}
+
+func boundedEventText(value string) string {
+	value = security.RedactText(strings.TrimSpace(value))
+	if len(value) <= maxToolArgumentsEventBytes {
+		return value
+	}
+	runes := []rune(value)
+	for len(runes) > 0 && len(string(runes)) > maxToolArgumentsEventBytes {
+		runes = runes[:len(runes)-1]
+	}
+	return string(runes)
+}
+
+func toolResultSummary(result agent.ToolResult) string {
+	if result.NoRelevantResults {
+		return "没有命中相关资料"
+	}
+	if sources, ok := result.Metadata["sources"].([]retrieval.Result); ok {
+		return fmt.Sprintf("返回 %d 条资料", len(sources))
+	}
+	return "工具调用完成"
 }
 
 func completeWithAnswer(result Result, emitter *eventEmitter, answer string) (Result, error) {

@@ -360,6 +360,8 @@ const (
 	persistedSourceContentBytes = 2048
 	maxPersistedSources         = 20
 	maxPersistedAgentSteps      = 32
+	maxPersistedAgentEvents     = 32
+	persistedAgentTraceBytes    = 512
 )
 
 func conversationMetadataFromAgentResponse(response agentservice.Response) conversation.MessageMetadata {
@@ -398,7 +400,7 @@ func conversationMetadataFromAgentResponse(response agentservice.Response) conve
 			})
 		}
 	}
-	if response.RunID != "" || len(response.Steps) > 0 {
+	if response.RunID != "" || len(response.Steps) > 0 || len(response.Trace) > 0 {
 		trace := &conversation.AgentTrace{RunID: response.RunID, Status: string(response.Status)}
 		trace.Steps = make([]conversation.AgentTraceStep, 0, len(response.Steps))
 		for _, step := range response.Steps {
@@ -412,9 +414,28 @@ func conversationMetadataFromAgentResponse(response agentservice.Response) conve
 				ToolName: step.ToolName,
 			})
 		}
+		for _, event := range response.Trace {
+			if len(trace.Events) >= maxPersistedAgentEvents {
+				break
+			}
+			trace.Events = append(trace.Events, conversation.AgentTraceEvent{
+				Type:          event.Type,
+				Step:          event.Step,
+				ToolCallID:    event.ToolCallID,
+				ToolName:      event.ToolName,
+				Arguments:     truncateMetadataValue(event.Arguments),
+				ResultSummary: truncateMetadataValue(event.ResultSummary),
+				Status:        event.Status,
+			})
+		}
 		metadata.AgentTrace = trace
 	}
 	return metadata
+}
+
+func truncateMetadataValue(value string) string {
+	truncated, _ := truncateMetadataText(value, persistedAgentTraceBytes)
+	return truncated
 }
 
 func truncateMetadataText(value string, maxBytes int) (string, bool) {

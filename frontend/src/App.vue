@@ -58,11 +58,21 @@ type RetrievalStats = {
   rerank_fallback: boolean;
 };
 type ResearchEvent = { type: string; round?: number; label: string; detail?: string };
-type AgentEvent = { type: string; step?: number; label: string; detail?: string; status: "running" | "done" | "error" };
+type AgentEvent = {
+  type: string;
+  step?: number;
+  label: string;
+  detail?: string;
+  toolCallID?: string;
+  arguments?: string;
+  resultSummary?: string;
+  status: "running" | "done" | "error";
+};
 type StoredAgentTrace = {
   run_id?: string;
   status?: string;
   steps?: { number?: number; kind?: string; status?: string; tool_name?: string }[];
+  events?: { type?: string; step?: number; tool_call_id?: string; tool_name?: string; arguments?: string; result_summary?: string; status?: string }[];
 };
 type ChatMode = "agent" | "research" | "a2a";
 type A2ATask = {
@@ -923,14 +933,49 @@ function recordResearchEvent(answer: ChatMessage, type: string, label: string, d
   if (answer.researchEvents.length > 12) answer.researchEvents.shift();
 }
 
-function recordAgentEvent(answer: ChatMessage, type: string, label: string, detail = "", step?: number, status: AgentEvent["status"] = "done") {
+function recordAgentEvent(
+  answer: ChatMessage,
+  type: string,
+  label: string,
+  detail = "",
+  step?: number,
+  status: AgentEvent["status"] = "done",
+  extra: Pick<AgentEvent, "toolCallID" | "arguments" | "resultSummary"> = {},
+) {
   answer.agentEvents ??= [];
-  answer.agentEvents.push({ type, step, label, detail: detail.slice(0, 140), status });
+  answer.agentEvents.push({ type, step, label, detail: detail.slice(0, 140), status, ...extra });
   if (answer.agentEvents.length > 12) answer.agentEvents.shift();
 }
 
 function restoreAgentEvents(trace?: StoredAgentTrace): AgentEvent[] {
-  if (!trace || !Array.isArray(trace.steps) || trace.steps.length === 0) return [];
+  if (!trace) return [];
+  const storedEvents = Array.isArray(trace.events) ? trace.events : [];
+  if (storedEvents.length > 0) {
+    const events: AgentEvent[] = [{ type: "run_started", label: "Agent 开始运行", detail: "从历史记录恢复", status: "done" }];
+    for (const item of storedEvents.slice(0, 32)) {
+      if (!item || typeof item !== "object") continue;
+      const status = item.status === "failed" ? "error" : item.status === "running" ? "running" : "done";
+      events.push({
+        type: item.type || "tool_call",
+        step: item.step,
+        label: item.tool_name ? `调用 ${item.tool_name}` : "调用知识库工具",
+        detail: item.result_summary || "工具调用完成",
+        toolCallID: item.tool_call_id,
+        arguments: item.arguments,
+        resultSummary: item.result_summary,
+        status,
+      });
+    }
+    const terminalStatus = trace.status === "failed" || trace.status === "canceled" ? "error" : "done";
+    events.push({
+      type: trace.status === "canceled" ? "run_canceled" : trace.status === "failed" ? "run_failed" : "run_finished",
+      label: trace.status === "canceled" ? "Agent 已取消" : trace.status === "failed" ? "Agent 运行失败" : "Agent 完成",
+      detail: "历史运行记录",
+      status: terminalStatus,
+    });
+    return events;
+  }
+  if (!Array.isArray(trace.steps) || trace.steps.length === 0) return [];
   const events: AgentEvent[] = [{ type: "run_started", label: "Agent 开始运行", detail: "从历史记录恢复", status: "done" }];
   for (const step of trace.steps.slice(0, 32)) {
     if (!step || typeof step !== "object") continue;
@@ -954,12 +999,15 @@ function restoreAgentEvents(trace?: StoredAgentTrace): AgentEvent[] {
   return events;
 }
 
-function finishLastAgentToolEvent(answer: ChatMessage, detail: string, status: AgentEvent["status"] = "done") {
+function finishLastAgentToolEvent(answer: ChatMessage, detail: string, status: AgentEvent["status"] = "done", toolCallID = "") {
   const events = answer.agentEvents ?? [];
-  const latest = [...events].reverse().find((item) => item.type === "tool_called" && item.status === "running");
+  const latest = [...events].reverse().find((item) => item.type === "tool_called"
+    && item.status === "running"
+    && (!toolCallID || item.toolCallID === toolCallID));
   if (latest) {
     latest.label = "知识库检索完成";
     latest.detail = detail.slice(0, 140);
+    latest.resultSummary = detail.slice(0, 140);
     latest.status = status;
   }
 }
@@ -1044,7 +1092,10 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
       case "tool_called":
         if (!researchMode) {
           const toolName = dataString("tool_name") || "knowledge_search";
-          recordAgentEvent(answer, event, "调用知识库工具", toolName, payload.step_number, "running");
+          recordAgentEvent(answer, event, "调用知识库工具", toolName, payload.step_number, "running", {
+            toolCallID: dataString("tool_call_id"),
+            arguments: dataString("arguments"),
+          });
         }
         answer.activity = dataString("tool_name") === "knowledge_search" ? "正在查找资料…" : "正在调用工具…";
         break;
@@ -1052,7 +1103,7 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         if (!researchMode) {
           const sources = parseSources(eventData.sources);
           answer.sources = mergeSources(answer.sources ?? [], sources);
-          finishLastAgentToolEvent(answer, eventData.no_relevant_results === true ? "没有找到足够相关资料" : `${sources.length || "已"} 条结果已返回`);
+          finishLastAgentToolEvent(answer, dataString("result_summary") || (eventData.no_relevant_results === true ? "没有找到足够相关资料" : `${sources.length || "已"} 条结果已返回`), "done", dataString("tool_call_id"));
         }
         if (Object.prototype.hasOwnProperty.call(eventData, "sources")) {
           answer.sources = mergeSources(answer.sources ?? [], parseSources(eventData.sources));
@@ -1119,6 +1170,7 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
             run_id: answer.runID,
             status: typeof replayedAnswer.status === "string" ? replayedAnswer.status : "succeeded",
             steps: Array.isArray(replayedAnswer.steps) ? replayedAnswer.steps as StoredAgentTrace["steps"] : [],
+            events: Array.isArray(replayedAnswer.trace) ? replayedAnswer.trace as StoredAgentTrace["events"] : [],
           });
         }
         answer.activity = "已恢复之前的回答";
@@ -1376,10 +1428,10 @@ onUnmounted(() => {
               </div>
               <div v-if="message.role === 'assistant' && message.agentEvents?.length" class="agent-trace">
                 <div class="agent-trace-head"><span>Agent 运行轨迹</span><small>{{ message.agentEvents.length }} EVENTS</small></div>
-                <div v-for="trace in message.agentEvents" :key="`${trace.type}-${trace.step}-${trace.label}-${trace.detail}`" class="agent-trace-row" :class="`agent-trace-row--${trace.status}`">
+                <div v-for="trace in message.agentEvents" :key="`${trace.type}-${trace.step}-${trace.label}-${trace.detail}-${trace.toolCallID}`" class="agent-trace-row" :class="`agent-trace-row--${trace.status}`">
                   <span class="agent-trace-marker">{{ trace.status === 'done' ? '✓' : trace.status === 'error' ? '!' : '·' }}</span>
                   <span class="agent-trace-label">{{ trace.label }}</span>
-                  <small v-if="trace.detail">{{ trace.detail }}</small>
+                  <span class="agent-trace-copy"><small v-if="trace.detail">{{ trace.detail }}</small><small v-if="trace.arguments">参数：{{ trace.arguments }}</small><small v-if="trace.resultSummary && trace.resultSummary !== trace.detail">结果：{{ trace.resultSummary }}</small></span>
                 </div>
               </div>
               <div v-if="message.role === 'assistant' && message.researchEvents?.length" class="research-trace">
