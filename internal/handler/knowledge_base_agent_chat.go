@@ -81,7 +81,7 @@ func NewKnowledgeBaseAgentChatWithConversationAndMetrics(answerer agentservice.A
 			if err != nil {
 				return err
 			}
-			if err := saveConversationExchange(r.Context(), conversations, request, response.Answer); err != nil {
+			if err := saveConversationExchange(r.Context(), conversations, request, response); err != nil {
 				return err
 			}
 			if err := saveConversationSummary(r.Context(), conversations, knowledgeBaseID, request, response); err != nil {
@@ -345,11 +345,16 @@ func loadConversationHistory(ctx context.Context, conversations *conversation.Se
 	return nil
 }
 
-func saveConversationExchange(ctx context.Context, conversations *conversation.Service, request agentservice.ChatRequest, answer string) error {
+func saveConversationExchange(ctx context.Context, conversations *conversation.Service, request agentservice.ChatRequest, response agentservice.Response) error {
 	if request.ConversationID == 0 || conversations == nil {
 		return nil
 	}
-	if err := conversations.SaveExchange(ctx, request.ConversationID, request.Message, answer); err != nil {
+	metadata := conversation.MessageMetadata{}
+	if response.Stats != nil {
+		metadata.QueryRewrite = response.Stats.QueryRewrite
+		metadata.Retrieval = response.Stats.Retrieval
+	}
+	if err := conversations.SaveExchangeWithMetadata(ctx, request.ConversationID, request.Message, response.Answer, metadata); err != nil {
 		return fmt.Errorf("save conversation exchange: %w", err)
 	}
 	return nil

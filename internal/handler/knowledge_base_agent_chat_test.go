@@ -13,6 +13,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/handler"
 	"github.com/bArtyom/n2sql-agent/internal/metrics"
+	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
 type agentAnswererStub struct {
@@ -199,6 +200,27 @@ func TestKnowledgeBaseAgentChatReplaysIdempotentResponse(t *testing.T) {
 	registry.Handler().ServeHTTP(metricsResponse, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if !strings.Contains(metricsResponse.Body.String(), "agent_runs_total 1\n") {
 		t.Fatalf("metrics body = %q, want replay excluded from Agent run count", metricsResponse.Body.String())
+	}
+}
+
+func TestKnowledgeBaseAgentChatPersistsRetrievalMetadata(t *testing.T) {
+	store := &conversationStoreStub{records: []conversation.Conversation{{ID: 9, KnowledgeBaseID: 7}}}
+	answerer := &agentAnswererStub{response: agentservice.Response{
+		Answer: "答案",
+		Stats:  &agent.RunStats{Retrieval: &usage.RetrievalObservation{VectorCandidates: 8, FinalFiltered: 3}},
+	}}
+	endpoint := handler.NewKnowledgeBaseAgentChatWithConversation(answerer, conversation.NewService(store), 64*1024)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat", strings.NewReader(`{"conversation_id":9,"message":"问题"}`))
+	request.SetPathValue("id", "7")
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
+	}
+	if store.exchangeMeta.Retrieval == nil || store.exchangeMeta.Retrieval.VectorCandidates != 8 || store.exchangeMeta.Retrieval.FinalFiltered != 3 {
+		t.Fatalf("saved exchange metadata = %#v, want retrieval stats", store.exchangeMeta)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
+	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
 type storeStub struct {
@@ -18,6 +19,7 @@ type storeStub struct {
 	messages     []conversation.Message
 	exchangeUser string
 	exchangeBot  string
+	exchangeMeta conversation.MessageMetadata
 	exchangeErr  error
 	summary      conversation.Summary
 	summaryErr   error
@@ -70,6 +72,13 @@ func (s *storeStub) SaveSummary(_ context.Context, conversationID, throughMessag
 func (s *storeStub) AppendExchange(_ context.Context, _ int64, user, assistant string) error {
 	s.exchangeUser = user
 	s.exchangeBot = assistant
+	return s.exchangeErr
+}
+
+func (s *storeStub) AppendExchangeWithMetadata(_ context.Context, _ int64, user, assistant string, metadata conversation.MessageMetadata) error {
+	s.exchangeUser = user
+	s.exchangeBot = assistant
+	s.exchangeMeta = metadata
 	return s.exchangeErr
 }
 
@@ -142,6 +151,19 @@ func TestServiceSavesCompletedExchange(t *testing.T) {
 	}
 	if store.exchangeUser != "问题" || store.exchangeBot != "答案" {
 		t.Fatalf("saved exchange = %q / %q, want trimmed messages", store.exchangeUser, store.exchangeBot)
+	}
+}
+
+func TestServiceSavesBoundedExchangeMetadata(t *testing.T) {
+	store := &storeStub{conversation: conversation.Conversation{ID: 9, KnowledgeBaseID: 7}}
+	service := conversation.NewService(store)
+	retrievalStats := &usage.RetrievalObservation{VectorCandidates: 12, FinalFiltered: 4}
+
+	if err := service.SaveExchangeWithMetadata(context.Background(), 9, "问题", "答案", conversation.MessageMetadata{Retrieval: retrievalStats}); err != nil {
+		t.Fatalf("SaveExchangeWithMetadata() error = %v", err)
+	}
+	if store.exchangeMeta.Retrieval == nil || store.exchangeMeta.Retrieval.VectorCandidates != 12 || store.exchangeMeta.Retrieval.FinalFiltered != 4 {
+		t.Fatalf("saved metadata = %#v, want retrieval counts", store.exchangeMeta)
 	}
 }
 

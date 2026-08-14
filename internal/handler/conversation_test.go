@@ -14,9 +14,10 @@ import (
 )
 
 type conversationStoreStub struct {
-	records     []conversation.Conversation
-	messages    []conversation.Message
-	idempotency map[string]conversation.IdempotentResponse
+	records      []conversation.Conversation
+	messages     []conversation.Message
+	idempotency  map[string]conversation.IdempotentResponse
+	exchangeMeta conversation.MessageMetadata
 }
 
 func (s *conversationStoreStub) Create(_ context.Context, input conversation.CreateInput) (conversation.Conversation, error) {
@@ -53,6 +54,11 @@ func (s *conversationStoreStub) AppendExchange(_ context.Context, id int64, user
 		conversation.Message{ID: int64(len(s.messages) + 1), ConversationID: id, Role: "user", Content: user},
 		conversation.Message{ID: int64(len(s.messages) + 2), ConversationID: id, Role: "assistant", Content: assistant})
 	return nil
+}
+
+func (s *conversationStoreStub) AppendExchangeWithMetadata(ctx context.Context, id int64, user, assistant string, metadata conversation.MessageMetadata) error {
+	s.exchangeMeta = metadata
+	return s.AppendExchange(ctx, id, user, assistant)
 }
 
 func (s *conversationStoreStub) UpdateTitle(_ context.Context, id int64, title string) (conversation.Conversation, error) {

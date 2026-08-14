@@ -3,6 +3,7 @@ package conversation
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
+	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
 const (
@@ -40,11 +42,20 @@ type Conversation struct {
 }
 
 type Message struct {
-	ID             int64     `json:"id"`
-	ConversationID int64     `json:"conversationId"`
-	Role           string    `json:"role"`
-	Content        string    `json:"content"`
-	CreatedAt      time.Time `json:"createdAt"`
+	ID             int64            `json:"id"`
+	ConversationID int64            `json:"conversationId"`
+	Role           string           `json:"role"`
+	Content        string           `json:"content"`
+	Metadata       *MessageMetadata `json:"metadata,omitempty"`
+	CreatedAt      time.Time        `json:"createdAt"`
+}
+
+// MessageMetadata contains bounded, non-content execution information that
+// helps the UI explain how an assistant answer was produced. It is optional so
+// old messages and user messages remain small and source-compatible.
+type MessageMetadata struct {
+	QueryRewrite *usage.QueryRewriteObservation `json:"query_rewrite,omitempty"`
+	Retrieval    *usage.RetrievalObservation    `json:"retrieval,omitempty"`
 }
 
 type Summary struct {
@@ -74,6 +85,10 @@ type Store interface {
 type idempotencyStore interface {
 	GetIdempotentResponse(context.Context, int64, string) (IdempotentResponse, error)
 	SaveIdempotentResponse(context.Context, int64, string, string, []byte) error
+}
+
+type messageMetadataStore interface {
+	AppendExchangeWithMetadata(context.Context, int64, string, string, MessageMetadata) error
 }
 
 type distributedConversationLocker interface {
@@ -319,6 +334,16 @@ func validRequestHash(requestHash string) bool {
 }
 
 func (s *Service) SaveExchange(ctx context.Context, conversationID int64, userMessage, assistantMessage string) error {
+	return s.saveExchange(ctx, conversationID, userMessage, assistantMessage, nil)
+}
+
+// SaveExchangeWithMetadata persists an exchange and optional bounded execution
+// metadata. Stores that predate the metadata extension keep the old behavior.
+func (s *Service) SaveExchangeWithMetadata(ctx context.Context, conversationID int64, userMessage, assistantMessage string, metadata MessageMetadata) error {
+	return s.saveExchange(ctx, conversationID, userMessage, assistantMessage, &metadata)
+}
+
+func (s *Service) saveExchange(ctx context.Context, conversationID int64, userMessage, assistantMessage string, metadata *MessageMetadata) error {
 	if conversationID <= 0 {
 		return ErrInvalidConversation
 	}
@@ -326,6 +351,11 @@ func (s *Service) SaveExchange(ctx context.Context, conversationID int64, userMe
 	assistantMessage = strings.TrimSpace(assistantMessage)
 	if userMessage == "" || assistantMessage == "" || len(userMessage) > maxMessageSize || len(assistantMessage) > maxMessageSize {
 		return ErrInvalidMessage
+	}
+	if metadata != nil {
+		if store, ok := s.store.(messageMetadataStore); ok {
+			return store.AppendExchangeWithMetadata(ctx, conversationID, userMessage, assistantMessage, *metadata)
+		}
 	}
 	return s.store.AppendExchange(ctx, conversationID, userMessage, assistantMessage)
 }
@@ -472,7 +502,7 @@ func (s *PostgresStore) Delete(ctx context.Context, id int64) error {
 
 func (s *PostgresStore) ListMessages(ctx context.Context, conversationID int64) ([]Message, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT m.id, m.conversation_id, m.role, m.content, m.created_at
+		SELECT m.id, m.conversation_id, m.role, m.content, m.metadata, m.created_at
 		FROM conversation_messages m
 		JOIN conversations c ON c.id = m.conversation_id
 		WHERE m.conversation_id = $1
@@ -485,8 +515,16 @@ func (s *PostgresStore) ListMessages(ctx context.Context, conversationID int64) 
 	results := make([]Message, 0)
 	for rows.Next() {
 		var result Message
-		if err := rows.Scan(&result.ID, &result.ConversationID, &result.Role, &result.Content, &result.CreatedAt); err != nil {
+		var metadataBytes []byte
+		if err := rows.Scan(&result.ID, &result.ConversationID, &result.Role, &result.Content, &metadataBytes, &result.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan conversation message: %w", err)
+		}
+		if len(metadataBytes) > 0 && string(metadataBytes) != "{}" {
+			var metadata MessageMetadata
+			if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+				return nil, fmt.Errorf("decode conversation message metadata: %w", err)
+			}
+			result.Metadata = &metadata
 		}
 		results = append(results, result)
 	}
@@ -564,6 +602,18 @@ func (s *PostgresStore) SaveIdempotentResponse(ctx context.Context, conversation
 }
 
 func (s *PostgresStore) AppendExchange(ctx context.Context, conversationID int64, userMessage, assistantMessage string) error {
+	return s.appendExchange(ctx, conversationID, userMessage, assistantMessage, MessageMetadata{})
+}
+
+func (s *PostgresStore) AppendExchangeWithMetadata(ctx context.Context, conversationID int64, userMessage, assistantMessage string, metadata MessageMetadata) error {
+	return s.appendExchange(ctx, conversationID, userMessage, assistantMessage, metadata)
+}
+
+func (s *PostgresStore) appendExchange(ctx context.Context, conversationID int64, userMessage, assistantMessage string, metadata MessageMetadata) error {
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("encode conversation message metadata: %w", err)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin conversation exchange: %w", err)
@@ -571,15 +621,16 @@ func (s *PostgresStore) AppendExchange(ctx context.Context, conversationID int64
 	rollback := func() { _ = tx.Rollback() }
 	defer rollback()
 	for _, message := range []struct {
-		role    string
-		content string
-	}{{"user", userMessage}, {"assistant", assistantMessage}} {
+		role     string
+		content  string
+		metadata []byte
+	}{{"user", userMessage, []byte(`{}`)}, {"assistant", assistantMessage, metadataJSON}} {
 		result, err := tx.ExecContext(ctx, `
-			INSERT INTO conversation_messages (conversation_id, role, content)
-			SELECT id, $2, $3
+			INSERT INTO conversation_messages (conversation_id, role, content, metadata)
+			SELECT id, $2, $3, $4::jsonb
 			FROM conversations
 			WHERE id = $1
-			  AND administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, conversationID, message.role, message.content)
+			  AND administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, conversationID, message.role, message.content, string(message.metadata))
 		if err != nil {
 			return fmt.Errorf("append conversation %s message: %w", message.role, err)
 		}

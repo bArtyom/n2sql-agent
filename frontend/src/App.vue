@@ -67,7 +67,14 @@ type A2ATask = {
   error?: string;
 };
 type Conversation = { id: number; knowledgeBaseId: number; title: string; createdAt: string; updatedAt: string };
-type ConversationMessage = { id: number; conversationId: number; role: "user" | "assistant"; content: string; createdAt: string };
+type ConversationMessage = {
+  id: number;
+  conversationId: number;
+  role: "user" | "assistant";
+  content: string;
+  metadata?: { query_rewrite?: QueryRewriteStatus; retrieval?: RetrievalStats };
+  createdAt: string;
+};
 type StreamPayload = {
   delta?: string;
   sources?: Source[];
@@ -439,7 +446,13 @@ async function selectConversation(id: number | null) {
   const stored = await requestJSON<ConversationMessage[]>(
     `/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations/${id}/messages`,
   );
-  messages.value = stored.map((message) => ({ role: message.role, content: message.content, status: "done" }));
+  messages.value = stored.map((message) => ({
+    role: message.role,
+    content: message.content,
+    status: "done",
+    queryRewrite: message.metadata?.query_rewrite,
+    retrieval: message.metadata?.retrieval,
+  }));
 }
 
 async function createConversation() {

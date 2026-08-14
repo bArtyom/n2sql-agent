@@ -171,7 +171,7 @@ func NewKnowledgeBaseAgentChatStreamWithHub(answerer agentservice.EventAnswerer,
 			if err != nil {
 				return err
 			}
-			if err := saveConversationExchange(executionContext, conversations, request, response.Answer); err != nil {
+			if err := saveConversationExchange(executionContext, conversations, request, response); err != nil {
 				conversationSaveErr = err
 				message, _ := knowledgeBaseAgentChatError(err)
 				if writeErr := publishHandlerEvent("conversation_save_failed", struct {
