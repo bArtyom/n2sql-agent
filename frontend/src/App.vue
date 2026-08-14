@@ -11,6 +11,13 @@ type DocumentItem = {
   sizeBytes: number;
   processingStatus: "pending" | "processing" | "succeeded" | "failed" | string;
 };
+type DocumentPreview = {
+  documentId: number;
+  originalFilename?: string;
+  chunks: { position: number; content: string }[];
+  nextPosition: number;
+  truncated: boolean;
+};
 type Source = {
   documentId: number;
   originalFilename?: string;
@@ -181,6 +188,9 @@ const keywordThreshold = ref(0.10);
 const selectedDocumentIDs = ref<number[]>([]);
 const selectedSource = ref<Source | null>(null);
 const sourceLoading = ref(false);
+const selectedDocument = ref<DocumentItem | null>(null);
+const documentPreview = ref<DocumentPreview | null>(null);
+const documentPreviewLoading = ref(false);
 const copiedMessageIndex = ref<number | null>(null);
 const copiedSourceKey = ref<string | null>(null);
 let copyFeedbackTimer: number | undefined;
@@ -358,8 +368,34 @@ function closeSource() {
   sourceLoading.value = false;
 }
 
+async function openDocumentPreview(item: DocumentItem) {
+  if (!selectedKnowledgeBaseId.value || item.processingStatus !== "succeeded") return;
+  selectedDocument.value = item;
+  documentPreview.value = null;
+  documentPreviewLoading.value = true;
+  try {
+    documentPreview.value = await requestJSON<DocumentPreview>(
+      `/api/knowledge-bases/${selectedKnowledgeBaseId.value}/documents/${item.id}/preview?limit=8`,
+    );
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : "无法读取文档正文。";
+    selectedDocument.value = null;
+  } finally {
+    documentPreviewLoading.value = false;
+  }
+}
+
+function closeDocumentPreview() {
+  selectedDocument.value = null;
+  documentPreview.value = null;
+  documentPreviewLoading.value = false;
+}
+
 function closeSourceOnEscape(event: KeyboardEvent) {
-  if (event.key === "Escape") closeSource();
+  if (event.key === "Escape") {
+    closeSource();
+    closeDocumentPreview();
+  }
 }
 
 function sourceKey(source: Source): string {
@@ -624,6 +660,7 @@ function selectKnowledgeBase(id: number) {
 	selectedKnowledgeBaseId.value = id;
 	selectedDocumentIDs.value = [];
   closeSource();
+  closeDocumentPreview();
   mobileRailOpen.value = false;
   messages.value = [];
   conversationId.value = null;
@@ -658,6 +695,7 @@ async function createKnowledgeBase() {
     newKnowledgeBaseDescription.value = "";
     messages.value = [];
     closeSource();
+    closeDocumentPreview();
     conversations.value = [];
     conversationId.value = null;
     documents.value = [];
@@ -679,6 +717,7 @@ async function deleteKnowledgeBase() {
     await requestJSON<void>(`/api/knowledge-bases/${target.id}`, { method: "DELETE" });
     selectedDocumentIDs.value = [];
     closeSource();
+    closeDocumentPreview();
     messages.value = [];
     conversations.value = [];
     conversationId.value = null;
@@ -752,6 +791,7 @@ async function deleteDocument(item: DocumentItem) {
     );
     selectedDocumentIDs.value = selectedDocumentIDs.value.filter((id) => id !== item.id);
     if (selectedSource.value?.documentId === item.id) closeSource();
+    if (selectedDocument.value?.id === item.id) closeDocumentPreview();
     await refreshDocuments();
   } catch (error) {
     if (error instanceof APIError && error.status === 409) {
@@ -784,6 +824,7 @@ async function askQuestion() {
   }
   question.value = "";
   closeSource();
+  closeDocumentPreview();
   messages.value.push({ role: "user", content: prompt });
   const answer: ChatMessage = {
     role: "assistant",
@@ -920,6 +961,7 @@ async function retryAnswer(answer: ChatMessage, answerIndex: number) {
   answer.retryable = false;
   answer.activity = "正在重新生成回答…";
   closeSource();
+  closeDocumentPreview();
   streaming.value = true;
   try {
     await streamAgentQuestion(answer.requestMessage, answerIndex, answer.conversationId ?? conversationId.value, false);
@@ -989,6 +1031,7 @@ const agentToolLabels: Record<string, string> = {
   knowledge_search: "检索知识库",
   document_list: "查看文档列表",
   document_info: "查看文档状态",
+  document_read: "读取文档正文",
 };
 
 function displayAgentToolName(toolName: string) {
@@ -1003,6 +1046,8 @@ function agentToolActivity(toolName: string) {
       return "正在读取文档列表…";
     case "document_info":
       return "正在读取文档状态…";
+    case "document_read":
+      return "正在读取文档正文…";
     default:
       return "正在调用工具…";
   }
@@ -1479,6 +1524,14 @@ onUnmounted(() => {
               <div class="document-copy"><strong>{{ document.originalFilename }}</strong><span>{{ formatBytes(document.sizeBytes) }} · #{{ document.id }}</span></div>
               <span class="processing-status" :class="`processing-status--${document.processingStatus}`"><i />{{ statusLabel(document.processingStatus) }}</span>
               <button
+                v-if="document.processingStatus === 'succeeded'"
+                class="document-preview-button"
+                type="button"
+                :disabled="streaming || documentPreviewLoading"
+                title="查看正文片段"
+                @click="openDocumentPreview(document)"
+              >查看</button>
+              <button
                 class="document-delete"
                 type="button"
                 :disabled="streaming || deletingDocumentID !== null || ['pending', 'processing'].includes(document.processingStatus)"
@@ -1684,6 +1737,30 @@ onUnmounted(() => {
           <div class="settings-actions"><button class="settings-secondary" type="button" :disabled="providerTesting || providerSaving" @click="testProviderConnection">{{ providerTesting ? "测试中…" : "测试连接" }}</button><button class="settings-primary" type="submit" :disabled="providerSaving || providerTesting">{{ providerSaving ? "保存中…" : "保存配置" }}</button></div>
         </form>
       </section>
+    </div>
+
+    <div v-if="selectedDocument" class="source-backdrop" @click.self="closeDocumentPreview">
+      <aside class="source-panel document-preview-panel" role="dialog" aria-modal="true" aria-labelledby="document-preview-title">
+        <header class="source-panel-header">
+          <div><p class="eyebrow">DOCUMENT {{ String(selectedDocument.id).padStart(2, "0") }}</p><h2 id="document-preview-title">正文预览</h2></div>
+          <button class="settings-close" type="button" aria-label="关闭文档预览" @click="closeDocumentPreview">×</button>
+        </header>
+        <div class="source-panel-meta">
+          <strong>{{ selectedDocument.originalFilename }}</strong>
+          <span>{{ formatBytes(selectedDocument.sizeBytes) }} · 只显示已处理的正文片段</span>
+        </div>
+        <div class="document-preview-content">
+          <p v-if="documentPreviewLoading">正在读取文档正文…</p>
+          <template v-else-if="documentPreview">
+            <article v-for="chunk in documentPreview.chunks" :key="chunk.position" class="document-preview-chunk">
+              <span>第 {{ chunk.position + 1 }} 段</span>
+              <p>{{ chunk.content }}</p>
+            </article>
+            <p v-if="documentPreview.truncated" class="document-preview-note">当前只显示有限片段；如需继续查看，后续可从第 {{ documentPreview.nextPosition + 1 }} 段继续读取。</p>
+          </template>
+        </div>
+        <p class="source-panel-note">正文来自当前知识库已处理的 chunk，读取范围受权限和字节上限约束。</p>
+      </aside>
     </div>
 
     <div v-if="selectedSource" class="source-backdrop" @click.self="closeSource">

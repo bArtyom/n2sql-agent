@@ -91,6 +91,7 @@ func New(dependencies Dependencies) http.Handler {
 	}
 	if dependencies.ChunkReader != nil {
 		mux.Handle("GET /api/knowledge-bases/{id}/documents/{documentID}/chunks/{position}", handler.NewDocumentChunk(dependencies.ChunkReader))
+		mux.Handle("GET /api/knowledge-bases/{id}/documents/{documentID}/preview", handler.NewDocumentPreview(dependencies.ChunkReader))
 	}
 	if dependencies.Embeddings != nil {
 		mux.Handle("POST /api/model-provider/embedding-test", handler.NewModelProviderEmbeddingTest(dependencies.Embeddings))

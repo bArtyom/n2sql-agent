@@ -87,3 +87,59 @@ func TestDocumentChunkMapsNotFoundAndStorageErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestDocumentPreviewReturnsSeveralChunks(t *testing.T) {
+	reader := &previewChunkReaderStub{chunks: map[int]documentchunk.SearchResult{
+		0: {DocumentID: 7, OriginalFilename: "guide.md", Position: 0, Content: "第一段"},
+		1: {DocumentID: 7, OriginalFilename: "guide.md", Position: 1, Content: "第二段"},
+	}}
+	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/3/documents/7/preview?limit=2", nil)
+	request.SetPathValue("id", "3")
+	request.SetPathValue("documentID", "7")
+	response := httptest.NewRecorder()
+
+	handler.NewDocumentPreview(reader).ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "第一段") || !strings.Contains(response.Body.String(), "第二段") {
+		t.Fatalf("response = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestDocumentPreviewRejectsInvalidRangeAndHidesReaderError(t *testing.T) {
+	reader := &previewChunkReaderStub{err: errors.New("database password detail")}
+	invalid := httptest.NewRecorder()
+	invalidRequest := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/3/documents/7/preview?limit=99", nil)
+	invalidRequest.SetPathValue("id", "3")
+	invalidRequest.SetPathValue("documentID", "7")
+	handler.NewDocumentPreview(reader).ServeHTTP(invalid, invalidRequest)
+	if invalid.Code != http.StatusBadRequest || reader.calls != 0 {
+		t.Fatalf("invalid response = %d, calls = %d", invalid.Code, reader.calls)
+	}
+
+	failed := httptest.NewRecorder()
+	failureRequest := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/3/documents/7/preview", nil)
+	failureRequest.SetPathValue("id", "3")
+	failureRequest.SetPathValue("documentID", "7")
+	handler.NewDocumentPreview(reader).ServeHTTP(failed, failureRequest)
+	if failed.Code != http.StatusInternalServerError || strings.Contains(failed.Body.String(), "password detail") {
+		t.Fatalf("failure response = %d %s", failed.Code, failed.Body.String())
+	}
+}
+
+type previewChunkReaderStub struct {
+	chunks map[int]documentchunk.SearchResult
+	err    error
+	calls  int
+}
+
+func (s *previewChunkReaderStub) Read(_ context.Context, _, _ int64, position int) (documentchunk.SearchResult, error) {
+	s.calls++
+	if s.err != nil {
+		return documentchunk.SearchResult{}, s.err
+	}
+	chunk, ok := s.chunks[position]
+	if !ok {
+		return documentchunk.SearchResult{}, documentchunk.ErrChunkNotFound
+	}
+	return chunk, nil
+}

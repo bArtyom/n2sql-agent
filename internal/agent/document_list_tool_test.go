@@ -9,6 +9,7 @@ import (
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/document"
+	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 )
 
 type documentReaderStub struct {
@@ -101,5 +102,59 @@ func TestDocumentInfoToolRejectsDocumentOutsideScope(t *testing.T) {
 	_, err = tool.Call(context.Background(), []byte(`{"document_id":99}`))
 	if !errors.Is(err, document.ErrDocumentNotFound) {
 		t.Fatalf("Call() error = %v, want ErrDocumentNotFound", err)
+	}
+}
+
+type documentChunkReaderStub struct {
+	chunks          map[int]documentchunk.SearchResult
+	err             error
+	knowledgeBaseID int64
+}
+
+func (s *documentChunkReaderStub) Read(_ context.Context, knowledgeBaseID, _ int64, position int) (documentchunk.SearchResult, error) {
+	s.knowledgeBaseID = knowledgeBaseID
+	if s.err != nil {
+		return documentchunk.SearchResult{}, s.err
+	}
+	chunk, ok := s.chunks[position]
+	if !ok {
+		return documentchunk.SearchResult{}, documentchunk.ErrChunkNotFound
+	}
+	return chunk, nil
+}
+
+func TestDocumentReadToolReturnsBoundedChunks(t *testing.T) {
+	reader := &documentChunkReaderStub{chunks: map[int]documentchunk.SearchResult{
+		0: {DocumentID: 8, OriginalFilename: "guide.md", Position: 0, Content: "第一段"},
+		1: {DocumentID: 8, OriginalFilename: "guide.md", Position: 1, Content: "第二段"},
+	}}
+	tool, err := agent.NewDocumentReadToolForKnowledgeBase(reader, 7, 4096, 4)
+	if err != nil {
+		t.Fatalf("NewDocumentReadToolForKnowledgeBase() error = %v", err)
+	}
+	result, err := tool.Call(context.Background(), []byte(`{"document_id":8,"limit":2}`))
+	if err != nil {
+		t.Fatalf("Call() error = %v", err)
+	}
+	if reader.knowledgeBaseID != 7 || !strings.Contains(result.Content, "第一段") || !strings.Contains(result.Content, "第二段") {
+		t.Fatalf("scope/content = %d/%q", reader.knowledgeBaseID, result.Content)
+	}
+}
+
+func TestDocumentReadToolRejectsInvalidInputAndReaderFailure(t *testing.T) {
+	tool, err := agent.NewDocumentReadToolForKnowledgeBase(&documentChunkReaderStub{}, 7, 4096, 4)
+	if err != nil {
+		t.Fatalf("NewDocumentReadToolForKnowledgeBase() error = %v", err)
+	}
+	if _, err := tool.Call(context.Background(), []byte(`{"knowledge_base_id":99}`)); !errors.Is(err, agent.ErrInvalidDocumentReadInput) {
+		t.Fatalf("invalid input error = %v, want ErrInvalidDocumentReadInput", err)
+	}
+	expected := errors.New("chunk reader failed")
+	failingTool, err := agent.NewDocumentReadToolForKnowledgeBase(&documentChunkReaderStub{err: expected}, 7, 4096, 4)
+	if err != nil {
+		t.Fatalf("NewDocumentReadToolForKnowledgeBase() error = %v", err)
+	}
+	if _, err := failingTool.Call(context.Background(), []byte(`{"document_id":8}`)); !errors.Is(err, expected) {
+		t.Fatalf("reader failure = %v, want wrapped error", err)
 	}
 }

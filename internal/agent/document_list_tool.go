@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/bArtyom/n2sql-agent/internal/document"
+	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 )
 
@@ -181,6 +182,35 @@ func NewKnowledgeSearchAndDocumentListRegistry(
 	documentIDs []int64,
 	queryRewrite bool,
 ) (*ToolRegistry, error) {
+	return newKnowledgeSearchAndDocumentRegistry(searcher, reader, nil, knowledgeBaseID, maxResultBytes, maxResults, maxDistance, keywordThreshold, documentIDs, queryRewrite)
+}
+
+// NewKnowledgeSearchAndDocumentReadRegistry adds the bounded document_read
+// tool when a chunk reader is available. The older constructor above remains
+// available for callers that only provide document metadata.
+func NewKnowledgeSearchAndDocumentReadRegistry(
+	searcher retrieval.Searcher,
+	reader document.Reader,
+	chunkReader documentchunk.Reader,
+	knowledgeBaseID int64,
+	maxResultBytes, maxResults int,
+	maxDistance, keywordThreshold float64,
+	documentIDs []int64,
+	queryRewrite bool,
+) (*ToolRegistry, error) {
+	return newKnowledgeSearchAndDocumentRegistry(searcher, reader, chunkReader, knowledgeBaseID, maxResultBytes, maxResults, maxDistance, keywordThreshold, documentIDs, queryRewrite)
+}
+
+func newKnowledgeSearchAndDocumentRegistry(
+	searcher retrieval.Searcher,
+	reader document.Reader,
+	chunkReader documentchunk.Reader,
+	knowledgeBaseID int64,
+	maxResultBytes, maxResults int,
+	maxDistance, keywordThreshold float64,
+	documentIDs []int64,
+	queryRewrite bool,
+) (*ToolRegistry, error) {
 	searchTool, err := NewKnowledgeSearchToolForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewriteAndKeywordThreshold(
 		searcher,
 		knowledgeBaseID,
@@ -202,7 +232,11 @@ func NewKnowledgeSearchAndDocumentListRegistry(
 	if err != nil {
 		return nil, fmt.Errorf("create document info tool: %w", err)
 	}
-	registry, err := NewToolRegistryWithAllowlist("document_info", "document_list", "knowledge_search")
+	allowlist := []string{"document_info", "document_list", "knowledge_search"}
+	if chunkReader != nil {
+		allowlist = append(allowlist, documentReadToolName)
+	}
+	registry, err := NewToolRegistryWithAllowlist(allowlist...)
 	if err != nil {
 		return nil, fmt.Errorf("create read-only tool allowlist: %w", err)
 	}
@@ -214,6 +248,15 @@ func NewKnowledgeSearchAndDocumentListRegistry(
 	}
 	if err := registry.Register(infoTool); err != nil {
 		return nil, fmt.Errorf("register document info tool: %w", err)
+	}
+	if chunkReader != nil {
+		readTool, err := NewDocumentReadToolForKnowledgeBase(chunkReader, knowledgeBaseID, maxResultBytes, minInt(maxResults, 8))
+		if err != nil {
+			return nil, fmt.Errorf("create document read tool: %w", err)
+		}
+		if err := registry.Register(readTool); err != nil {
+			return nil, fmt.Errorf("register document read tool: %w", err)
+		}
 	}
 	return registry, nil
 }

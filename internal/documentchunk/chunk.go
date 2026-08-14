@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 var ErrChunkNotFound = errors.New("document chunk not found")
@@ -58,6 +59,19 @@ type Store interface {
 // enforce the knowledge-base boundary before returning content.
 type Reader interface {
 	Read(context.Context, int64, int64, int) (SearchResult, error)
+}
+
+// RangeReader loads a bounded sequence of chunks for document preview or a
+// document-reading tool. Implementations must enforce the same knowledge-base
+// and administrator boundary as Reader.
+type RangeReader interface {
+	ReadRange(context.Context, int64, int64, int, int, int) (RangeResult, error)
+}
+
+type RangeResult struct {
+	Chunks       []SearchResult `json:"chunks"`
+	NextPosition int            `json:"nextPosition"`
+	Truncated    bool           `json:"truncated"`
 }
 
 type ParentChunk struct {
@@ -149,6 +163,80 @@ func (s *PostgresStore) Read(ctx context.Context, knowledgeBaseID, documentID in
 		result.ParentPosition = int(parentPosition.Int64)
 	}
 	return result, nil
+}
+
+// ReadRange returns a small, ordered window of chunks without loading an
+// entire document. The extra SQL row tells callers whether more chunks exist;
+// maxBytes protects both a preview response and a model tool result.
+func (s *PostgresStore) ReadRange(ctx context.Context, knowledgeBaseID, documentID int64, startPosition, limit, maxBytes int) (RangeResult, error) {
+	if knowledgeBaseID <= 0 || documentID <= 0 || startPosition < 0 || limit < 1 || maxBytes < 2 {
+		return RangeResult{}, ErrChunkNotFound
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT chunks.document_id, documents.original_filename, chunks.position,
+		       chunks.content
+		FROM document_chunks AS chunks
+		JOIN documents ON documents.id = chunks.document_id
+		JOIN knowledge_bases AS kb ON kb.id = documents.knowledge_base_id
+		WHERE documents.knowledge_base_id = $1
+		  AND documents.id = $2
+		  AND chunks.position >= $3
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
+		ORDER BY chunks.position
+		LIMIT $4`, knowledgeBaseID, documentID, startPosition, limit+1)
+	if err != nil {
+		return RangeResult{}, fmt.Errorf("read document chunks: %w", err)
+	}
+	defer rows.Close()
+
+	result := RangeResult{Chunks: make([]SearchResult, 0, limit), NextPosition: startPosition}
+	bytesUsed := 0
+	for rows.Next() {
+		var chunk SearchResult
+		if err := rows.Scan(&chunk.DocumentID, &chunk.OriginalFilename, &chunk.Position, &chunk.Content); err != nil {
+			return RangeResult{}, fmt.Errorf("scan document chunk range: %w", err)
+		}
+		if len(result.Chunks) >= limit {
+			result.Truncated = true
+			break
+		}
+		remaining := maxBytes - bytesUsed
+		if remaining <= 0 {
+			result.Truncated = true
+			break
+		}
+		if len(chunk.Content) > remaining {
+			chunk.Content = truncateUTF8(chunk.Content, remaining)
+			result.Truncated = true
+		}
+		result.Chunks = append(result.Chunks, chunk)
+		bytesUsed += len(chunk.Content)
+		result.NextPosition = chunk.Position + 1
+		if result.Truncated {
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return RangeResult{}, fmt.Errorf("iterate document chunk range: %w", err)
+	}
+	if len(result.Chunks) == 0 {
+		return RangeResult{}, ErrChunkNotFound
+	}
+	return result, nil
+}
+
+func truncateUTF8(value string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(value) <= maxBytes {
+		return value
+	}
+	truncated := value[:maxBytes]
+	for len(truncated) > 0 && !utf8.ValidString(truncated) {
+		truncated = truncated[:len(truncated)-1]
+	}
+	return truncated
 }
 
 func (s *PostgresStore) Replace(ctx context.Context, documentID int64, chunks []string, embeddings [][]float32) error {
