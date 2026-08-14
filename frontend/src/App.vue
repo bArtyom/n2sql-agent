@@ -936,6 +936,29 @@ function recordResearchEvent(answer: ChatMessage, type: string, label: string, d
   if (answer.researchEvents.length > 12) answer.researchEvents.shift();
 }
 
+const agentToolLabels: Record<string, string> = {
+  knowledge_search: "检索知识库",
+  document_list: "查看文档列表",
+  document_info: "查看文档状态",
+};
+
+function displayAgentToolName(toolName: string) {
+  return agentToolLabels[toolName.trim()] || "调用知识库工具";
+}
+
+function agentToolActivity(toolName: string) {
+  switch (toolName.trim()) {
+    case "knowledge_search":
+      return "正在检索知识库…";
+    case "document_list":
+      return "正在读取文档列表…";
+    case "document_info":
+      return "正在读取文档状态…";
+    default:
+      return "正在调用工具…";
+  }
+}
+
 function recordAgentEvent(
   answer: ChatMessage,
   type: string,
@@ -961,7 +984,7 @@ function restoreAgentEvents(trace?: StoredAgentTrace): AgentEvent[] {
       events.push({
         type: item.type || "tool_call",
         step: item.step,
-        label: item.tool_name ? `调用 ${item.tool_name}` : "调用知识库工具",
+        label: item.tool_name ? displayAgentToolName(item.tool_name) : "调用知识库工具",
         detail: item.result_summary || "工具调用完成",
         toolCallID: item.tool_call_id,
         arguments: item.arguments,
@@ -985,11 +1008,11 @@ function restoreAgentEvents(trace?: StoredAgentTrace): AgentEvent[] {
     const kind = typeof step.kind === "string" ? step.kind : "step";
     const status = step.status === "failed" ? "error" : step.status === "running" || step.status === "pending" ? "running" : "done";
     const label = kind === "tool_call"
-      ? "调用知识库工具"
+      ? (typeof step.tool_name === "string" && step.tool_name ? displayAgentToolName(step.tool_name) : "调用知识库工具")
       : kind === "final_answer"
         ? "生成最终答案"
         : "模型决策";
-    const detail = typeof step.tool_name === "string" && step.tool_name ? step.tool_name : "历史运行步骤";
+    const detail = typeof step.tool_name === "string" && step.tool_name ? displayAgentToolName(step.tool_name) : "历史运行步骤";
     events.push({ type: kind, step: step.number, label, detail, status });
   }
   const terminalStatus = trace.status === "failed" || trace.status === "canceled" ? "error" : "done";
@@ -1116,12 +1139,12 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
       case "tool_called":
         if (!researchMode) {
           const toolName = dataString("tool_name") || "knowledge_search";
-          recordAgentEvent(answer, event, "调用知识库工具", toolName, payload.step_number, "running", {
+          recordAgentEvent(answer, event, displayAgentToolName(toolName), "", payload.step_number, "running", {
             toolCallID: dataString("tool_call_id"),
             arguments: dataString("arguments"),
           });
         }
-        answer.activity = dataString("tool_name") === "knowledge_search" ? "正在查找资料…" : "正在调用工具…";
+        answer.activity = agentToolActivity(dataString("tool_name"));
         break;
       case "tool_finished":
         if (!researchMode) {
