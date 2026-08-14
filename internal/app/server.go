@@ -10,6 +10,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agentstream"
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/document"
+	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/handler"
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
 	"github.com/bArtyom/n2sql-agent/internal/mcp"
@@ -27,6 +28,7 @@ type Dependencies struct {
 	Providers                  modelprovider.Store
 	KnowledgeBases             knowledgebase.Store
 	Documents                  document.Uploader
+	ChunkReader                documentchunk.Reader
 	ConnectionChecker          modelclient.ConnectionChecker
 	Embeddings                 modelruntime.EmbeddingRunner
 	Chat                       modelruntime.ChatRunner
@@ -86,6 +88,9 @@ func New(dependencies Dependencies) http.Handler {
 		if deleter, ok := dependencies.Documents.(document.Deleter); ok {
 			mux.Handle("DELETE /api/knowledge-bases/{id}/documents/{documentID}", handler.NewDocumentDelete(deleter))
 		}
+	}
+	if dependencies.ChunkReader != nil {
+		mux.Handle("GET /api/knowledge-bases/{id}/documents/{documentID}/chunks/{position}", handler.NewDocumentChunk(dependencies.ChunkReader))
 	}
 	if dependencies.Embeddings != nil {
 		mux.Handle("POST /api/model-provider/embedding-test", handler.NewModelProviderEmbeddingTest(dependencies.Embeddings))

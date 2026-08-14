@@ -9,6 +9,8 @@ import (
 	"strings"
 )
 
+var ErrChunkNotFound = errors.New("document chunk not found")
+
 type Splitter struct{ size, overlap int }
 
 func NewSplitter(size, overlap int) *Splitter { return &Splitter{size: size, overlap: overlap} }
@@ -50,6 +52,12 @@ func (s *Splitter) Split(text string) []string {
 
 type Store interface {
 	Replace(context.Context, int64, []string, [][]float32) error
+}
+
+// Reader loads one chunk for a user-visible citation. Implementations must
+// enforce the knowledge-base boundary before returning content.
+type Reader interface {
+	Read(context.Context, int64, int64, int) (SearchResult, error)
 }
 
 type ParentChunk struct {
@@ -97,6 +105,51 @@ type ContextChunk struct {
 type PostgresStore struct{ db *sql.DB }
 
 func NewPostgresStore(db *sql.DB) *PostgresStore { return &PostgresStore{db: db} }
+
+// Read loads one chunk for a citation detail view. The knowledge-base and
+// current-administrator predicates are part of the SQL query so a caller
+// cannot use a document/position pair to cross the retrieval boundary.
+func (s *PostgresStore) Read(ctx context.Context, knowledgeBaseID, documentID int64, position int) (SearchResult, error) {
+	if knowledgeBaseID <= 0 || documentID <= 0 || position < 0 {
+		return SearchResult{}, ErrChunkNotFound
+	}
+	var result SearchResult
+	var parentContent sql.NullString
+	var parentPosition sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT chunks.document_id, documents.original_filename, chunks.position,
+		       chunks.content, parents.content, parents.position
+		FROM document_chunks AS chunks
+		JOIN documents ON documents.id = chunks.document_id
+		JOIN knowledge_bases AS kb ON kb.id = documents.knowledge_base_id
+		LEFT JOIN document_parent_chunks AS parents ON parents.id = chunks.parent_chunk_id
+		WHERE documents.knowledge_base_id = $1
+		  AND documents.id = $2
+		  AND chunks.position = $3
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`,
+		knowledgeBaseID, documentID, position,
+	).Scan(
+		&result.DocumentID,
+		&result.OriginalFilename,
+		&result.Position,
+		&result.Content,
+		&parentContent,
+		&parentPosition,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SearchResult{}, ErrChunkNotFound
+	}
+	if err != nil {
+		return SearchResult{}, fmt.Errorf("read document chunk: %w", err)
+	}
+	if parentContent.Valid {
+		result.ParentContent = parentContent.String
+	}
+	if parentPosition.Valid {
+		result.ParentPosition = int(parentPosition.Int64)
+	}
+	return result, nil
+}
 
 func (s *PostgresStore) Replace(ctx context.Context, documentID int64, chunks []string, embeddings [][]float32) error {
 	if len(embeddings) != 0 && len(embeddings) != len(chunks) {

@@ -151,6 +151,7 @@ const queryRewrite = ref(false);
 const keywordThreshold = ref(0.10);
 const selectedDocumentIDs = ref<number[]>([]);
 const selectedSource = ref<Source | null>(null);
+const sourceLoading = ref(false);
 const copiedMessageIndex = ref<number | null>(null);
 const copiedSourceKey = ref<string | null>(null);
 let copyFeedbackTimer: number | undefined;
@@ -264,12 +265,38 @@ function isRetrievalDetailsOpen(messageIndex: number): boolean {
   return retrievalDetailsOpen.value.has(messageIndex);
 }
 
-function openSource(source: Source) {
+async function openSource(source: Source) {
   selectedSource.value = source;
+  sourceLoading.value = false;
+  if (!source.contentTruncated || !selectedKnowledgeBaseId.value) return;
+
+  const requestedKnowledgeBaseID = selectedKnowledgeBaseId.value;
+  const requestedSourceKey = sourceKey(source);
+  sourceLoading.value = true;
+  try {
+    const detail = await requestJSON<Pick<Source, "documentId" | "originalFilename" | "position" | "content" | "parentContent" | "parentPosition">>(
+      `/api/knowledge-bases/${requestedKnowledgeBaseID}/documents/${source.documentId}/chunks/${source.position}`,
+    );
+    const fullSource: Source = { ...source, ...detail, contentTruncated: false };
+    if (selectedKnowledgeBaseId.value === requestedKnowledgeBaseID
+      && selectedSource.value
+      && sourceKey(selectedSource.value) === requestedSourceKey) {
+      selectedSource.value = fullSource;
+    }
+    messages.value = messages.value.map((message) => ({
+      ...message,
+      sources: message.sources?.map((item) => sourceKey(item) === requestedSourceKey ? fullSource : item),
+    }));
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : "无法读取引用原文。";
+  } finally {
+    sourceLoading.value = false;
+  }
 }
 
 function closeSource() {
   selectedSource.value = null;
+  sourceLoading.value = false;
 }
 
 function closeSourceOnEscape(event: KeyboardEvent) {
@@ -1467,7 +1494,7 @@ onUnmounted(() => {
           <strong>{{ selectedSource.originalFilename || "未命名文档" }}</strong>
           <span>第 {{ selectedSource.position + 1 }} 段 · {{ matchTypeLabel(selectedSource.matchType) }} · {{ sourceScoreLabel(selectedSource) }}</span>
         </div>
-        <div class="source-panel-content"><p>{{ sourceDisplayContent(selectedSource) }}</p><small v-if="selectedSource.contentTruncated">历史记录只保存了引用片段预览，原文已被截断。</small></div>
+        <div class="source-panel-content"><p v-if="sourceLoading">正在读取引用原文…</p><template v-else><p>{{ sourceDisplayContent(selectedSource) }}</p><small v-if="selectedSource.contentTruncated">历史记录只保存了引用片段预览，原文已被截断。</small></template></div>
         <div class="source-panel-actions"><button class="source-copy-button" type="button" @click="copySource(selectedSource)">{{ copiedSourceKey === sourceKey(selectedSource) ? "已复制原文" : "复制原文" }}</button></div>
         <p class="source-panel-note">这段内容来自知识库检索结果，仅作为回答依据展示，不会被当作操作指令执行。</p>
       </aside>

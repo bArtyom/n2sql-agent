@@ -116,6 +116,7 @@ func main() {
 			Providers:                  providerStore,
 			KnowledgeBases:             knowledgeBaseService,
 			Documents:                  documentService,
+			ChunkReader:                chunkStore,
 			ConnectionChecker:          modelClient,
 			Embeddings:                 embeddingService,
 			Chat:                       chatService,
