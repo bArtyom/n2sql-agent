@@ -43,6 +43,8 @@ type ChatMessage = {
   retryable?: boolean;
   runID?: string;
   seenEventIDs?: Set<string>;
+  // 只用于当前页面的展开状态，不会提交到后端。
+  expandedAgentEvents?: Set<string>;
 };
 type QueryRewriteStatus = { enabled: boolean; applied: boolean; fallback: boolean; variant_count: number };
 type RetrievalStats = {
@@ -863,6 +865,7 @@ async function retryAnswer(answer: ChatMessage, answerIndex: number) {
   answer.content = "";
   answer.sources = [];
   answer.agentEvents = [];
+  answer.expandedAgentEvents = new Set();
   answer.queryRewrite = undefined;
   answer.status = "streaming";
   answer.retryable = false;
@@ -1010,6 +1013,27 @@ function finishLastAgentToolEvent(answer: ChatMessage, detail: string, status: A
     latest.resultSummary = detail.slice(0, 140);
     latest.status = status;
   }
+}
+
+function agentTraceKey(trace: AgentEvent, index: number) {
+  return trace.toolCallID || `${trace.type}-${trace.step ?? "unknown"}-${index}`;
+}
+
+function isAgentTraceExpandable(trace: AgentEvent) {
+  return trace.type === "tool_called" || trace.type === "tool_call" || Boolean(trace.arguments || trace.resultSummary);
+}
+
+function isAgentTraceExpanded(message: ChatMessage, trace: AgentEvent, index: number) {
+  return message.expandedAgentEvents?.has(agentTraceKey(trace, index)) ?? false;
+}
+
+function toggleAgentTrace(message: ChatMessage, trace: AgentEvent, index: number) {
+  if (!isAgentTraceExpandable(trace)) return;
+  const expanded = new Set(message.expandedAgentEvents ?? []);
+  const key = agentTraceKey(trace, index);
+  if (expanded.has(key)) expanded.delete(key);
+  else expanded.add(key);
+  message.expandedAgentEvents = expanded;
 }
 
 function consumeSSEBlock(block: string, answerIndex: number, researchMode = false) {
@@ -1428,10 +1452,27 @@ onUnmounted(() => {
               </div>
               <div v-if="message.role === 'assistant' && message.agentEvents?.length" class="agent-trace">
                 <div class="agent-trace-head"><span>Agent 运行轨迹</span><small>{{ message.agentEvents.length }} EVENTS</small></div>
-                <div v-for="trace in message.agentEvents" :key="`${trace.type}-${trace.step}-${trace.label}-${trace.detail}-${trace.toolCallID}`" class="agent-trace-row" :class="`agent-trace-row--${trace.status}`">
+                <div v-for="(trace, traceIndex) in message.agentEvents" :key="agentTraceKey(trace, traceIndex)" class="agent-trace-row" :class="`agent-trace-row--${trace.status}`">
                   <span class="agent-trace-marker">{{ trace.status === 'done' ? '✓' : trace.status === 'error' ? '!' : '·' }}</span>
+                  <button
+                    v-if="isAgentTraceExpandable(trace)"
+                    type="button"
+                    class="agent-trace-toggle"
+                    :aria-expanded="isAgentTraceExpanded(message, trace, traceIndex)"
+                    :aria-label="isAgentTraceExpanded(message, trace, traceIndex) ? '收起工具详情' : '展开工具详情'"
+                    @click="toggleAgentTrace(message, trace, traceIndex)"
+                  >
+                    <span aria-hidden="true">›</span>
+                  </button>
+                  <span v-else class="agent-trace-toggle-placeholder" aria-hidden="true" />
                   <span class="agent-trace-label">{{ trace.label }}</span>
-                  <span class="agent-trace-copy"><small v-if="trace.detail">{{ trace.detail }}</small><small v-if="trace.arguments">参数：{{ trace.arguments }}</small><small v-if="trace.resultSummary && trace.resultSummary !== trace.detail">结果：{{ trace.resultSummary }}</small></span>
+                  <span class="agent-trace-copy">
+                    <small v-if="trace.detail">{{ trace.detail }}</small>
+                    <template v-if="isAgentTraceExpanded(message, trace, traceIndex)">
+                      <small v-if="trace.arguments">参数：{{ trace.arguments }}</small>
+                      <small v-if="trace.resultSummary && trace.resultSummary !== trace.detail">结果：{{ trace.resultSummary }}</small>
+                    </template>
+                  </span>
                 </div>
               </div>
               <div v-if="message.role === 'assistant' && message.researchEvents?.length" class="research-trace">
