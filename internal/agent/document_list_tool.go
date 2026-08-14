@@ -170,8 +170,8 @@ func minInt(left, right int) int {
 	return right
 }
 
-// NewKnowledgeSearchAndDocumentListRegistry creates the two safe, read-only
-// tools used by the standard Agent for one knowledge base.
+// NewKnowledgeSearchAndDocumentListRegistry creates the safe, read-only
+// document tools used by the standard Agent for one knowledge base.
 func NewKnowledgeSearchAndDocumentListRegistry(
 	searcher retrieval.Searcher,
 	reader document.Reader,
@@ -198,7 +198,11 @@ func NewKnowledgeSearchAndDocumentListRegistry(
 	if err != nil {
 		return nil, fmt.Errorf("create document list tool: %w", err)
 	}
-	registry, err := NewToolRegistryWithAllowlist("document_list", "knowledge_search")
+	infoTool, err := NewDocumentInfoToolForKnowledgeBase(reader, knowledgeBaseID, maxResultBytes)
+	if err != nil {
+		return nil, fmt.Errorf("create document info tool: %w", err)
+	}
+	registry, err := NewToolRegistryWithAllowlist("document_info", "document_list", "knowledge_search")
 	if err != nil {
 		return nil, fmt.Errorf("create read-only tool allowlist: %w", err)
 	}
@@ -207,6 +211,9 @@ func NewKnowledgeSearchAndDocumentListRegistry(
 	}
 	if err := registry.Register(listTool); err != nil {
 		return nil, fmt.Errorf("register document list tool: %w", err)
+	}
+	if err := registry.Register(infoTool); err != nil {
+		return nil, fmt.Errorf("register document info tool: %w", err)
 	}
 	return registry, nil
 }
