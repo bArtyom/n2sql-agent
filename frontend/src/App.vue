@@ -37,6 +37,7 @@ type ChatMessage = {
   agentEvents?: AgentEvent[];
   queryRewrite?: QueryRewriteStatus;
   retrieval?: RetrievalStats;
+  agentStats?: AgentRunStats;
   requestMessage?: string;
   conversationId?: number | null;
   mode?: ChatMode;
@@ -71,9 +72,24 @@ type AgentEvent = {
   sourceKeys?: string[];
   status: "running" | "done" | "error";
 };
+type AgentRunStats = {
+  status?: string;
+  step_count?: number;
+  model_calls?: number;
+  tool_calls?: number;
+  successful_tool_calls?: number;
+  failed_tool_calls?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  embedding_tokens?: number;
+  total_tokens?: number;
+  duration_ms?: number;
+  failure_category?: string;
+};
 type StoredAgentTrace = {
   run_id?: string;
   status?: string;
+  stats?: AgentRunStats;
   steps?: { number?: number; kind?: string; status?: string; tool_name?: string }[];
   events?: { type?: string; step?: number; tool_call_id?: string; tool_name?: string; arguments?: string; result_summary?: string; source_keys?: string[]; status?: string }[];
 };
@@ -229,6 +245,30 @@ function parseSources(value: unknown): Source[] {
     if (contextAfter.length) (source as Record<string, unknown>).contextAfter = contextAfter;
     return true;
   });
+}
+
+function parseAgentRunStats(value: unknown): AgentRunStats | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Record<string, unknown>;
+  const boundedNumber = (candidate: unknown, maximum = 1_000_000_000): number | undefined => {
+    if (typeof candidate !== "number" || !Number.isFinite(candidate) || candidate < 0) return undefined;
+    return Math.min(Math.floor(candidate), maximum);
+  };
+  const stats: AgentRunStats = {
+    status: typeof raw.status === "string" ? raw.status.slice(0, 32) : undefined,
+    step_count: boundedNumber(raw.step_count),
+    model_calls: boundedNumber(raw.model_calls),
+    tool_calls: boundedNumber(raw.tool_calls),
+    successful_tool_calls: boundedNumber(raw.successful_tool_calls),
+    failed_tool_calls: boundedNumber(raw.failed_tool_calls),
+    prompt_tokens: boundedNumber(raw.prompt_tokens),
+    completion_tokens: boundedNumber(raw.completion_tokens),
+    embedding_tokens: boundedNumber(raw.embedding_tokens),
+    total_tokens: boundedNumber(raw.total_tokens),
+    duration_ms: boundedNumber(raw.duration_ms, 86_400_000),
+    failure_category: typeof raw.failure_category === "string" ? raw.failure_category.slice(0, 64) : undefined,
+  };
+  return Object.values(stats).some((item) => item !== undefined) ? stats : undefined;
 }
 
 function mergeSources(existing: Source[], incoming: Source[]): Source[] {
@@ -505,6 +545,7 @@ async function selectConversation(id: number | null) {
     sources: message.role === "assistant" ? parseSources(message.metadata?.sources) : undefined,
     queryRewrite: message.metadata?.query_rewrite,
     retrieval: message.metadata?.retrieval,
+    agentStats: message.role === "assistant" ? parseAgentRunStats(message.metadata?.agent_trace?.stats) : undefined,
     agentEvents: message.role === "assistant" ? restoreAgentEvents(message.metadata?.agent_trace) : undefined,
     runID: message.metadata?.agent_trace?.run_id,
     mode: message.role === "assistant" ? "agent" : undefined,
@@ -872,6 +913,7 @@ async function retryAnswer(answer: ChatMessage, answerIndex: number) {
   answer.content = "";
   answer.sources = [];
   answer.agentEvents = [];
+  answer.agentStats = undefined;
   answer.expandedAgentEvents = new Set();
   answer.queryRewrite = undefined;
   answer.status = "streaming";
@@ -964,6 +1006,24 @@ function agentToolActivity(toolName: string) {
     default:
       return "正在调用工具…";
   }
+}
+
+function formatAgentDuration(durationMS?: number) {
+  if (durationMS === undefined) return "";
+  if (durationMS < 1000) return `${durationMS}ms`;
+  return `${(durationMS / 1000).toFixed(durationMS >= 10_000 ? 0 : 1)}s`;
+}
+
+function agentTraceSummary(message: ChatMessage) {
+  const stats = message.agentStats;
+  if (!stats) return `${message.agentEvents?.length ?? 0} EVENTS`;
+  const parts: string[] = [];
+  if (stats.step_count !== undefined) parts.push(`${stats.step_count} 步`);
+  if (stats.tool_calls !== undefined) parts.push(`${stats.tool_calls} 工具`);
+  if (stats.total_tokens !== undefined) parts.push(`${stats.total_tokens} tokens`);
+  const duration = formatAgentDuration(stats.duration_ms);
+  if (duration) parts.push(duration);
+  return parts.length ? parts.join(" · ") : `${message.agentEvents?.length ?? 0} EVENTS`;
 }
 
 function recordAgentEvent(
@@ -1206,6 +1266,7 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
           }
         }
         if (runStats && typeof runStats === "object") {
+          answer.agentStats = parseAgentRunStats(runStats);
           const retrieval = (runStats as Record<string, unknown>).retrieval;
           if (retrieval && typeof retrieval === "object") answer.retrieval = retrieval as RetrievalStats;
         }
@@ -1226,6 +1287,7 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
           answer.runID = typeof replayedAnswer.run_id === "string" ? replayedAnswer.run_id : answer.runID;
           const replayedStats = replayedAnswer.stats;
           if (replayedStats && typeof replayedStats === "object") {
+            answer.agentStats = parseAgentRunStats(replayedStats);
             const stats = replayedStats as Record<string, unknown>;
             if (stats.query_rewrite && typeof stats.query_rewrite === "object") answer.queryRewrite = stats.query_rewrite as QueryRewriteStatus;
             if (stats.retrieval && typeof stats.retrieval === "object") answer.retrieval = stats.retrieval as RetrievalStats;
@@ -1233,6 +1295,7 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
           answer.agentEvents = restoreAgentEvents({
             run_id: answer.runID,
             status: typeof replayedAnswer.status === "string" ? replayedAnswer.status : "succeeded",
+            stats: parseAgentRunStats(replayedStats),
             steps: Array.isArray(replayedAnswer.steps) ? replayedAnswer.steps as StoredAgentTrace["steps"] : [],
             events: Array.isArray(replayedAnswer.trace) ? replayedAnswer.trace as StoredAgentTrace["events"] : [],
           });
@@ -1491,7 +1554,7 @@ onUnmounted(() => {
                 <span>{{ message.activity }}</span>
               </div>
               <div v-if="message.role === 'assistant' && message.agentEvents?.length" class="agent-trace">
-                <div class="agent-trace-head"><span>Agent 运行轨迹</span><small>{{ message.agentEvents.length }} EVENTS</small></div>
+                <div class="agent-trace-head"><span>Agent 运行轨迹</span><small>{{ agentTraceSummary(message) }}</small></div>
                 <div v-for="(trace, traceIndex) in message.agentEvents" :key="agentTraceKey(trace, traceIndex)" class="agent-trace-row" :class="`agent-trace-row--${trace.status}`">
                   <span class="agent-trace-marker">{{ trace.status === 'done' ? '✓' : trace.status === 'error' ? '!' : '·' }}</span>
                   <button

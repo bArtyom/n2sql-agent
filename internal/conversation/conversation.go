@@ -85,8 +85,26 @@ type SourceReference struct {
 type AgentTrace struct {
 	RunID  string            `json:"run_id,omitempty"`
 	Status string            `json:"status,omitempty"`
+	Stats  *AgentTraceStats  `json:"stats,omitempty"`
 	Steps  []AgentTraceStep  `json:"steps,omitempty"`
 	Events []AgentTraceEvent `json:"events,omitempty"`
+}
+
+// AgentTraceStats is the small, display-safe summary of one Agent run. It is
+// kept next to the trace so a restored conversation can show both the event
+// detail and the run-level result without replaying the model call.
+type AgentTraceStats struct {
+	StepCount           int    `json:"step_count,omitempty"`
+	ModelCalls          int    `json:"model_calls,omitempty"`
+	ToolCalls           int    `json:"tool_calls,omitempty"`
+	SuccessfulToolCalls int    `json:"successful_tool_calls,omitempty"`
+	FailedToolCalls     int    `json:"failed_tool_calls,omitempty"`
+	PromptTokens        int    `json:"prompt_tokens,omitempty"`
+	CompletionTokens    int    `json:"completion_tokens,omitempty"`
+	EmbeddingTokens     int    `json:"embedding_tokens,omitempty"`
+	TotalTokens         int    `json:"total_tokens,omitempty"`
+	DurationMS          int64  `json:"duration_ms,omitempty"`
+	FailureCategory     string `json:"failure_category,omitempty"`
 }
 
 type AgentTraceStep struct {

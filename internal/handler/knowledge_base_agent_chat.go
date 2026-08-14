@@ -402,6 +402,21 @@ func conversationMetadataFromAgentResponse(response agentservice.Response) conve
 	}
 	if response.RunID != "" || len(response.Steps) > 0 || len(response.Trace) > 0 {
 		trace := &conversation.AgentTrace{RunID: response.RunID, Status: string(response.Status)}
+		if response.Stats != nil {
+			trace.Stats = &conversation.AgentTraceStats{
+				StepCount:           response.Stats.StepCount,
+				ModelCalls:          response.Stats.ModelCalls,
+				ToolCalls:           response.Stats.ToolCalls,
+				SuccessfulToolCalls: response.Stats.SuccessfulToolCalls,
+				FailedToolCalls:     response.Stats.FailedToolCalls,
+				PromptTokens:        response.Stats.PromptTokens,
+				CompletionTokens:    response.Stats.CompletionTokens,
+				EmbeddingTokens:     response.Stats.EmbeddingTokens,
+				TotalTokens:         response.Stats.TotalTokens,
+				DurationMS:          response.Stats.DurationMS,
+				FailureCategory:     string(response.Stats.FailureCategory),
+			}
+		}
 		trace.Steps = make([]conversation.AgentTraceStep, 0, len(response.Steps))
 		for _, step := range response.Steps {
 			if len(trace.Steps) >= maxPersistedAgentSteps {
