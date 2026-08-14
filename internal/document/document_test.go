@@ -15,8 +15,11 @@ import (
 type documentStoreStub struct {
 	ensureErr error
 	createErr error
+	deleteErr error
 	input     document.CreateInput
 	documents []document.Document
+	deletedKB int64
+	deletedID int64
 }
 
 func (s *documentStoreStub) EnsureKnowledgeBase(context.Context, int64) error { return s.ensureErr }
@@ -29,6 +32,19 @@ func (s *documentStoreStub) Create(_ context.Context, input document.CreateInput
 		return document.Document{}, s.createErr
 	}
 	return document.Document{ID: 8, KnowledgeBaseID: input.KnowledgeBaseID, OriginalFilename: input.OriginalFilename, ContentType: input.ContentType, SizeBytes: input.SizeBytes, ProcessingStatus: "pending"}, nil
+}
+func (s *documentStoreStub) Delete(_ context.Context, knowledgeBaseID, documentID int64) (string, error) {
+	s.deletedKB, s.deletedID = knowledgeBaseID, documentID
+	if s.deleteErr != nil {
+		return "", s.deleteErr
+	}
+	return "documents/8.txt", nil
+}
+
+type cacheInvalidatorStub struct{ knowledgeBaseIDs []int64 }
+
+func (s *cacheInvalidatorStub) ClearCache(knowledgeBaseID int64) {
+	s.knowledgeBaseIDs = append(s.knowledgeBaseIDs, knowledgeBaseID)
 }
 
 func TestServiceListsDocumentsForKnowledgeBase(t *testing.T) {
@@ -107,5 +123,51 @@ func TestServiceRejectsOversizedFileAndCleansUp(t *testing.T) {
 	})
 	if !errors.Is(err, document.ErrFileTooLarge) {
 		t.Fatalf("Upload() error = %v, want ErrFileTooLarge", err)
+	}
+}
+
+func TestServiceDeletesDatabaseRecordFileAndCache(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "documents"), 0o750); err != nil {
+		t.Fatalf("create document directory: %v", err)
+	}
+	storagePath := filepath.Join(root, "documents", "8.txt")
+	if err := os.WriteFile(storagePath, []byte("hello"), 0o640); err != nil {
+		t.Fatalf("write document: %v", err)
+	}
+	store := &documentStoreStub{}
+	invalidator := &cacheInvalidatorStub{}
+	service := document.NewServiceWithInvalidator(store, document.NewLocalFileStore(root), invalidator)
+
+	if err := service.Delete(context.Background(), 4, 8); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if store.deletedKB != 4 || store.deletedID != 8 {
+		t.Fatalf("delete arguments = %d/%d, want 4/8", store.deletedKB, store.deletedID)
+	}
+	if _, err := os.Stat(storagePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deleted file stat error = %v, want not exist", err)
+	}
+	if len(invalidator.knowledgeBaseIDs) != 1 || invalidator.knowledgeBaseIDs[0] != 4 {
+		t.Fatalf("invalidated knowledge bases = %#v, want [4]", invalidator.knowledgeBaseIDs)
+	}
+}
+
+func TestServiceDoesNotDeleteFileWhenDatabaseDeleteFails(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "documents"), 0o750); err != nil {
+		t.Fatalf("create document directory: %v", err)
+	}
+	storagePath := filepath.Join(root, "documents", "8.txt")
+	if err := os.WriteFile(storagePath, []byte("hello"), 0o640); err != nil {
+		t.Fatalf("write document: %v", err)
+	}
+	service := document.NewService(&documentStoreStub{deleteErr: document.ErrDocumentProcessing}, document.NewLocalFileStore(root))
+
+	if err := service.Delete(context.Background(), 4, 8); !errors.Is(err, document.ErrDocumentProcessing) {
+		t.Fatalf("Delete() error = %v, want ErrDocumentProcessing", err)
+	}
+	if _, err := os.Stat(storagePath); err != nil {
+		t.Fatalf("source file stat error = %v, want file preserved", err)
 	}
 }

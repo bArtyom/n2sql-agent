@@ -47,6 +47,8 @@ curl -X POST http://localhost:8080/api/knowledge-bases/1/documents \
 
 前端工作台会调用 `GET /api/knowledge-bases/{id}/documents` 刷新文档列表和最新处理状态。启动前端后，打开 `http://localhost:5173` 即可完成“创建知识库 → 上传资料 → 查看处理状态 → 流式提问”的操作；问答结果中的引用可以展开查看原始文本片段。
 
+删除文档使用 `DELETE /api/knowledge-bases/{id}/documents/{documentID}`。服务端会确认文档属于当前管理员和指定知识库，删除数据库记录及其处理任务、父子 chunk，并清理该知识库的检索缓存。仍在 `pending` 或 `processing` 状态的文档暂不允许删除，会返回 `409`；原始文件清理失败会记录后端日志，但不会把已删除的文档重新暴露给应用。
+
 工作台左侧底部的“模型服务设置”可以读取和保存 Provider 的服务名称、Base URL、聊天模型、嵌入模型，以及可选的 Rerank Base URL 和 Rerank 模型，并发起连接测试。API Key 不在页面输入，仍只需要写入后端 `.env` 的 `OPENAI_API_KEY`。Rerank 两项同时填写时，混合召回会先扩大候选集，再调用 `qwen3-rerank` 重排；留空则不调用第二个模型。
 
 模型服务配置保存后，可调用 `POST http://localhost:8080/api/model-provider/connection-test` 检查连通性。该请求会从 `.env` 指定的环境变量（默认示例为 `OPENAI_API_KEY`）读取密钥，并向模型服务的 `{baseUrl}/models` 发起认证请求；密钥不会写入 PostgreSQL 或接口响应。

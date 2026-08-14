@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -18,6 +19,9 @@ const MaxFileBytes int64 = 10 << 20
 
 var (
 	ErrKnowledgeBaseNotFound = errors.New("knowledge base not found")
+	ErrDocumentNotFound      = errors.New("document not found")
+	ErrDocumentProcessing    = errors.New("document is still processing")
+	ErrDeleteUnavailable     = errors.New("document deletion is unavailable")
 	ErrUnsupportedFile       = errors.New("unsupported file")
 	ErrFileTooLarge          = errors.New("file is too large")
 )
@@ -42,6 +46,11 @@ type Uploader interface {
 	Upload(context.Context, UploadInput) (Document, error)
 }
 
+// Deleter removes a document and its derived database records.
+type Deleter interface {
+	Delete(context.Context, int64, int64) error
+}
+
 type CreateInput struct {
 	KnowledgeBaseID  int64
 	OriginalFilename string
@@ -56,6 +65,18 @@ type Store interface {
 	Create(context.Context, CreateInput) (Document, error)
 }
 
+// DeleteStore is optional so existing document store implementations remain
+// compatible with the upload/list interfaces.
+type DeleteStore interface {
+	Delete(context.Context, int64, int64) (string, error)
+}
+
+// CacheInvalidator is implemented by retrieval services that cache results
+// per knowledge base. Document deletion must invalidate those results.
+type CacheInvalidator interface {
+	ClearCache(int64)
+}
+
 type Reader interface {
 	List(context.Context, int64) ([]Document, error)
 }
@@ -66,11 +87,16 @@ type FileStore interface {
 }
 
 type Service struct {
-	store Store
-	files FileStore
+	store       Store
+	files       FileStore
+	invalidator CacheInvalidator
 }
 
 func NewService(store Store, files FileStore) *Service { return &Service{store: store, files: files} }
+
+func NewServiceWithInvalidator(store Store, files FileStore, invalidator CacheInvalidator) *Service {
+	return &Service{store: store, files: files, invalidator: invalidator}
+}
 
 func (s *Service) Upload(ctx context.Context, input UploadInput) (Document, error) {
 	if input.KnowledgeBaseID <= 0 {
@@ -117,6 +143,31 @@ func (s *Service) List(ctx context.Context, knowledgeBaseID int64) ([]Document, 
 		return nil, err
 	}
 	return documents, nil
+}
+
+// Delete removes the database record first so PostgreSQL can cascade chunks,
+// parent chunks, and processing tasks atomically. Local file cleanup is then
+// best effort: a failed cleanup is logged, while the document remains deleted
+// from the application and retrieval cache.
+func (s *Service) Delete(ctx context.Context, knowledgeBaseID, documentID int64) error {
+	if knowledgeBaseID <= 0 || documentID <= 0 {
+		return ErrDocumentNotFound
+	}
+	deleteStore, ok := s.store.(DeleteStore)
+	if !ok {
+		return ErrDeleteUnavailable
+	}
+	storagePath, err := deleteStore.Delete(ctx, knowledgeBaseID, documentID)
+	if err != nil {
+		return err
+	}
+	if s.invalidator != nil {
+		s.invalidator.ClearCache(knowledgeBaseID)
+	}
+	if err := s.files.Delete(context.WithoutCancel(ctx), storagePath); err != nil {
+		slog.ErrorContext(ctx, "document_file_cleanup_failed", "document_id", documentID, "knowledge_base_id", knowledgeBaseID, "error", err)
+	}
+	return nil
 }
 
 type LocalFileStore struct{ root string }
@@ -263,6 +314,60 @@ func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Document
 	}
 	document.ProcessingStatus = "pending"
 	return document, nil
+}
+
+// Delete removes only a document owned by the current administrator and
+// refuses to race an active worker task. The task row is locked before the
+// status check, so a concurrent claim cannot change the decision underneath
+// this transaction.
+func (s *PostgresStore) Delete(ctx context.Context, knowledgeBaseID, documentID int64) (string, error) {
+	if knowledgeBaseID <= 0 || documentID <= 0 {
+		return "", ErrDocumentNotFound
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("begin document deletion: %w", err)
+	}
+	defer tx.Rollback()
+
+	var storagePath string
+	err = tx.QueryRowContext(ctx, `
+		SELECT d.storage_path
+		FROM documents AS d
+		JOIN knowledge_bases AS kb ON kb.id = d.knowledge_base_id
+		WHERE d.id = $1
+		  AND d.knowledge_base_id = $2
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
+		FOR UPDATE`, documentID, knowledgeBaseID).Scan(&storagePath)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrDocumentNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("find document for deletion: %w", err)
+	}
+
+	var status string
+	err = tx.QueryRowContext(ctx, `
+		SELECT status
+		FROM document_processing_tasks
+		WHERE document_id = $1
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1
+		FOR UPDATE`, documentID).Scan(&status)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("check document processing status: %w", err)
+	}
+	if status == "pending" || status == "processing" {
+		return "", ErrDocumentProcessing
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE id = $1`, documentID); err != nil {
+		return "", fmt.Errorf("delete document: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("commit document deletion: %w", err)
+	}
+	return storagePath, nil
 }
 
 func extensionForContentType(contentType string) (string, bool) {

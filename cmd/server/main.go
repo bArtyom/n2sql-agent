@@ -47,7 +47,6 @@ func main() {
 	conversationService := conversation.NewService(conversation.NewPostgresStore(db))
 	knowledgeBaseStore := knowledgebase.NewPostgresStore(db)
 	documentStore := document.NewPostgresStore(db)
-	documentService := document.NewService(documentStore, document.NewLocalFileStore(cfg.UploadDir))
 	modelClient := modelclient.NewHTTPClient(&http.Client{Timeout: 10 * time.Second}, cfg.ModelProviderAllowedHosts)
 	embeddingService := modelruntime.NewEmbeddingService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
 	chatService := modelruntime.NewChatService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
@@ -76,6 +75,7 @@ func main() {
 		queryRewriteService,
 		retrieval.CacheConfig{MaxEntries: cfg.RetrievalCacheEntries, TTL: cfg.RetrievalCacheTTL},
 	)
+	documentService := document.NewServiceWithInvalidator(documentStore, document.NewLocalFileStore(cfg.UploadDir), searchService)
 	runner := worker.NewRunnerWithMetricsAndInvalidator(worker.NewPostgresStore(db), processor, metricsRegistry, searchService)
 	answerService := rag.NewService(searchService, chatService)
 	var historySummarizer agentservice.HistorySummarizer

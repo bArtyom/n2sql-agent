@@ -115,6 +115,7 @@ const loading = ref(true);
 const loadingDocuments = ref(false);
 const creatingKnowledgeBase = ref(false);
 const uploading = ref(false);
+const deletingDocumentID = ref<number | null>(null);
 const streaming = ref(false);
 const errorMessage = ref("");
 const mobileRailOpen = ref(false);
@@ -583,6 +584,33 @@ async function uploadFiles(files: File[]) {
     showError(error);
   } finally {
     uploading.value = false;
+  }
+}
+
+async function deleteDocument(item: DocumentItem) {
+  if (!selectedKnowledgeBaseId.value || streaming.value || deletingDocumentID.value !== null) return;
+  if (["pending", "processing"].includes(item.processingStatus)) {
+    errorMessage.value = "文档正在处理，请等待处理完成后再删除。";
+    return;
+  }
+  if (!window.confirm(`删除“${item.originalFilename}”？这会同时删除它的索引和处理记录。`)) return;
+  deletingDocumentID.value = item.id;
+  try {
+    await requestJSON<{ deleted: boolean }>(
+      `/api/knowledge-bases/${selectedKnowledgeBaseId.value}/documents/${item.id}`,
+      { method: "DELETE" },
+    );
+    selectedDocumentIDs.value = selectedDocumentIDs.value.filter((id) => id !== item.id);
+    if (selectedSource.value?.documentId === item.id) closeSource();
+    await refreshDocuments();
+  } catch (error) {
+    if (error instanceof APIError && error.status === 409) {
+      errorMessage.value = "文档正在处理，请稍后再删除。";
+    } else {
+      showError(error);
+    }
+  } finally {
+    deletingDocumentID.value = null;
   }
 }
 
@@ -1142,6 +1170,13 @@ onUnmounted(() => {
               <span class="file-icon">{{ document.contentType === "application/pdf" ? "PDF" : "TXT" }}</span>
               <div class="document-copy"><strong>{{ document.originalFilename }}</strong><span>{{ formatBytes(document.sizeBytes) }} · #{{ document.id }}</span></div>
               <span class="processing-status" :class="`processing-status--${document.processingStatus}`"><i />{{ statusLabel(document.processingStatus) }}</span>
+              <button
+                class="document-delete"
+                type="button"
+                :disabled="streaming || deletingDocumentID !== null || ['pending', 'processing'].includes(document.processingStatus)"
+                :title="['pending', 'processing'].includes(document.processingStatus) ? '文档处理完成后才能删除' : '删除文档'"
+                @click="deleteDocument(document)"
+              >{{ deletingDocumentID === document.id ? "删除中…" : "删除" }}</button>
             </li>
           </ul>
         </div>

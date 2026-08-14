@@ -90,6 +90,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus
 .processing-status i { display: block; width: 5px; height: 5px; background: #b0bdb3; border-radius: 50%; }
 .processing-status--succeeded { color: #51866a; }.processing-status--succeeded i { background: #69a77f; }
 .processing-status--processing i { background: #d18c4b; animation: pulse 1.3s infinite; }.processing-status--failed { color: #a46157; }.processing-status--failed i { background: #be6e63; }
+.document-delete { flex: 0 0 auto; padding: 4px 0; color: #9b7867; background: transparent; border: 0; font-size: 9px; opacity: 0; transition: opacity .2s ease, color .2s ease; }
+.document-row:hover .document-delete, .document-delete:focus-visible { opacity: 1; }
+.document-delete:hover { color: #b05245; }
+.document-delete:disabled { color: #b8c0b9; cursor: not-allowed; }
 .list-loading, .empty-documents { display: grid; min-height: 280px; place-items: center; align-content: center; color: #9aa69e; font-size: 12px; text-align: center; }
 .empty-documents p { max-width: 260px; margin: 8px 0; color: #a0aaa2; font-size: 11px; line-height: 1.7; }
 .empty-glyph { color: #cfdfd1; font-size: 38px; }
