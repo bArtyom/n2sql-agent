@@ -68,13 +68,14 @@ type AgentEvent = {
   toolCallID?: string;
   arguments?: string;
   resultSummary?: string;
+  sourceKeys?: string[];
   status: "running" | "done" | "error";
 };
 type StoredAgentTrace = {
   run_id?: string;
   status?: string;
   steps?: { number?: number; kind?: string; status?: string; tool_name?: string }[];
-  events?: { type?: string; step?: number; tool_call_id?: string; tool_name?: string; arguments?: string; result_summary?: string; status?: string }[];
+  events?: { type?: string; step?: number; tool_call_id?: string; tool_name?: string; arguments?: string; result_summary?: string; source_keys?: string[]; status?: string }[];
 };
 type ChatMode = "agent" | "research" | "a2a";
 type A2ATask = {
@@ -231,12 +232,18 @@ function parseSources(value: unknown): Source[] {
 }
 
 function mergeSources(existing: Source[], incoming: Source[]): Source[] {
-  const merged = new Map(existing.map((source) => [`${source.documentId}-${source.position}`, source]));
+  const merged = new Map(existing.map((source) => [sourceKey(source), source]));
   for (const source of incoming) {
-    const key = `${source.documentId}-${source.position}`;
+    const key = sourceKey(source);
     if (!merged.has(key)) merged.set(key, source);
   }
   return [...merged.values()];
+}
+
+function traceSources(message: ChatMessage, trace: AgentEvent): Source[] {
+  const keys = new Set(trace.sourceKeys ?? []);
+  if (!keys.size) return [];
+  return (message.sources ?? []).filter((source) => keys.has(sourceKey(source)));
 }
 
 function sourcePreview(content: string): string {
@@ -316,7 +323,7 @@ function closeSourceOnEscape(event: KeyboardEvent) {
 }
 
 function sourceKey(source: Source): string {
-  return `${source.documentId}-${source.position}`;
+  return `${source.documentId}:${source.position}`;
 }
 
 function toggleDocument(documentID: number) {
@@ -989,6 +996,9 @@ function restoreAgentEvents(trace?: StoredAgentTrace): AgentEvent[] {
         toolCallID: item.tool_call_id,
         arguments: item.arguments,
         resultSummary: item.result_summary,
+        sourceKeys: Array.isArray(item.source_keys)
+          ? item.source_keys.filter((key): key is string => typeof key === "string").slice(0, 20)
+          : undefined,
         status,
       });
     }
@@ -1025,7 +1035,7 @@ function restoreAgentEvents(trace?: StoredAgentTrace): AgentEvent[] {
   return events;
 }
 
-function finishLastAgentToolEvent(answer: ChatMessage, detail: string, status: AgentEvent["status"] = "done", toolCallID = "") {
+function finishLastAgentToolEvent(answer: ChatMessage, detail: string, status: AgentEvent["status"] = "done", toolCallID = "", sourceKeys: string[] = []) {
   const events = answer.agentEvents ?? [];
   const latest = [...events].reverse().find((item) => item.type === "tool_called"
     && item.status === "running"
@@ -1034,6 +1044,7 @@ function finishLastAgentToolEvent(answer: ChatMessage, detail: string, status: A
     latest.label = "知识库检索完成";
     latest.detail = detail.slice(0, 140);
     latest.resultSummary = detail.slice(0, 140);
+    latest.sourceKeys = sourceKeys.slice(0, 20);
     latest.status = status;
   }
 }
@@ -1150,7 +1161,13 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         if (!researchMode) {
           const sources = parseSources(eventData.sources);
           answer.sources = mergeSources(answer.sources ?? [], sources);
-          finishLastAgentToolEvent(answer, dataString("result_summary") || (eventData.no_relevant_results === true ? "没有找到足够相关资料" : `${sources.length || "已"} 条结果已返回`), "done", dataString("tool_call_id"));
+          finishLastAgentToolEvent(
+            answer,
+            dataString("result_summary") || (eventData.no_relevant_results === true ? "没有找到足够相关资料" : `${sources.length || "已"} 条结果已返回`),
+            "done",
+            dataString("tool_call_id"),
+            sources.map(sourceKey),
+          );
         }
         if (Object.prototype.hasOwnProperty.call(eventData, "sources")) {
           answer.sources = mergeSources(answer.sources ?? [], parseSources(eventData.sources));
@@ -1494,6 +1511,12 @@ onUnmounted(() => {
                     <template v-if="isAgentTraceExpanded(message, trace, traceIndex)">
                       <small v-if="trace.arguments">参数：{{ trace.arguments }}</small>
                       <small v-if="trace.resultSummary && trace.resultSummary !== trace.detail">结果：{{ trace.resultSummary }}</small>
+                      <div v-if="traceSources(message, trace).length" class="agent-trace-sources">
+                        <span>本次引用：</span>
+                        <button v-for="source in traceSources(message, trace)" :key="sourceKey(source)" type="button" @click="openSource(source)">
+                          {{ source.originalFilename || "未命名文档" }} · 第 {{ source.position + 1 }} 段
+                        </button>
+                      </div>
                     </template>
                   </span>
                 </div>

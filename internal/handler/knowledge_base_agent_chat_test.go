@@ -211,7 +211,7 @@ func TestKnowledgeBaseAgentChatPersistsRetrievalMetadata(t *testing.T) {
 		RunID:   "run-history",
 		Status:  agent.RunSucceeded,
 		Steps:   []agent.Step{{Number: 1, Kind: agent.StepToolCall, Status: agent.StepSucceeded, ToolName: "knowledge_search"}},
-		Trace:   []agentservice.TraceEvent{{Type: "tool_call", Step: 1, ToolCallID: "call-1", ToolName: "knowledge_search", Arguments: `{"query":"年假"}`, ResultSummary: "返回 1 条资料", Status: "succeeded"}},
+		Trace:   []agentservice.TraceEvent{{Type: "tool_call", Step: 1, ToolCallID: "call-1", ToolName: "knowledge_search", Arguments: `{"query":"年假"}`, ResultSummary: "返回 1 条资料", SourceKeys: []string{"11:2", "99:8"}, Status: "succeeded"}},
 		Sources: []retrieval.Result{{DocumentID: 11, OriginalFilename: "guide.md", Position: 2, Content: "原始引用", Distance: 0.2, MatchType: "hybrid"}},
 		Stats:   &agent.RunStats{Retrieval: &usage.RetrievalObservation{VectorCandidates: 8, FinalFiltered: 3}},
 	}}
@@ -236,6 +236,9 @@ func TestKnowledgeBaseAgentChatPersistsRetrievalMetadata(t *testing.T) {
 	}
 	if len(store.exchangeMeta.AgentTrace.Events) != 1 || store.exchangeMeta.AgentTrace.Events[0].Arguments != `{"query":"年假"}` || store.exchangeMeta.AgentTrace.Events[0].ResultSummary != "返回 1 条资料" {
 		t.Fatalf("saved agent trace events = %#v, want tool details", store.exchangeMeta.AgentTrace.Events)
+	}
+	if got := store.exchangeMeta.AgentTrace.Events[0].SourceKeys; len(got) != 1 || got[0] != "11:2" {
+		t.Fatalf("saved agent trace source keys = %#v, want [11:2]", got)
 	}
 }
 

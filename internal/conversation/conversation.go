@@ -99,13 +99,14 @@ type AgentTraceStep struct {
 // AgentTraceEvent stores one bounded tool call and its result summary. Raw
 // tool output is deliberately excluded; citations remain in Sources.
 type AgentTraceEvent struct {
-	Type          string `json:"type"`
-	Step          int    `json:"step,omitempty"`
-	ToolCallID    string `json:"tool_call_id,omitempty"`
-	ToolName      string `json:"tool_name,omitempty"`
-	Arguments     string `json:"arguments,omitempty"`
-	ResultSummary string `json:"result_summary,omitempty"`
-	Status        string `json:"status"`
+	Type          string   `json:"type"`
+	Step          int      `json:"step,omitempty"`
+	ToolCallID    string   `json:"tool_call_id,omitempty"`
+	ToolName      string   `json:"tool_name,omitempty"`
+	Arguments     string   `json:"arguments,omitempty"`
+	ResultSummary string   `json:"result_summary,omitempty"`
+	SourceKeys    []string `json:"source_keys,omitempty"`
+	Status        string   `json:"status"`
 }
 
 type Summary struct {

@@ -47,13 +47,17 @@ func (c *sourceCollector) observe(event agent.Event) {
 		if len(c.sources) >= maxResponseSources {
 			return
 		}
-		key := fmt.Sprintf("%d:%d", source.DocumentID, source.Position)
+		key := retrievalSourceKey(source)
 		if _, exists := c.seen[key]; exists {
 			continue
 		}
 		c.seen[key] = struct{}{}
 		c.sources = append(c.sources, source)
 	}
+}
+
+func retrievalSourceKey(source retrieval.Result) string {
+	return fmt.Sprintf("%d:%d", source.DocumentID, source.Position)
 }
 
 func decodeSources(value any) []retrieval.Result {

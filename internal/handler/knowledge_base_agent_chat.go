@@ -425,12 +425,39 @@ func conversationMetadataFromAgentResponse(response agentservice.Response) conve
 				ToolName:      event.ToolName,
 				Arguments:     truncateMetadataValue(event.Arguments),
 				ResultSummary: truncateMetadataValue(event.ResultSummary),
+				SourceKeys:    boundedTraceSourceKeys(event.SourceKeys, response.Sources),
 				Status:        event.Status,
 			})
 		}
 		metadata.AgentTrace = trace
 	}
 	return metadata
+}
+
+func boundedTraceSourceKeys(keys []string, sources []retrieval.Result) []string {
+	if len(keys) == 0 || len(sources) == 0 {
+		return nil
+	}
+	allowed := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		allowed[fmt.Sprintf("%d:%d", source.DocumentID, source.Position)] = struct{}{}
+	}
+	result := make([]string, 0, len(keys))
+	seen := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		if len(result) >= maxPersistedSources {
+			break
+		}
+		if _, ok := allowed[key]; !ok {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, key)
+	}
+	return result
 }
 
 func truncateMetadataValue(value string) string {

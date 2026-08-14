@@ -12,19 +12,21 @@ import (
 const (
 	maxTraceEvents    = 32
 	maxTraceTextBytes = 512
+	maxTraceSources   = 20
 )
 
 // TraceEvent is the bounded, display-safe record of one knowledge tool call.
 // It intentionally stores a parameter preview and a result summary instead of
 // raw tool output or model reasoning text.
 type TraceEvent struct {
-	Type          string `json:"type"`
-	Step          int    `json:"step,omitempty"`
-	ToolCallID    string `json:"tool_call_id,omitempty"`
-	ToolName      string `json:"tool_name,omitempty"`
-	Arguments     string `json:"arguments,omitempty"`
-	ResultSummary string `json:"result_summary,omitempty"`
-	Status        string `json:"status"`
+	Type          string   `json:"type"`
+	Step          int      `json:"step,omitempty"`
+	ToolCallID    string   `json:"tool_call_id,omitempty"`
+	ToolName      string   `json:"tool_name,omitempty"`
+	Arguments     string   `json:"arguments,omitempty"`
+	ResultSummary string   `json:"result_summary,omitempty"`
+	SourceKeys    []string `json:"source_keys,omitempty"`
+	Status        string   `json:"status"`
 }
 
 type traceCollector struct {
@@ -80,6 +82,7 @@ func (c *traceCollector) observe(event agent.Event) {
 		}
 		c.events[index].Status = "succeeded"
 		c.events[index].ResultSummary = boundedTraceText(traceResultSummary(data))
+		c.events[index].SourceKeys = traceSourceKeys(data)
 	case agent.EventRunFailed, agent.EventRunCanceled:
 		for index := len(c.events) - 1; index >= 0; index-- {
 			if c.events[index].Status == "running" {
@@ -89,6 +92,34 @@ func (c *traceCollector) observe(event agent.Event) {
 			}
 		}
 	}
+}
+
+func traceSourceKeys(data map[string]any) []string {
+	sources := decodeSources(data["sources"])
+	if len(sources) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, minTraceSources(len(sources)))
+	seen := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		if len(keys) >= maxTraceSources {
+			break
+		}
+		key := retrievalSourceKey(source)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func minTraceSources(value int) int {
+	if value < maxTraceSources {
+		return value
+	}
+	return maxTraceSources
 }
 
 func (c *traceCollector) find(toolCallID string) int {
