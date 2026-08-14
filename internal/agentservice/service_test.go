@@ -124,6 +124,9 @@ func TestServiceAnswersUsingScopedKnowledgeSearchTool(t *testing.T) {
 	if response.Answer != "年假按照公司制度执行。" || response.Status != agent.RunSucceeded || response.RunID == "" {
 		t.Fatalf("response = %#v", response)
 	}
+	if len(response.Sources) != 1 || response.Sources[0].Content != "年假制度内容" {
+		t.Fatalf("response sources = %#v, want one collected citation", response.Sources)
+	}
 	if response.Stats == nil || response.Stats.ModelCalls != 2 || response.Stats.ToolCalls != 1 || response.Stats.SuccessfulToolCalls != 1 {
 		t.Fatalf("response stats = %#v, want model/tool runtime metrics", response.Stats)
 	}

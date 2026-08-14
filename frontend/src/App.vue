@@ -16,6 +16,7 @@ type Source = {
   originalFilename?: string;
   position: number;
   content: string;
+  contentTruncated?: boolean;
   parentContent?: string;
   parentPosition?: number;
   contextBefore?: { position: number; content: string }[];
@@ -58,6 +59,11 @@ type RetrievalStats = {
 };
 type ResearchEvent = { type: string; round?: number; label: string; detail?: string };
 type AgentEvent = { type: string; step?: number; label: string; detail?: string; status: "running" | "done" | "error" };
+type StoredAgentTrace = {
+  run_id?: string;
+  status?: string;
+  steps?: { number?: number; kind?: string; status?: string; tool_name?: string }[];
+};
 type ChatMode = "agent" | "research" | "a2a";
 type A2ATask = {
   id: string;
@@ -72,7 +78,7 @@ type ConversationMessage = {
   conversationId: number;
   role: "user" | "assistant";
   content: string;
-  metadata?: { query_rewrite?: QueryRewriteStatus; retrieval?: RetrievalStats };
+  metadata?: { query_rewrite?: QueryRewriteStatus; retrieval?: RetrievalStats; sources?: Source[]; agent_trace?: StoredAgentTrace };
   createdAt: string;
 };
 type StreamPayload = {
@@ -450,8 +456,12 @@ async function selectConversation(id: number | null) {
     role: message.role,
     content: message.content,
     status: "done",
+    sources: message.role === "assistant" ? parseSources(message.metadata?.sources) : undefined,
     queryRewrite: message.metadata?.query_rewrite,
     retrieval: message.metadata?.retrieval,
+    agentEvents: message.role === "assistant" ? restoreAgentEvents(message.metadata?.agent_trace) : undefined,
+    runID: message.metadata?.agent_trace?.run_id,
+    mode: message.role === "assistant" ? "agent" : undefined,
   }));
 }
 
@@ -892,6 +902,31 @@ function recordAgentEvent(answer: ChatMessage, type: string, label: string, deta
   if (answer.agentEvents.length > 12) answer.agentEvents.shift();
 }
 
+function restoreAgentEvents(trace?: StoredAgentTrace): AgentEvent[] {
+  if (!trace || !Array.isArray(trace.steps) || trace.steps.length === 0) return [];
+  const events: AgentEvent[] = [{ type: "run_started", label: "Agent 开始运行", detail: "从历史记录恢复", status: "done" }];
+  for (const step of trace.steps.slice(0, 32)) {
+    if (!step || typeof step !== "object") continue;
+    const kind = typeof step.kind === "string" ? step.kind : "step";
+    const status = step.status === "failed" ? "error" : step.status === "running" || step.status === "pending" ? "running" : "done";
+    const label = kind === "tool_call"
+      ? "调用知识库工具"
+      : kind === "final_answer"
+        ? "生成最终答案"
+        : "模型决策";
+    const detail = typeof step.tool_name === "string" && step.tool_name ? step.tool_name : "历史运行步骤";
+    events.push({ type: kind, step: step.number, label, detail, status });
+  }
+  const terminalStatus = trace.status === "failed" || trace.status === "canceled" ? "error" : "done";
+  events.push({
+    type: trace.status === "canceled" ? "run_canceled" : trace.status === "failed" ? "run_failed" : "run_finished",
+    label: trace.status === "canceled" ? "Agent 已取消" : trace.status === "failed" ? "Agent 运行失败" : "Agent 完成",
+    detail: "历史运行记录",
+    status: terminalStatus,
+  });
+  return events;
+}
+
 function finishLastAgentToolEvent(answer: ChatMessage, detail: string, status: AgentEvent["status"] = "done") {
   const events = answer.agentEvents ?? [];
   const latest = [...events].reverse().find((item) => item.type === "tool_called" && item.status === "running");
@@ -1045,6 +1080,19 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         if (replayed && typeof replayed === "object") {
           const replayedAnswer = replayed as Record<string, unknown>;
           answer.content = typeof replayedAnswer.answer === "string" ? replayedAnswer.answer : answer.content;
+          answer.sources = mergeSources(answer.sources ?? [], parseSources(replayedAnswer.sources));
+          answer.runID = typeof replayedAnswer.run_id === "string" ? replayedAnswer.run_id : answer.runID;
+          const replayedStats = replayedAnswer.stats;
+          if (replayedStats && typeof replayedStats === "object") {
+            const stats = replayedStats as Record<string, unknown>;
+            if (stats.query_rewrite && typeof stats.query_rewrite === "object") answer.queryRewrite = stats.query_rewrite as QueryRewriteStatus;
+            if (stats.retrieval && typeof stats.retrieval === "object") answer.retrieval = stats.retrieval as RetrievalStats;
+          }
+          answer.agentEvents = restoreAgentEvents({
+            run_id: answer.runID,
+            status: typeof replayedAnswer.status === "string" ? replayedAnswer.status : "succeeded",
+            steps: Array.isArray(replayedAnswer.steps) ? replayedAnswer.steps as StoredAgentTrace["steps"] : [],
+          });
         }
         answer.activity = "已恢复之前的回答";
         answer.status = "done";
@@ -1419,7 +1467,7 @@ onUnmounted(() => {
           <strong>{{ selectedSource.originalFilename || "未命名文档" }}</strong>
           <span>第 {{ selectedSource.position + 1 }} 段 · {{ matchTypeLabel(selectedSource.matchType) }} · {{ sourceScoreLabel(selectedSource) }}</span>
         </div>
-        <div class="source-panel-content"><p>{{ sourceDisplayContent(selectedSource) }}</p></div>
+        <div class="source-panel-content"><p>{{ sourceDisplayContent(selectedSource) }}</p><small v-if="selectedSource.contentTruncated">历史记录只保存了引用片段预览，原文已被截断。</small></div>
         <div class="source-panel-actions"><button class="source-copy-button" type="button" @click="copySource(selectedSource)">{{ copiedSourceKey === sourceKey(selectedSource) ? "已复制原文" : "复制原文" }}</button></div>
         <p class="source-panel-note">这段内容来自知识库检索结果，仅作为回答依据展示，不会被当作操作指令执行。</p>
       </aside>

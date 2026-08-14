@@ -50,12 +50,49 @@ type Message struct {
 	CreatedAt      time.Time        `json:"createdAt"`
 }
 
-// MessageMetadata contains bounded, non-content execution information that
-// helps the UI explain how an assistant answer was produced. It is optional so
-// old messages and user messages remain small and source-compatible.
+// MessageMetadata contains bounded execution information and source snapshots
+// that help the UI restore how an assistant answer was produced. It is
+// optional so old messages and user messages remain source-compatible.
 type MessageMetadata struct {
 	QueryRewrite *usage.QueryRewriteObservation `json:"query_rewrite,omitempty"`
 	Retrieval    *usage.RetrievalObservation    `json:"retrieval,omitempty"`
+	Sources      []SourceReference              `json:"sources,omitempty"`
+	AgentTrace   *AgentTrace                    `json:"agent_trace,omitempty"`
+}
+
+// SourceReference is a bounded citation snapshot. The document and position
+// identify the original chunk; Content is intentionally capped by the caller
+// so reopening a conversation does not turn the messages table into a second
+// copy of the document corpus.
+type SourceReference struct {
+	DocumentID       int64   `json:"documentId"`
+	OriginalFilename string  `json:"originalFilename,omitempty"`
+	Position         int     `json:"position"`
+	Content          string  `json:"content"`
+	ContentTruncated bool    `json:"contentTruncated,omitempty"`
+	ParentContent    string  `json:"parentContent,omitempty"`
+	ParentPosition   int     `json:"parentPosition,omitempty"`
+	Distance         float64 `json:"distance"`
+	MatchType        string  `json:"matchType,omitempty"`
+	KeywordScore     float64 `json:"keywordScore,omitempty"`
+	FusionScore      float64 `json:"fusionScore,omitempty"`
+	RerankScore      float64 `json:"rerankScore,omitempty"`
+}
+
+// AgentTrace is the small, display-safe part of an Agent run that we restore
+// in the conversation UI. It deliberately excludes model reasoning text and
+// raw tool payloads.
+type AgentTrace struct {
+	RunID  string           `json:"run_id,omitempty"`
+	Status string           `json:"status,omitempty"`
+	Steps  []AgentTraceStep `json:"steps,omitempty"`
+}
+
+type AgentTraceStep struct {
+	Number   int    `json:"number"`
+	Kind     string `json:"kind"`
+	Status   string `json:"status"`
+	ToolName string `json:"tool_name,omitempty"`
 }
 
 type Summary struct {

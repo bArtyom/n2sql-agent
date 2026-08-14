@@ -349,15 +349,83 @@ func saveConversationExchange(ctx context.Context, conversations *conversation.S
 	if request.ConversationID == 0 || conversations == nil {
 		return nil
 	}
+	metadata := conversationMetadataFromAgentResponse(response)
+	if err := conversations.SaveExchangeWithMetadata(ctx, request.ConversationID, request.Message, response.Answer, metadata); err != nil {
+		return fmt.Errorf("save conversation exchange: %w", err)
+	}
+	return nil
+}
+
+const (
+	persistedSourceContentBytes = 2048
+	maxPersistedSources         = 20
+	maxPersistedAgentSteps      = 32
+)
+
+func conversationMetadataFromAgentResponse(response agentservice.Response) conversation.MessageMetadata {
 	metadata := conversation.MessageMetadata{}
 	if response.Stats != nil {
 		metadata.QueryRewrite = response.Stats.QueryRewrite
 		metadata.Retrieval = response.Stats.Retrieval
 	}
-	if err := conversations.SaveExchangeWithMetadata(ctx, request.ConversationID, request.Message, response.Answer, metadata); err != nil {
-		return fmt.Errorf("save conversation exchange: %w", err)
+	if len(response.Sources) > 0 {
+		metadata.Sources = make([]conversation.SourceReference, 0, len(response.Sources))
+		seen := make(map[string]struct{}, len(response.Sources))
+		for _, source := range response.Sources {
+			if len(metadata.Sources) >= maxPersistedSources {
+				break
+			}
+			key := fmt.Sprintf("%d:%d", source.DocumentID, source.Position)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			content, contentTruncated := truncateMetadataText(source.Content, persistedSourceContentBytes)
+			parentContent, _ := truncateMetadataText(source.ParentContent, persistedSourceContentBytes)
+			metadata.Sources = append(metadata.Sources, conversation.SourceReference{
+				DocumentID:       source.DocumentID,
+				OriginalFilename: source.OriginalFilename,
+				Position:         source.Position,
+				Content:          content,
+				ContentTruncated: contentTruncated,
+				ParentContent:    parentContent,
+				ParentPosition:   source.ParentPosition,
+				Distance:         source.Distance,
+				MatchType:        source.MatchType,
+				KeywordScore:     source.KeywordScore,
+				FusionScore:      source.FusionScore,
+				RerankScore:      source.RerankScore,
+			})
+		}
 	}
-	return nil
+	if response.RunID != "" || len(response.Steps) > 0 {
+		trace := &conversation.AgentTrace{RunID: response.RunID, Status: string(response.Status)}
+		trace.Steps = make([]conversation.AgentTraceStep, 0, len(response.Steps))
+		for _, step := range response.Steps {
+			if len(trace.Steps) >= maxPersistedAgentSteps {
+				break
+			}
+			trace.Steps = append(trace.Steps, conversation.AgentTraceStep{
+				Number:   step.Number,
+				Kind:     string(step.Kind),
+				Status:   string(step.Status),
+				ToolName: step.ToolName,
+			})
+		}
+		metadata.AgentTrace = trace
+	}
+	return metadata
+}
+
+func truncateMetadataText(value string, maxBytes int) (string, bool) {
+	if maxBytes <= 0 || len(value) <= maxBytes {
+		return value, false
+	}
+	runes := []rune(value)
+	for len(runes) > 0 && len(string(runes)) > maxBytes {
+		runes = runes[:len(runes)-1]
+	}
+	return string(runes), true
 }
 
 func saveConversationSummary(ctx context.Context, conversations *conversation.Service, knowledgeBaseID int64, request agentservice.ChatRequest, response agentservice.Response) error {

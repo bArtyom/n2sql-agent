@@ -13,6 +13,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/handler"
 	"github.com/bArtyom/n2sql-agent/internal/metrics"
+	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
@@ -206,8 +207,12 @@ func TestKnowledgeBaseAgentChatReplaysIdempotentResponse(t *testing.T) {
 func TestKnowledgeBaseAgentChatPersistsRetrievalMetadata(t *testing.T) {
 	store := &conversationStoreStub{records: []conversation.Conversation{{ID: 9, KnowledgeBaseID: 7}}}
 	answerer := &agentAnswererStub{response: agentservice.Response{
-		Answer: "答案",
-		Stats:  &agent.RunStats{Retrieval: &usage.RetrievalObservation{VectorCandidates: 8, FinalFiltered: 3}},
+		Answer:  "答案",
+		RunID:   "run-history",
+		Status:  agent.RunSucceeded,
+		Steps:   []agent.Step{{Number: 1, Kind: agent.StepToolCall, Status: agent.StepSucceeded, ToolName: "knowledge_search"}},
+		Sources: []retrieval.Result{{DocumentID: 11, OriginalFilename: "guide.md", Position: 2, Content: "原始引用", Distance: 0.2, MatchType: "hybrid"}},
+		Stats:   &agent.RunStats{Retrieval: &usage.RetrievalObservation{VectorCandidates: 8, FinalFiltered: 3}},
 	}}
 	endpoint := handler.NewKnowledgeBaseAgentChatWithConversation(answerer, conversation.NewService(store), 64*1024)
 	response := httptest.NewRecorder()
@@ -221,6 +226,12 @@ func TestKnowledgeBaseAgentChatPersistsRetrievalMetadata(t *testing.T) {
 	}
 	if store.exchangeMeta.Retrieval == nil || store.exchangeMeta.Retrieval.VectorCandidates != 8 || store.exchangeMeta.Retrieval.FinalFiltered != 3 {
 		t.Fatalf("saved exchange metadata = %#v, want retrieval stats", store.exchangeMeta)
+	}
+	if len(store.exchangeMeta.Sources) != 1 || store.exchangeMeta.Sources[0].DocumentID != 11 || store.exchangeMeta.Sources[0].Content != "原始引用" {
+		t.Fatalf("saved sources = %#v, want bounded citation reference", store.exchangeMeta.Sources)
+	}
+	if store.exchangeMeta.AgentTrace == nil || store.exchangeMeta.AgentTrace.RunID != "run-history" || len(store.exchangeMeta.AgentTrace.Steps) != 1 {
+		t.Fatalf("saved agent trace = %#v, want one step", store.exchangeMeta.AgentTrace)
 	}
 }
 

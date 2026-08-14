@@ -42,6 +42,7 @@ type Response struct {
 	RunID          string               `json:"run_id"`
 	Status         agent.RunStatus      `json:"status"`
 	Steps          []agent.Step         `json:"steps"`
+	Sources        []retrieval.Result   `json:"sources,omitempty"`
 	Stats          *agent.RunStats      `json:"stats,omitempty"`
 	HistorySummary *HistorySummaryStats `json:"history_summary,omitempty"`
 }
@@ -162,13 +163,15 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	}
 	messages = append(messages, history...)
 	messages = append(messages, modelclient.ChatMessage{Role: "user", Content: request.Message})
+	collector := newSourceCollector()
+	eventSink := collector.Sink(withHistorySummaryStats(sink, historySummaryStats))
 	var result agentruntime.Result
-	if sink == nil {
-		result, err = engine.Run(runContext, runID, messages)
-	} else {
-		result, err = engine.RunWithEvents(runContext, runID, messages, withHistorySummaryStats(sink, historySummaryStats))
-	}
+	// Use the same internal event path for non-streaming and streaming calls.
+	// A nil external sink still means callers do not receive lifecycle events;
+	// the collector only extracts bounded citation data for the response.
+	result, err = engine.RunWithEvents(runContext, runID, messages, eventSink)
 	response := responseFromRun(result, historySummaryStats)
+	response.Sources = collector.Sources()
 	if err != nil {
 		return response, fmt.Errorf("run agent answer: %w", err)
 	}
