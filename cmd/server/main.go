@@ -84,7 +84,7 @@ func main() {
 	if cfg.AgentHistorySummaryEnabled {
 		historySummarizer = agentservice.NewModelHistorySummarizerWithTimeout(chatService, cfg.AgentHistorySummaryTimeout)
 	}
-	agentAnswerService, err := agentservice.NewServiceWithLimitsAndSummarizer(
+	agentAnswerService, err := agentservice.NewServiceWithLimitsAndSummarizerAndDocuments(
 		chatService,
 		searchService,
 		cfg.AgentMaxSteps,
@@ -93,6 +93,7 @@ func main() {
 		cfg.AgentMaxHistoryMessages,
 		cfg.AgentMaxHistoryBytes,
 		historySummarizer,
+		documentService,
 	)
 	if err != nil {
 		log.Fatal(err)

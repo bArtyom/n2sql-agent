@@ -209,13 +209,13 @@ func (t *KnowledgeSearchTool) Call(ctx context.Context, raw json.RawMessage) (To
 			Query string `json:"query"`
 			Limit int    `json:"limit,omitempty"`
 		}
-		if err := decodeKnowledgeSearchArguments(raw, &scopedInput); err != nil {
+		if err := decodeToolArguments(raw, &scopedInput); err != nil {
 			return ToolResult{}, fmt.Errorf("%w: decode arguments: %v", ErrInvalidKnowledgeSearchInput, err)
 		}
 		input.KnowledgeBaseID = t.knowledgeBaseID
 		input.Query = scopedInput.Query
 		input.Limit = scopedInput.Limit
-	} else if err := decodeKnowledgeSearchArguments(raw, &input); err != nil {
+	} else if err := decodeToolArguments(raw, &input); err != nil {
 		return ToolResult{}, fmt.Errorf("%w: decode arguments: %v", ErrInvalidKnowledgeSearchInput, err)
 	}
 	input.Query = strings.TrimSpace(input.Query)
@@ -352,7 +352,7 @@ func appendSearchResult(results []retrieval.Result, result retrieval.Result) []r
 	return append(copyOfResults, result)
 }
 
-func decodeKnowledgeSearchArguments(raw json.RawMessage, destination any) error {
+func decodeToolArguments(raw json.RawMessage, destination any) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
