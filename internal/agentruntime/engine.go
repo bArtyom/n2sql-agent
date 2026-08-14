@@ -389,13 +389,36 @@ func finishErrorWithEvents(result Result, err error, emitter *eventEmitter) (Res
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		eventType = agent.EventRunCanceled
 	}
+	stats := result.Run.Stats()
 	if emitErr := emitter.emit(eventType, len(result.Run.Steps()), map[string]any{
-		"error": err.Error(),
-		"stats": result.Run.Stats(),
+		// The returned error is kept for server-side diagnostics, but it can
+		// contain provider or database details. SSE is a public boundary, so
+		// expose only a fixed message selected from the run category.
+		"error": safeFailureMessage(stats.FailureCategory),
+		"stats": stats,
 	}); emitErr != nil {
 		return result, errors.Join(finishErr, emitErr)
 	}
 	return result, finishErr
+}
+
+func safeFailureMessage(category agent.FailureCategory) string {
+	switch category {
+	case agent.FailureTool:
+		return "知识库工具暂时不可用，无法可靠回答。"
+	case agent.FailureModel:
+		return "模型服务暂时不可用，请稍后重试。"
+	case agent.FailureTimeout:
+		return "请求处理超时，请稍后重试。"
+	case agent.FailureCanceled:
+		return "请求已取消。"
+	case agent.FailureStepLimit:
+		return "本次处理步骤过多，已安全停止。"
+	case agent.FailureValidation:
+		return "回答结果无法验证，已安全停止。"
+	default:
+		return "Agent 执行失败，请稍后重试。"
+	}
 }
 
 func finishError(result Result, err error) (Result, error) {

@@ -3,6 +3,7 @@ package agentruntime_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
@@ -151,6 +152,13 @@ func TestEngineRunWithEventsEmitsFailureAndCancellation(t *testing.T) {
 		t.Fatalf("RunWithEvents() error = %v, want tool error", err)
 	}
 	assertEventTypes(t, toolFailureEvents, agent.EventRunStarted, agent.EventToolCalled, agent.EventRunFailed)
+	toolFailureData, ok := toolFailureEvents[len(toolFailureEvents)-1].Data.(map[string]any)
+	if !ok || toolFailureData["error"] != "知识库工具暂时不可用，无法可靠回答。" {
+		t.Fatalf("tool failure event data = %#v, want safe public error", toolFailureEvents[len(toolFailureEvents)-1].Data)
+	}
+	if strings.Contains(toolFailureData["error"].(string), toolErr.Error()) {
+		t.Fatalf("tool failure event leaked internal error: %#v", toolFailureData)
+	}
 
 	modelErr := errors.New("model unavailable")
 	modelEngine, err := agentruntime.NewEngine(chatStub{call: func(context.Context, []modelclient.ChatMessage, []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
@@ -170,6 +178,10 @@ func TestEngineRunWithEventsEmitsFailureAndCancellation(t *testing.T) {
 	assertEventTypes(t, modelFailureEvents, agent.EventRunStarted, agent.EventRunFailed)
 	if got := modelResult.Run.Stats().FailureCategory; got != agent.FailureModel {
 		t.Fatalf("model failure category = %q, want %q", got, agent.FailureModel)
+	}
+	modelFailureData, ok := modelFailureEvents[len(modelFailureEvents)-1].Data.(map[string]any)
+	if !ok || modelFailureData["error"] != "模型服务暂时不可用，请稍后重试。" {
+		t.Fatalf("model failure event data = %#v, want safe public error", modelFailureEvents[len(modelFailureEvents)-1].Data)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
