@@ -108,6 +108,7 @@ const documents = ref<DocumentItem[]>([]);
 const messages = ref<ChatMessage[]>([]);
 const conversations = ref<Conversation[]>([]);
 const conversationId = ref<number | null>(null);
+const retrievalDetailsOpen = ref(new Set<number>());
 const question = ref("");
 const newKnowledgeBaseName = ref("");
 const newKnowledgeBaseDescription = ref("");
@@ -237,6 +238,17 @@ function sourceScoreLabel(source: Source): string {
 
 function renderCompletedAnswer(message: ChatMessage): string {
   return renderAnswerMarkdown(message.content);
+}
+
+function toggleRetrievalDetails(messageIndex: number) {
+  const next = new Set(retrievalDetailsOpen.value);
+  if (next.has(messageIndex)) next.delete(messageIndex);
+  else next.add(messageIndex);
+  retrievalDetailsOpen.value = next;
+}
+
+function isRetrievalDetailsOpen(messageIndex: number): boolean {
+  return retrievalDetailsOpen.value.has(messageIndex);
 }
 
 function openSource(source: Source) {
@@ -421,6 +433,7 @@ async function loadConversation() {
 
 async function selectConversation(id: number | null) {
   conversationId.value = id;
+  retrievalDetailsOpen.value = new Set();
   messages.value = [];
   if (!id || !selectedKnowledgeBaseId.value) return;
   const stored = await requestJSON<ConversationMessage[]>(
@@ -1300,13 +1313,31 @@ onUnmounted(() => {
                 <span v-else-if="message.queryRewrite.applied">已使用 {{ message.queryRewrite.variant_count }} 个改写查询扩大召回</span>
                 <span v-else>已启用多查询改写，本次使用原问题检索</span>
               </div>
-              <div v-if="message.role === 'assistant' && message.retrieval" class="retrieval-stats" aria-label="检索统计">
-                <span>向量 {{ message.retrieval.vector_candidates }}</span>
-                <span>关键词 {{ message.retrieval.keyword_candidates }}→{{ message.retrieval.keyword_after_threshold }}</span>
-                <span>去重 {{ message.retrieval.deduplicated_candidates }}</span>
-                <span v-if="message.retrieval.rerank_before">重排 {{ message.retrieval.rerank_before }}→{{ message.retrieval.rerank_after }}</span>
-                <span>最终 {{ message.retrieval.final_filtered || message.retrieval.final_results }}</span>
-                <span v-if="message.retrieval.rerank_fallback">Rerank 已降级</span>
+              <div v-if="message.role === 'assistant' && message.retrieval" class="retrieval-inspector">
+                <div class="retrieval-stats" aria-label="检索统计">
+                  <span>向量 {{ message.retrieval.vector_candidates }}</span>
+                  <span>关键词 {{ message.retrieval.keyword_candidates }}→{{ message.retrieval.keyword_after_threshold }}</span>
+                  <span>去重 {{ message.retrieval.deduplicated_candidates }}</span>
+                  <span v-if="message.retrieval.rerank_before">重排 {{ message.retrieval.rerank_before }}→{{ message.retrieval.rerank_after }}</span>
+                  <span>最终 {{ message.retrieval.final_filtered || message.retrieval.final_results }}</span>
+                  <span v-if="message.retrieval.rerank_fallback">Rerank 已降级</span>
+                  <button class="retrieval-details-toggle" type="button" @click="toggleRetrievalDetails(index)">{{ isRetrievalDetailsOpen(index) ? "收起详情" : "检索详情" }}</button>
+                </div>
+                <div v-if="isRetrievalDetailsOpen(index)" class="retrieval-details">
+                  <div class="retrieval-detail-grid">
+                    <div><span>向量召回</span><strong>{{ message.retrieval.vector_candidates }}</strong></div>
+                    <div><span>关键词召回</span><strong>{{ message.retrieval.keyword_candidates }}</strong></div>
+                    <div><span>关键词过阈值</span><strong>{{ message.retrieval.keyword_after_threshold }}</strong></div>
+                    <div><span>关键词被过滤</span><strong>{{ message.retrieval.keyword_rejected }}</strong></div>
+                    <div><span>去重后候选</span><strong>{{ message.retrieval.deduplicated_candidates }}</strong></div>
+                    <div><span>Rerank 前</span><strong>{{ message.retrieval.rerank_before || "未执行" }}</strong></div>
+                    <div><span>Rerank 后</span><strong>{{ message.retrieval.rerank_after || "未执行" }}</strong></div>
+                    <div><span>距离过滤后</span><strong>{{ message.retrieval.final_filtered }}</strong></div>
+                  </div>
+                  <p v-if="message.retrieval.rerank_fallback">Rerank 服务本轮失败，系统保留了混合召回结果继续回答。</p>
+                  <p v-else-if="!message.retrieval.rerank_before">本轮未配置 Rerank，直接使用混合召回结果。</p>
+                  <p v-else>最终回答只使用通过相似度距离阈值的片段。</p>
+                </div>
               </div>
               <div v-if="message.role === 'assistant' && message.content && message.status !== 'streaming'" class="message-actions">
                 <button type="button" @click="copyAnswer(message, index)">{{ copiedMessageIndex === index ? "已复制回答" : "复制回答" }}</button>
