@@ -114,6 +114,7 @@ const newKnowledgeBaseDescription = ref("");
 const loading = ref(true);
 const loadingDocuments = ref(false);
 const creatingKnowledgeBase = ref(false);
+const deletingKnowledgeBase = ref(false);
 const uploading = ref(false);
 const deletingDocumentID = ref<number | null>(null);
 const streaming = ref(false);
@@ -543,6 +544,32 @@ async function createKnowledgeBase() {
     showError(error);
   } finally {
     creatingKnowledgeBase.value = false;
+  }
+}
+
+async function deleteKnowledgeBase() {
+  if (!selectedKnowledgeBase.value || streaming.value || deletingKnowledgeBase.value) return;
+  const target = selectedKnowledgeBase.value;
+  if (!window.confirm(`删除“${target.name}”？其中的文档、索引、任务和会话都会被删除。`)) return;
+  deletingKnowledgeBase.value = true;
+  try {
+    await requestJSON<void>(`/api/knowledge-bases/${target.id}`, { method: "DELETE" });
+    selectedDocumentIDs.value = [];
+    closeSource();
+    messages.value = [];
+    conversations.value = [];
+    conversationId.value = null;
+    documents.value = [];
+    await loadKnowledgeBases();
+    await loadConversation();
+  } catch (error) {
+    if (error instanceof APIError && error.status === 409) {
+      errorMessage.value = "知识库中还有正在处理的文档，请稍后再删除。";
+    } else {
+      showError(error);
+    }
+  } finally {
+    deletingKnowledgeBase.value = false;
   }
 }
 
@@ -1123,7 +1150,8 @@ onUnmounted(() => {
           <span>工作台</span><span class="breadcrumb-slash">/</span><strong>{{ selectedKnowledgeBase?.name || "选择知识库" }}</strong>
         </div>
         <div class="header-actions">
-          <button class="quiet-button" :disabled="loadingDocuments" @click="refreshDocuments">↻ 刷新</button>
+          <button class="quiet-button" :disabled="loadingDocuments || deletingKnowledgeBase" @click="refreshDocuments">↻ 刷新</button>
+          <button v-if="selectedKnowledgeBase" class="danger-button" :disabled="streaming || deletingKnowledgeBase" @click="deleteKnowledgeBase">{{ deletingKnowledgeBase ? "删除中…" : "删除资料库" }}</button>
           <span class="header-status"><span class="live-dot" /> 系统就绪</span>
         </div>
       </header>

@@ -75,7 +75,9 @@ func main() {
 		queryRewriteService,
 		retrieval.CacheConfig{MaxEntries: cfg.RetrievalCacheEntries, TTL: cfg.RetrievalCacheTTL},
 	)
-	documentService := document.NewServiceWithInvalidator(documentStore, document.NewLocalFileStore(cfg.UploadDir), searchService)
+	fileStore := document.NewLocalFileStore(cfg.UploadDir)
+	documentService := document.NewServiceWithInvalidator(documentStore, fileStore, searchService)
+	knowledgeBaseService := knowledgebase.NewServiceWithInvalidator(knowledgeBaseStore, fileStore, searchService)
 	runner := worker.NewRunnerWithMetricsAndInvalidator(worker.NewPostgresStore(db), processor, metricsRegistry, searchService)
 	answerService := rag.NewService(searchService, chatService)
 	var historySummarizer agentservice.HistorySummarizer
@@ -112,7 +114,7 @@ func main() {
 		Addr: cfg.Address,
 		Handler: app.New(app.Dependencies{
 			Providers:                  providerStore,
-			KnowledgeBases:             knowledgeBaseStore,
+			KnowledgeBases:             knowledgeBaseService,
 			Documents:                  documentService,
 			ConnectionChecker:          modelClient,
 			Embeddings:                 embeddingService,
@@ -130,7 +132,7 @@ func main() {
 			A2ATaskTimeout:             cfg.AgentTimeout,
 			MCPKnowledgeSearch:         searchService,
 			MCPDocuments:               documentService,
-			MCPKnowledgeBases:          knowledgeBaseStore,
+			MCPKnowledgeBases:          knowledgeBaseService,
 			Conversations:              conversationService,
 			AgentMaxToolResultBytes:    cfg.AgentMaxToolResultBytes,
 			AgentMaxHistoryBytes:       cfg.AgentMaxHistoryBytes,

@@ -85,6 +85,8 @@ func deleteKnowledgeBase(w http.ResponseWriter, r *http.Request, store knowledge
 	}
 	if err := store.Delete(r.Context(), id); errors.Is(err, knowledgebase.ErrNotFound) {
 		http.Error(w, `{"error":"knowledge base not found"}`, http.StatusNotFound)
+	} else if errors.Is(err, knowledgebase.ErrProcessing) {
+		http.Error(w, `{"error":"knowledge base has documents in processing"}`, http.StatusConflict)
 	} else if err != nil {
 		http.Error(w, `{"error":"unable to delete knowledge base"}`, http.StatusInternalServerError)
 	} else {

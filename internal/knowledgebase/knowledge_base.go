@@ -10,8 +10,9 @@ import (
 )
 
 var (
-	ErrNotFound = errors.New("knowledge base not found")
-	ErrConflict = errors.New("knowledge base already exists")
+	ErrNotFound   = errors.New("knowledge base not found")
+	ErrConflict   = errors.New("knowledge base already exists")
+	ErrProcessing = errors.New("knowledge base has documents in processing")
 )
 
 type KnowledgeBase struct {
@@ -29,6 +30,12 @@ type Store interface {
 	Create(context.Context, CreateInput) (KnowledgeBase, error)
 	List(context.Context) ([]KnowledgeBase, error)
 	Delete(context.Context, int64) error
+}
+
+// FileDeleteStore is an optional extension used by the lifecycle service to
+// collect source files before deleting the database record.
+type FileDeleteStore interface {
+	DeleteWithFiles(context.Context, int64) ([]string, error)
 }
 
 type PostgresStore struct{ db *sql.DB }
@@ -96,4 +103,104 @@ func (s *PostgresStore) Delete(ctx context.Context, id int64) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// DeleteWithFiles removes one administrator-owned knowledge base and returns
+// its source paths for cleanup outside the database transaction. Active
+// document tasks are rejected so a Worker cannot race this destructive action.
+func (s *PostgresStore) DeleteWithFiles(ctx context.Context, id int64) ([]string, error) {
+	if id <= 0 {
+		return nil, ErrNotFound
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin knowledge base deletion: %w", err)
+	}
+	defer tx.Rollback()
+
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM knowledge_bases
+			WHERE id = $1
+			  AND administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
+		)
+	`, id).Scan(&exists); err != nil {
+		return nil, fmt.Errorf("check knowledge base for deletion: %w", err)
+	}
+	if !exists {
+		return nil, ErrNotFound
+	}
+
+	pathsRows, err := tx.QueryContext(ctx, `
+		SELECT d.storage_path
+		FROM documents AS d
+		WHERE d.knowledge_base_id = $1
+		ORDER BY d.id
+		FOR UPDATE`, id)
+	if err != nil {
+		return nil, fmt.Errorf("find knowledge base source files: %w", err)
+	}
+	paths := make([]string, 0)
+	for pathsRows.Next() {
+		var path string
+		if err := pathsRows.Scan(&path); err != nil {
+			pathsRows.Close()
+			return nil, fmt.Errorf("scan knowledge base source file: %w", err)
+		}
+		paths = append(paths, path)
+	}
+	if err := pathsRows.Err(); err != nil {
+		pathsRows.Close()
+		return nil, fmt.Errorf("iterate knowledge base source files: %w", err)
+	}
+	pathsRows.Close()
+
+	taskRows, err := tx.QueryContext(ctx, `
+		SELECT task.id
+		FROM document_processing_tasks AS task
+		JOIN documents AS d ON d.id = task.document_id
+		WHERE d.knowledge_base_id = $1
+		  AND task.status IN ('pending', 'processing')
+		FOR UPDATE`, id)
+	if err != nil {
+		return nil, fmt.Errorf("check knowledge base processing tasks: %w", err)
+	}
+	activeTaskCount := 0
+	for taskRows.Next() {
+		var taskID int64
+		if err := taskRows.Scan(&taskID); err != nil {
+			taskRows.Close()
+			return nil, fmt.Errorf("scan knowledge base processing task: %w", err)
+		}
+		activeTaskCount++
+	}
+	if err := taskRows.Err(); err != nil {
+		taskRows.Close()
+		return nil, fmt.Errorf("iterate knowledge base processing tasks: %w", err)
+	}
+	taskRows.Close()
+	if activeTaskCount > 0 {
+		return nil, ErrProcessing
+	}
+
+	result, err := tx.ExecContext(ctx, `
+		DELETE FROM knowledge_bases
+		WHERE id = $1
+		  AND administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, id)
+	if err != nil {
+		return nil, fmt.Errorf("delete knowledge base: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("count deleted knowledge bases: %w", err)
+	}
+	if affected == 0 {
+		return nil, ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit knowledge base deletion: %w", err)
+	}
+	return paths, nil
 }

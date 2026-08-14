@@ -178,6 +178,19 @@ func TestKnowledgeBaseDeleteRejectsInvalidID(t *testing.T) {
 	}
 }
 
+func TestKnowledgeBaseDeleteRejectsProcessingDocuments(t *testing.T) {
+	endpoint := handler.NewKnowledgeBases(&knowledgeBaseStoreStub{deleteErr: knowledgebase.ErrProcessing})
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodDelete, "/api/knowledge-bases/9", nil)
+	request.SetPathValue("id", "9")
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusConflict)
+	}
+}
+
 func TestKnowledgeBaseDeletesKnowledgeBase(t *testing.T) {
 	store := &knowledgeBaseStoreStub{}
 	endpoint := handler.NewKnowledgeBases(store)

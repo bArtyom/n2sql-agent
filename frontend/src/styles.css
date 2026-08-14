@@ -52,6 +52,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus
 .header-actions { gap: 18px; }
 .quiet-button, .icon-button { color: #63736c; background: transparent; border: 0; }
 .quiet-button { padding: 7px 0; font-size: 12px; }
+.danger-button { padding: 7px 0; color: #a46157; background: transparent; border: 0; font-size: 10px; }
+.danger-button:hover { color: #b05245; }
+.danger-button:disabled { color: #b8c0b9; cursor: not-allowed; }
 .header-status { display: flex; align-items: center; gap: 8px; color: #6c7d75; font-size: 11px; }
 .workspace-intro { display: flex; align-items: end; justify-content: space-between; gap: 30px; padding: 53px 0 36px; }
 .eyebrow { margin: 0 0 13px; color: #7a8d82; }

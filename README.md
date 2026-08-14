@@ -34,7 +34,7 @@ curl http://localhost:8080/api/knowledge-bases
 curl -X DELETE http://localhost:8080/api/knowledge-bases/1
 ```
 
-删除知识库会级联删除关联的文档与处理任务记录。删除知识库时的原始文件清理流程尚未实现。
+删除知识库会先确认它属于当前管理员且没有正在处理的文档任务，再级联删除关联的文档、处理任务、父子 chunk 和会话记录；提交数据库删除后，服务会清理本地原始文件并使该知识库的检索缓存失效。处理中任务会返回 `409`，源文件清理失败只记录后端结构化日志，不会恢复已提交的数据库删除。
 
 上传文件使用 `POST /api/knowledge-bases/{id}/documents`，提交名为 `file` 的 `multipart/form-data` 字段：
 
