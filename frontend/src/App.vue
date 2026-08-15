@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
-import { renderAnswerMarkdown } from "./utils/markdown";
+import { plainAnswerText, renderAnswerMarkdown } from "./utils/markdown";
 
 type KnowledgeBase = { id: number; name: string; description: string };
 type DocumentItem = {
@@ -352,6 +352,32 @@ function toggleRetrievalDetails(messageIndex: number) {
 
 function isRetrievalDetailsOpen(messageIndex: number): boolean {
   return retrievalDetailsOpen.value.has(messageIndex);
+}
+
+// 正文内引用标记的事件委托：<kb/> 渲染成 .kb-ref 后，点击由 messages
+// 容器统一捕获，按 data 属性找到对应来源并打开原文抽屉。
+function onMessagesClick(event: MouseEvent) {
+  const target = event.target as HTMLElement;
+  const ref = target.closest<HTMLElement>(".kb-ref");
+  if (!ref) return;
+  const docId = ref.getAttribute("data-doc-id");
+  const pos = ref.getAttribute("data-pos");
+  if (!docId || !pos) return;
+  const source = findSourceByRef(docId, pos);
+  if (source) {
+    void openSource(source);
+  } else {
+    errorMessage.value = "找不到这条引用对应的资料。";
+  }
+}
+
+function findSourceByRef(docId: string, pos: string): Source | undefined {
+  for (const message of messages.value) {
+    for (const source of message.sources ?? []) {
+      if (String(source.documentId) === docId && String(source.position) === pos) return source;
+    }
+  }
+  return undefined;
 }
 
 async function openSource(source: Source) {
@@ -1855,7 +1881,7 @@ onUnmounted(() => {
                 </template>
             </div>
           </template>
-          <div class="messages" aria-live="polite">
+          <div class="messages" aria-live="polite" @click="onMessagesClick">
             <div v-if="!messages.length" class="chat-empty">
               <span>“</span>
               <p>问一个关于这套资料的问题，<br />让线索自己浮上来。</p>
@@ -1910,7 +1936,7 @@ onUnmounted(() => {
               </div>
               <div class="message-bubble" :class="{ 'message-bubble--error': message.status === 'error' }">
                 <span v-if="message.role === 'assistant' && !message.content && message.status === 'streaming'" class="typing"><i /><i /><i /></span>
-                <span v-else-if="message.role === 'user' || message.status === 'streaming' || message.status === 'error'">{{ message.content }}</span>
+                <span v-else-if="message.role === 'user' || message.status === 'streaming' || message.status === 'error'">{{ message.role === "assistant" && message.status === "streaming" ? plainAnswerText(message.content) : message.content }}</span>
                 <div v-else class="markdown-content" v-html="renderCompletedAnswer(message)" />
               </div>
               <div v-if="message.role === 'assistant' && message.queryRewrite" class="query-rewrite-status">
