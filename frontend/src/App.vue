@@ -1903,6 +1903,7 @@ onUnmounted(() => {
                 <span>继续追问</span>
                 <button v-for="prompt in followUpPrompts(message)" :key="prompt" type="button" @click="submitSuggestedQuestion(prompt)">{{ prompt }}</button>
                 <button v-if="!message.generatedFollowUps?.length" class="follow-up-generate" type="button" :disabled="message.followUpLoading" @click="generateFollowUpSuggestions(message, index)">{{ message.followUpLoading ? "生成中…" : "生成更具体的追问" }}</button>
+                <button v-else class="follow-up-generate" type="button" :disabled="message.followUpLoading" @click="generateFollowUpSuggestions(message, index)">{{ message.followUpLoading ? "换一批中…" : "换一批" }}</button>
               </div>
               <div v-if="message.role === 'assistant' && message.sources?.length" class="sources">
                 <div class="sources-heading"><span class="sources-label">引用 {{ message.sources.length }}</span><span>点击查看原文</span></div>
