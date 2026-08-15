@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
+	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 )
 
 var ErrInvalidDocumentReadInput = errors.New("invalid document read input")
@@ -134,14 +135,36 @@ func (t *DocumentReadTool) Call(ctx context.Context, raw json.RawMessage) (ToolR
 	if len(content) > t.maxResultBytes {
 		return ToolResult{}, fmt.Errorf("document content result exceeds %d bytes", t.maxResultBytes)
 	}
-	return ToolResult{Content: string(content)}, nil
+	metadata := map[string]any{"sources": documentReadSources(result)}
+	if result.Truncated {
+		metadata["truncated"] = true
+	}
+	return ToolResult{Content: string(content), Metadata: metadata}, nil
 }
 
 type readDocumentResult struct {
+	DocumentID       int64
 	Chunks           []documentReadChunk
 	NextPosition     int
 	Truncated        bool
 	OriginalFilename string
+}
+
+// documentReadSources converts the ordered chunks into the same bounded source
+// shape used by knowledge_search. A zero distance is intentional here: these
+// are explicitly requested positions, not similarity-ranked results.
+func documentReadSources(result readDocumentResult) []retrieval.Result {
+	sources := make([]retrieval.Result, 0, len(result.Chunks))
+	for _, chunk := range result.Chunks {
+		sources = append(sources, retrieval.Result{
+			DocumentID:       result.DocumentID,
+			OriginalFilename: result.OriginalFilename,
+			Position:         chunk.Position,
+			Content:          chunk.Content,
+			MatchType:        documentReadToolName,
+		})
+	}
+	return sources
 }
 
 func readDocumentChunks(ctx context.Context, reader documentchunk.Reader, knowledgeBaseID, documentID int64, startPosition, limit, maxBytes int) (readDocumentResult, error) {
@@ -150,7 +173,7 @@ func readDocumentChunks(ctx context.Context, reader documentchunk.Reader, knowle
 		if err != nil {
 			return readDocumentResult{}, err
 		}
-		converted := readDocumentResult{NextPosition: result.NextPosition, Truncated: result.Truncated}
+		converted := readDocumentResult{DocumentID: documentID, NextPosition: result.NextPosition, Truncated: result.Truncated}
 		for _, chunk := range result.Chunks {
 			if converted.OriginalFilename == "" {
 				converted.OriginalFilename = chunk.OriginalFilename
@@ -160,7 +183,7 @@ func readDocumentChunks(ctx context.Context, reader documentchunk.Reader, knowle
 		return converted, nil
 	}
 
-	result := readDocumentResult{Chunks: make([]documentReadChunk, 0, limit), NextPosition: startPosition}
+	result := readDocumentResult{DocumentID: documentID, Chunks: make([]documentReadChunk, 0, limit), NextPosition: startPosition}
 	bytesUsed := 0
 	for len(result.Chunks) < limit && bytesUsed < maxBytes {
 		chunk, err := reader.Read(ctx, knowledgeBaseID, documentID, startPosition+len(result.Chunks))

@@ -309,10 +309,11 @@ function sourceDisplayContent(source: Source): string {
 }
 
 function matchTypeLabel(matchType?: string): string {
-  return ({ vector: "语义命中", keyword: "关键词命中", hybrid: "双路命中" }[matchType || ""] || "检索命中");
+  return ({ vector: "语义命中", keyword: "关键词命中", hybrid: "双路命中", document_read: "按位置读取" }[matchType || ""] || "检索命中");
 }
 
 function sourceScoreLabel(source: Source): string {
+  if (source.matchType === "document_read") return "指定片段";
   if (typeof source.rerankScore === "number") return `重排 ${source.rerankScore.toFixed(2)}`;
   if (typeof source.keywordScore === "number" && source.keywordScore > 0) return `关键词 ${source.keywordScore.toFixed(2)}`;
   if (typeof source.fusionScore === "number" && source.fusionScore > 0) return `融合 ${source.fusionScore.toFixed(3)}`;

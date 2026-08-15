@@ -10,6 +10,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
+	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 )
 
 type documentReaderStub struct {
@@ -138,6 +139,10 @@ func TestDocumentReadToolReturnsBoundedChunks(t *testing.T) {
 	}
 	if reader.knowledgeBaseID != 7 || !strings.Contains(result.Content, "第一段") || !strings.Contains(result.Content, "第二段") {
 		t.Fatalf("scope/content = %d/%q", reader.knowledgeBaseID, result.Content)
+	}
+	sources, ok := result.Metadata["sources"].([]retrieval.Result)
+	if !ok || len(sources) != 2 || sources[0].DocumentID != 8 || sources[0].Position != 0 || sources[0].MatchType != "document_read" {
+		t.Fatalf("sources = %#v", result.Metadata["sources"])
 	}
 }
 
