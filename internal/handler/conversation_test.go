@@ -71,6 +71,16 @@ func (s *conversationStoreStub) UpdateTitle(_ context.Context, id int64, title s
 	return conversation.Conversation{}, conversation.ErrNotFound
 }
 
+func (s *conversationStoreStub) SetPinned(_ context.Context, id int64, pinned bool) (conversation.Conversation, error) {
+	for index := range s.records {
+		if s.records[index].ID == id {
+			s.records[index].IsPinned = pinned
+			return s.records[index], nil
+		}
+	}
+	return conversation.Conversation{}, conversation.ErrNotFound
+}
+
 func (s *conversationStoreStub) Delete(_ context.Context, id int64) error {
 	for index := range s.records {
 		if s.records[index].ID == id {
@@ -129,5 +139,54 @@ func TestConversationHandlerReturnsMessages(t *testing.T) {
 	endpoint.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"content":"问题"`) {
 		t.Fatalf("messages response: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestConversationHandlerPinsAndUnpinsConversation(t *testing.T) {
+	store := &conversationStoreStub{records: []conversation.Conversation{{ID: 3, KnowledgeBaseID: 7, Title: "对话"}}}
+	endpoint := handler.NewConversations(conversation.NewService(store))
+
+	pin := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPatch, "/api/knowledge-bases/7/conversations/3", strings.NewReader(`{"is_pinned":true}`))
+	request.SetPathValue("id", "7")
+	request.SetPathValue("conversationId", "3")
+	endpoint.ServeHTTP(pin, request)
+	if pin.Code != http.StatusOK || !strings.Contains(pin.Body.String(), `"isPinned":true`) {
+		t.Fatalf("pin response: status=%d body=%s", pin.Code, pin.Body.String())
+	}
+
+	unpin := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPatch, "/api/knowledge-bases/7/conversations/3", strings.NewReader(`{"is_pinned":false}`))
+	request.SetPathValue("id", "7")
+	request.SetPathValue("conversationId", "3")
+	endpoint.ServeHTTP(unpin, request)
+	if unpin.Code != http.StatusOK || !strings.Contains(unpin.Body.String(), `"isPinned":false`) {
+		t.Fatalf("unpin response: status=%d body=%s", unpin.Code, unpin.Body.String())
+	}
+}
+
+func TestConversationHandlerRejectsPinnedOnOtherKnowledgeBase(t *testing.T) {
+	store := &conversationStoreStub{records: []conversation.Conversation{{ID: 3, KnowledgeBaseID: 7, Title: "对话"}}}
+	endpoint := handler.NewConversations(conversation.NewService(store))
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPatch, "/api/knowledge-bases/8/conversations/3", strings.NewReader(`{"is_pinned":true}`))
+	request.SetPathValue("id", "8")
+	request.SetPathValue("conversationId", "3")
+	endpoint.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("cross knowledge base pin status = %d, want 404", response.Code)
+	}
+}
+
+func TestConversationHandlerRejectsPatchWithoutFields(t *testing.T) {
+	store := &conversationStoreStub{records: []conversation.Conversation{{ID: 3, KnowledgeBaseID: 7, Title: "对话"}}}
+	endpoint := handler.NewConversations(conversation.NewService(store))
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPatch, "/api/knowledge-bases/7/conversations/3", strings.NewReader(`{}`))
+	request.SetPathValue("id", "7")
+	request.SetPathValue("conversationId", "3")
+	endpoint.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("empty patch status = %d, want 400", response.Code)
 	}
 }

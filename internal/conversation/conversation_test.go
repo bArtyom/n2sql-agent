@@ -87,6 +87,11 @@ func (s *storeStub) UpdateTitle(_ context.Context, _ int64, title string) (conve
 	return s.conversation, nil
 }
 
+func (s *storeStub) SetPinned(_ context.Context, _ int64, pinned bool) (conversation.Conversation, error) {
+	s.conversation.IsPinned = pinned
+	return s.conversation, nil
+}
+
 func (s *storeStub) Delete(context.Context, int64) error { return nil }
 
 func (s *storeStub) GetIdempotentResponse(_ context.Context, conversationID int64, key string) (conversation.IdempotentResponse, error) {
@@ -286,5 +291,31 @@ func TestServiceRejectsInvalidIdempotencyKey(t *testing.T) {
 		if err := service.SaveIdempotentResponse(context.Background(), 9, 7, key, strings.Repeat("a", 64), []byte(`{"answer":"答案"}`)); !errors.Is(err, conversation.ErrInvalidIdempotencyKey) {
 			t.Fatalf("SaveIdempotentResponse(%q) error = %v, want invalid key", key, err)
 		}
+	}
+}
+
+func TestServicePinsAndUnpinsOwnedConversation(t *testing.T) {
+	store := &storeStub{conversation: conversation.Conversation{ID: 9, KnowledgeBaseID: 7}}
+	service := conversation.NewService(store)
+
+	pinned, err := service.SetPinned(context.Background(), 9, 7, true)
+	if err != nil {
+		t.Fatalf("SetPinned(true) error = %v", err)
+	}
+	if !pinned.IsPinned {
+		t.Fatal("SetPinned(true) returned IsPinned = false, want true")
+	}
+	unpinned, err := service.SetPinned(context.Background(), 9, 7, false)
+	if err != nil {
+		t.Fatalf("SetPinned(false) error = %v", err)
+	}
+	if unpinned.IsPinned {
+		t.Fatal("SetPinned(false) returned IsPinned = true, want false")
+	}
+	if _, err := service.SetPinned(context.Background(), 9, 8, true); !errors.Is(err, conversation.ErrNotFound) {
+		t.Fatalf("cross knowledge base error = %v, want ErrNotFound", err)
+	}
+	if _, err := service.SetPinned(context.Background(), 0, 7, true); !errors.Is(err, conversation.ErrInvalidConversation) {
+		t.Fatalf("invalid conversation error = %v, want ErrInvalidConversation", err)
 	}
 }

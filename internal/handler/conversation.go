@@ -37,7 +37,7 @@ func NewConversations(service *conversation.Service) http.Handler {
 				}
 				writeJSON(w, messages)
 			case http.MethodPatch:
-				renameConversation(w, r, service, conversationID, knowledgeBaseID)
+				updateConversation(w, r, service, conversationID, knowledgeBaseID)
 			case http.MethodDelete:
 				if err := service.Delete(r.Context(), conversationID, knowledgeBaseID); err != nil {
 					writeConversationError(w, err)
@@ -66,9 +66,12 @@ func NewConversations(service *conversation.Service) http.Handler {
 	})
 }
 
-func renameConversation(w http.ResponseWriter, r *http.Request, service *conversation.Service, conversationID, knowledgeBaseID int64) {
+// updateConversation handles PATCH with either a new title or a pinned flag.
+// A pointer keeps "is_pinned: false" distinct from "field not provided".
+func updateConversation(w http.ResponseWriter, r *http.Request, service *conversation.Service, conversationID, knowledgeBaseID int64) {
 	var request struct {
-		Title string `json:"title"`
+		Title    string `json:"title"`
+		IsPinned *bool  `json:"is_pinned"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxConversationRequestBytes))
 	decoder.DisallowUnknownFields()
@@ -80,12 +83,25 @@ func renameConversation(w http.ResponseWriter, r *http.Request, service *convers
 		http.Error(w, `{"error":"invalid conversation request"}`, http.StatusBadRequest)
 		return
 	}
-	updated, err := service.Rename(r.Context(), conversationID, knowledgeBaseID, request.Title)
-	if err != nil {
-		writeConversationError(w, err)
+	if strings.TrimSpace(request.Title) != "" {
+		updated, err := service.Rename(r.Context(), conversationID, knowledgeBaseID, request.Title)
+		if err != nil {
+			writeConversationError(w, err)
+			return
+		}
+		writeJSON(w, updated)
 		return
 	}
-	writeJSON(w, updated)
+	if request.IsPinned != nil {
+		updated, err := service.SetPinned(r.Context(), conversationID, knowledgeBaseID, *request.IsPinned)
+		if err != nil {
+			writeConversationError(w, err)
+			return
+		}
+		writeJSON(w, updated)
+		return
+	}
+	http.Error(w, `{"error":"invalid conversation request"}`, http.StatusBadRequest)
 }
 
 func createConversation(w http.ResponseWriter, r *http.Request, service *conversation.Service, knowledgeBaseID int64) {

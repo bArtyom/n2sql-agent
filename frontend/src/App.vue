@@ -113,7 +113,7 @@ type A2ATask = {
   updated_at?: string;
   error?: string;
 };
-type Conversation = { id: number; knowledgeBaseId: number; title: string; createdAt: string; updatedAt: string };
+type Conversation = { id: number; knowledgeBaseId: number; title: string; isPinned: boolean; createdAt: string; updatedAt: string };
 type ConversationMessage = {
   id: number;
   conversationId: number;
@@ -728,6 +728,23 @@ async function renameConversation(item: Conversation) {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title }),
+      },
+    );
+    conversations.value = conversations.value.map((conversation) => conversation.id === updated.id ? updated : conversation);
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function togglePinConversation(item: Conversation) {
+  if (!selectedKnowledgeBaseId.value || streaming.value) return;
+  try {
+    const updated = await requestJSON<Conversation>(
+      `/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations/${item.id}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_pinned: !item.isPinned }),
       },
     );
     conversations.value = conversations.value.map((conversation) => conversation.id === updated.id ? updated : conversation);
@@ -1537,6 +1554,39 @@ function statusLabel(status: string) {
   return ({ pending: "排队中", processing: "整理中", succeeded: "可检索", failed: "处理失败" }[status] || status);
 }
 
+// 会话列表按「置顶 + 日期」分组展示；后端已按 is_pinned DESC, updated_at DESC 排序，
+// 所以这里只需保持遍历顺序分组，无需再排序。
+const conversationGroups = computed(() => {
+  const pinned: Conversation[] = [];
+  const byDate = new Map<string, Conversation[]>();
+  for (const item of conversations.value) {
+    if (item.isPinned) {
+      pinned.push(item);
+    } else {
+      const label = conversationDateLabel(item.updatedAt);
+      const group = byDate.get(label);
+      if (group) group.push(item);
+      else byDate.set(label, [item]);
+    }
+  }
+  const groups: { label: string; items: Conversation[] }[] = [];
+  if (pinned.length) groups.push({ label: "置顶", items: pinned });
+  for (const [label, items] of byDate) groups.push({ label, items });
+  return groups;
+});
+
+function conversationDateLabel(value: string): string {
+  const date = new Date(value);
+  const today = new Date();
+  const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+  const startOfDay = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const dayDiff = Math.round((startOfToday - startOfDay) / 86400000);
+  if (dayDiff <= 0) return "今天";
+  if (dayDiff === 1) return "昨天";
+  if (dayDiff < 7) return `${dayDiff} 天前`;
+  return date.toLocaleDateString("zh-CN");
+}
+
 function formatBytes(size: number) {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
@@ -1723,20 +1773,24 @@ onUnmounted(() => {
               </button>
             </div>
             <div v-if="conversations.length" class="conversation-list" aria-label="会话列表">
-                <div
-                  v-for="item in conversations"
-                  :key="item.id"
-                  class="conversation-item"
-                  :class="{ 'conversation-item--active': item.id === conversationId }"
-                  @click="selectConversation(item.id)"
-                >
-                  <span class="conversation-item-title">{{ item.title }}</span>
-                  <small>{{ new Date(item.updatedAt).toLocaleDateString("zh-CN") }}</small>
-                  <div class="conversation-actions">
-                    <button type="button" aria-label="重命名会话" :disabled="conversationsLoading || streaming" @click.stop="renameConversation(item)">改名</button>
-                    <button type="button" aria-label="删除会话" :disabled="conversationsLoading || streaming" @click.stop="deleteConversation(item)">删</button>
+                <template v-for="group in conversationGroups" :key="group.label">
+                  <div class="conversation-group-label">{{ group.label }}</div>
+                  <div
+                    v-for="item in group.items"
+                    :key="item.id"
+                    class="conversation-item"
+                    :class="{ 'conversation-item--active': item.id === conversationId, 'conversation-item--pinned': item.isPinned }"
+                    @click="selectConversation(item.id)"
+                  >
+                    <span class="conversation-item-title">{{ item.isPinned ? "📌 " : "" }}{{ item.title }}</span>
+                    <small>{{ new Date(item.updatedAt).toLocaleDateString("zh-CN") }}</small>
+                    <div class="conversation-actions">
+                      <button type="button" :aria-label="item.isPinned ? '取消置顶' : '置顶会话'" :disabled="conversationsLoading || streaming" @click.stop="togglePinConversation(item)">{{ item.isPinned ? "取消置顶" : "置顶" }}</button>
+                      <button type="button" aria-label="重命名会话" :disabled="conversationsLoading || streaming" @click.stop="renameConversation(item)">改名</button>
+                      <button type="button" aria-label="删除会话" :disabled="conversationsLoading || streaming" @click.stop="deleteConversation(item)">删</button>
+                    </div>
                   </div>
-                </div>
+                </template>
             </div>
           </template>
           <div class="messages" aria-live="polite">

@@ -37,6 +37,7 @@ type Conversation struct {
 	ID              int64     `json:"id"`
 	KnowledgeBaseID int64     `json:"knowledgeBaseId"`
 	Title           string    `json:"title"`
+	IsPinned        bool      `json:"isPinned"`
 	CreatedAt       time.Time `json:"createdAt"`
 	UpdatedAt       time.Time `json:"updatedAt"`
 }
@@ -148,6 +149,7 @@ type Store interface {
 	SaveSummary(context.Context, int64, int64, string) error
 	AppendExchange(context.Context, int64, string, string) error
 	UpdateTitle(context.Context, int64, string) (Conversation, error)
+	SetPinned(context.Context, int64, bool) (Conversation, error)
 	Delete(context.Context, int64) error
 }
 
@@ -241,6 +243,18 @@ func (s *Service) Rename(ctx context.Context, conversationID, knowledgeBaseID in
 		return Conversation{}, ErrInvalidTitle
 	}
 	return s.store.UpdateTitle(ctx, conversationID, title)
+}
+
+// SetPinned pins or unpins a conversation owned by the current knowledge
+// base. Pinning only changes list ordering; it does not affect messages.
+func (s *Service) SetPinned(ctx context.Context, conversationID, knowledgeBaseID int64, pinned bool) (Conversation, error) {
+	if conversationID <= 0 || knowledgeBaseID <= 0 {
+		return Conversation{}, ErrInvalidConversation
+	}
+	if _, err := s.getOwnedConversation(ctx, conversationID, knowledgeBaseID); err != nil {
+		return Conversation{}, err
+	}
+	return s.store.SetPinned(ctx, conversationID, pinned)
 }
 
 func (s *Service) Delete(ctx context.Context, conversationID, knowledgeBaseID int64) error {
@@ -477,8 +491,8 @@ func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Conversa
 		FROM system_settings ss
 		JOIN knowledge_bases kb ON kb.administrator_id = ss.administrator_id
 		WHERE ss.id = 1 AND kb.id = $1
-		RETURNING id, knowledge_base_id, title, created_at, updated_at`, input.KnowledgeBaseID, input.Title).Scan(
-		&result.ID, &result.KnowledgeBaseID, &result.Title, &result.CreatedAt, &result.UpdatedAt,
+		RETURNING id, knowledge_base_id, title, is_pinned, created_at, updated_at`, input.KnowledgeBaseID, input.Title).Scan(
+		&result.ID, &result.KnowledgeBaseID, &result.Title, &result.IsPinned, &result.CreatedAt, &result.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Conversation{}, ErrNotFound
@@ -492,11 +506,11 @@ func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Conversa
 func (s *PostgresStore) Get(ctx context.Context, id int64) (Conversation, error) {
 	var result Conversation
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, knowledge_base_id, title, created_at, updated_at
+		SELECT id, knowledge_base_id, title, is_pinned, created_at, updated_at
 		FROM conversations
 		WHERE id = $1
 		  AND administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, id).Scan(
-		&result.ID, &result.KnowledgeBaseID, &result.Title, &result.CreatedAt, &result.UpdatedAt,
+		&result.ID, &result.KnowledgeBaseID, &result.Title, &result.IsPinned, &result.CreatedAt, &result.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Conversation{}, ErrNotFound
@@ -509,11 +523,11 @@ func (s *PostgresStore) Get(ctx context.Context, id int64) (Conversation, error)
 
 func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Conversation, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, knowledge_base_id, title, created_at, updated_at
+		SELECT id, knowledge_base_id, title, is_pinned, created_at, updated_at
 		FROM conversations
 		WHERE knowledge_base_id = $1
 		  AND administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
-		ORDER BY updated_at DESC, id DESC`, knowledgeBaseID)
+		ORDER BY is_pinned DESC, updated_at DESC, id DESC`, knowledgeBaseID)
 	if err != nil {
 		return nil, fmt.Errorf("list conversations: %w", err)
 	}
@@ -521,7 +535,7 @@ func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Conv
 	results := make([]Conversation, 0)
 	for rows.Next() {
 		var result Conversation
-		if err := rows.Scan(&result.ID, &result.KnowledgeBaseID, &result.Title, &result.CreatedAt, &result.UpdatedAt); err != nil {
+		if err := rows.Scan(&result.ID, &result.KnowledgeBaseID, &result.Title, &result.IsPinned, &result.CreatedAt, &result.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan conversation: %w", err)
 		}
 		results = append(results, result)
@@ -539,14 +553,36 @@ func (s *PostgresStore) UpdateTitle(ctx context.Context, id int64, title string)
 		SET title = $2
 		WHERE id = $1
 		  AND administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
-		RETURNING id, knowledge_base_id, title, created_at, updated_at`, id, title).Scan(
-		&result.ID, &result.KnowledgeBaseID, &result.Title, &result.CreatedAt, &result.UpdatedAt,
+		RETURNING id, knowledge_base_id, title, is_pinned, created_at, updated_at`, id, title).Scan(
+		&result.ID, &result.KnowledgeBaseID, &result.Title, &result.IsPinned, &result.CreatedAt, &result.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Conversation{}, ErrNotFound
 	}
 	if err != nil {
 		return Conversation{}, fmt.Errorf("update conversation title: %w", err)
+	}
+	return result, nil
+}
+
+// SetPinned updates the pinned flag of a conversation owned by the current
+// administrator. The refresh_updated_at trigger keeps the list position
+// consistent with the user's most recent action on that conversation.
+func (s *PostgresStore) SetPinned(ctx context.Context, id int64, pinned bool) (Conversation, error) {
+	var result Conversation
+	err := s.db.QueryRowContext(ctx, `
+		UPDATE conversations
+		SET is_pinned = $2
+		WHERE id = $1
+		  AND administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
+		RETURNING id, knowledge_base_id, title, is_pinned, created_at, updated_at`, id, pinned).Scan(
+		&result.ID, &result.KnowledgeBaseID, &result.Title, &result.IsPinned, &result.CreatedAt, &result.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Conversation{}, ErrNotFound
+	}
+	if err != nil {
+		return Conversation{}, fmt.Errorf("update conversation pinned: %w", err)
 	}
 	return result, nil
 }
