@@ -22,6 +22,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 	"github.com/bArtyom/n2sql-agent/internal/documentocr"
+	"github.com/bArtyom/n2sql-agent/internal/followup"
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
 	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
@@ -53,6 +54,7 @@ func main() {
 	chunkStore := documentchunk.NewPostgresStore(db)
 	rerankService := modelruntime.NewRerankService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
 	queryRewriteService := modelruntime.NewQueryRewriteService(chatService)
+	followUpService := followup.NewModelService(chatService, cfg.AgentTimeout)
 	extractor := documentextractor.New(cfg.UploadDir)
 	if cfg.OCRModel != "" {
 		ocrService := modelruntime.NewOCRService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv, cfg.OCRModel, cfg.OCRPrompt)
@@ -139,6 +141,7 @@ func main() {
 			Conversations:              conversationService,
 			AgentMaxToolResultBytes:    cfg.AgentMaxToolResultBytes,
 			AgentMaxHistoryBytes:       cfg.AgentMaxHistoryBytes,
+			FollowUpSuggestions:        followUpService,
 			APIKeyEnvVar:               cfg.ModelProviderAPIKeyEnvVar,
 			Metrics:                    metricsRegistry,
 		}),

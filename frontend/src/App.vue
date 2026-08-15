@@ -18,6 +18,7 @@ type DocumentPreview = {
   nextPosition: number;
   truncated: boolean;
 };
+type QuestionSuggestion = { id: string; text: string; category?: string };
 type Source = {
   documentId: number;
   originalFilename?: string;
@@ -53,6 +54,8 @@ type ChatMessage = {
   seenEventIDs?: Set<string>;
   // 只用于当前页面的展开状态，不会提交到后端。
   expandedAgentEvents?: Set<string>;
+  generatedFollowUps?: QuestionSuggestion[];
+  followUpLoading?: boolean;
 };
 type QueryRewriteStatus = { enabled: boolean; applied: boolean; fallback: boolean; variant_count: number };
 type RetrievalStats = {
@@ -440,6 +443,60 @@ function shouldShowFollowUps(message: ChatMessage, index: number): boolean {
     && Boolean(message.content.trim())
     && index === messages.value.length - 1
     && message.mode !== "a2a";
+}
+
+function followUpQuestionContext(index: number): string {
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    if (messages.value[cursor]?.role === "user") return messages.value[cursor].content;
+  }
+  return "";
+}
+
+function followUpPrompts(message: ChatMessage): string[] {
+  if (message.generatedFollowUps?.length) return message.generatedFollowUps.map((item) => item.text);
+  return followUpQuestions;
+}
+
+function parseQuestionSuggestions(value: unknown): QuestionSuggestion[] {
+  if (!value || typeof value !== "object") return [];
+  const questions = (value as { questions?: unknown }).questions;
+  if (!Array.isArray(questions)) return [];
+  return questions
+    .filter((item): item is QuestionSuggestion => {
+      if (!item || typeof item !== "object") return false;
+      const text = (item as { text?: unknown }).text;
+      return typeof text === "string" && text.trim().length > 0;
+    })
+    .slice(0, 3)
+    .map((item, index) => ({
+      id: typeof item.id === "string" && item.id ? item.id : `follow-up-${index + 1}`,
+      text: item.text.trim(),
+      category: typeof item.category === "string" ? item.category : undefined,
+    }));
+}
+
+async function generateFollowUpSuggestions(message: ChatMessage, index: number) {
+  if (!selectedKnowledgeBaseId.value || message.followUpLoading || !shouldShowFollowUps(message, index)) return;
+  const questionContext = message.requestMessage?.trim() || followUpQuestionContext(index);
+  if (!questionContext) {
+    errorMessage.value = "找不到这条回答对应的问题。";
+    return;
+  }
+  message.followUpLoading = true;
+  try {
+    const payload = await requestJSON<unknown>(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/follow-up-suggestions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: questionContext, answer: message.content }),
+    });
+    const suggestions = parseQuestionSuggestions(payload);
+    if (!suggestions.length) throw new Error("模型没有返回有效的追问建议。");
+    message.generatedFollowUps = suggestions;
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : "无法生成追问建议。";
+  } finally {
+    message.followUpLoading = false;
+  }
 }
 
 function closeSourceOnEscape(event: KeyboardEvent) {
@@ -1745,7 +1802,8 @@ onUnmounted(() => {
               </div>
               <div v-if="shouldShowFollowUps(message, index)" class="follow-up-suggestions" aria-label="继续追问">
                 <span>继续追问</span>
-                <button v-for="prompt in followUpQuestions" :key="prompt" type="button" @click="submitSuggestedQuestion(prompt)">{{ prompt }}</button>
+                <button v-for="prompt in followUpPrompts(message)" :key="prompt" type="button" @click="submitSuggestedQuestion(prompt)">{{ prompt }}</button>
+                <button v-if="!message.generatedFollowUps?.length" class="follow-up-generate" type="button" :disabled="message.followUpLoading" @click="generateFollowUpSuggestions(message, index)">{{ message.followUpLoading ? "生成中…" : "生成更具体的追问" }}</button>
               </div>
               <div v-if="message.role === 'assistant' && message.sources?.length" class="sources">
                 <div class="sources-heading"><span class="sources-label">引用 {{ message.sources.length }}</span><span>点击查看原文</span></div>

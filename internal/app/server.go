@@ -11,6 +11,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
+	"github.com/bArtyom/n2sql-agent/internal/followup"
 	"github.com/bArtyom/n2sql-agent/internal/handler"
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
 	"github.com/bArtyom/n2sql-agent/internal/mcp"
@@ -49,6 +50,7 @@ type Dependencies struct {
 	Conversations              *conversation.Service
 	AgentMaxToolResultBytes    int
 	AgentMaxHistoryBytes       int
+	FollowUpSuggestions        followup.Suggester
 	APIKeyEnvVar               string
 	Metrics                    *metrics.Registry
 }
@@ -124,6 +126,9 @@ func New(dependencies Dependencies) http.Handler {
 	}
 	if dependencies.MultiAgentStreamingAnswers != nil {
 		mux.Handle("POST /api/knowledge-bases/{id}/multi-agent-chat/stream", handler.NewMultiAgentChatStream(dependencies.MultiAgentStreamingAnswers))
+	}
+	if dependencies.FollowUpSuggestions != nil {
+		mux.Handle("POST /api/knowledge-bases/{id}/follow-up-suggestions", handler.NewFollowUpSuggestions(dependencies.FollowUpSuggestions))
 	}
 	if dependencies.A2AAnswers != nil {
 		var a2aHandler http.Handler
