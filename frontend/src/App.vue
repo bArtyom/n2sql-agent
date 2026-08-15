@@ -192,6 +192,16 @@ const selectedDocument = ref<DocumentItem | null>(null);
 const documentPreview = ref<DocumentPreview | null>(null);
 const documentPreviewLoading = ref(false);
 const documentPreviewPageSize = 8;
+const starterQuestions = [
+  "知识库里有哪些文档？",
+  "请总结这套资料的主要内容。",
+  "如何查看指定文档的正文？",
+];
+const followUpQuestions = [
+  "请用一个具体例子说明刚才的结论。",
+  "请指出刚才回答依据的关键原文。",
+  "这个结论有哪些限制或例外？",
+];
 const copiedMessageIndex = ref<number | null>(null);
 const copiedSourceKey = ref<string | null>(null);
 let copyFeedbackTimer: number | undefined;
@@ -416,6 +426,20 @@ function closeDocumentPreview() {
   selectedDocument.value = null;
   documentPreview.value = null;
   documentPreviewLoading.value = false;
+}
+
+function submitSuggestedQuestion(prompt: string) {
+  if (streaming.value || !selectedKnowledgeBase.value) return;
+  question.value = prompt;
+  void askQuestion();
+}
+
+function shouldShowFollowUps(message: ChatMessage, index: number): boolean {
+  return message.role === "assistant"
+    && message.status === "done"
+    && Boolean(message.content.trim())
+    && index === messages.value.length - 1
+    && message.mode !== "a2a";
 }
 
 function closeSourceOnEscape(event: KeyboardEvent) {
@@ -1626,7 +1650,13 @@ onUnmounted(() => {
             </div>
           </template>
           <div class="messages" aria-live="polite">
-            <div v-if="!messages.length" class="chat-empty"><span>“</span><p>问一个关于这套资料的问题，<br />让线索自己浮上来。</p></div>
+            <div v-if="!messages.length" class="chat-empty">
+              <span>“</span>
+              <p>问一个关于这套资料的问题，<br />让线索自己浮上来。</p>
+              <div class="starter-questions" aria-label="起步问题">
+                <button v-for="prompt in starterQuestions" :key="prompt" type="button" @click="submitSuggestedQuestion(prompt)">{{ prompt }}</button>
+              </div>
+            </div>
             <article v-for="(message, index) in messages" :key="index" class="message" :class="`message--${message.role}`">
               <div class="message-label">{{ message.role === "user" ? "你" : "文库助手" }}</div>
               <div v-if="message.role === 'assistant' && message.status === 'streaming' && message.activity" class="message-activity">
@@ -1712,6 +1742,10 @@ onUnmounted(() => {
               <div v-if="message.role === 'assistant' && message.content && message.status !== 'streaming'" class="message-actions">
                 <button type="button" @click="copyAnswer(message, index)">{{ copiedMessageIndex === index ? "已复制回答" : "复制回答" }}</button>
                 <button v-if="message.retryable && message.mode === 'agent'" type="button" @click="retryAnswer(message, index)">重新生成</button>
+              </div>
+              <div v-if="shouldShowFollowUps(message, index)" class="follow-up-suggestions" aria-label="继续追问">
+                <span>继续追问</span>
+                <button v-for="prompt in followUpQuestions" :key="prompt" type="button" @click="submitSuggestedQuestion(prompt)">{{ prompt }}</button>
               </div>
               <div v-if="message.role === 'assistant' && message.sources?.length" class="sources">
                 <div class="sources-heading"><span class="sources-label">引用 {{ message.sources.length }}</span><span>点击查看原文</span></div>
