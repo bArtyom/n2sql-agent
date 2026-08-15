@@ -114,14 +114,16 @@ func (t *DocumentListTool) Call(ctx context.Context, raw json.RawMessage) (ToolR
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("list documents: %w", err)
 	}
-	content, err := marshalDocumentList(documents, limit, t.maxResultBytes)
+	content, selected, err := marshalDocumentList(documents, limit, t.maxResultBytes)
 	if err != nil {
 		return ToolResult{}, err
 	}
-	return ToolResult{Content: content}, nil
+	// The bounded selection travels as structured metadata so the UI can
+	// render the list as a table instead of the raw text summary.
+	return ToolResult{Content: content, Metadata: map[string]any{"documents": selected}}, nil
 }
 
-func marshalDocumentList(documents []document.Document, limit, maxBytes int) (string, error) {
+func marshalDocumentList(documents []document.Document, limit, maxBytes int) (string, []documentListItem, error) {
 	selected := make([]documentListItem, 0, minInt(len(documents), limit))
 	for _, item := range documents {
 		if len(selected) >= limit {
@@ -141,7 +143,7 @@ func marshalDocumentList(documents []document.Document, limit, maxBytes int) (st
 			Truncated: len(candidate) < len(documents),
 		})
 		if err != nil {
-			return "", fmt.Errorf("marshal document list: %w", err)
+			return "", nil, fmt.Errorf("marshal document list: %w", err)
 		}
 		if len(payload) > maxBytes {
 			break
@@ -156,12 +158,12 @@ func marshalDocumentList(documents []document.Document, limit, maxBytes int) (st
 		Truncated: len(selected) < len(documents),
 	})
 	if err != nil {
-		return "", fmt.Errorf("marshal document list: %w", err)
+		return "", nil, fmt.Errorf("marshal document list: %w", err)
 	}
 	if len(payload) > maxBytes {
-		return "", fmt.Errorf("document list result exceeds %d bytes", maxBytes)
+		return "", nil, fmt.Errorf("document list result exceeds %d bytes", maxBytes)
 	}
-	return string(payload), nil
+	return string(payload), selected, nil
 }
 
 func minInt(left, right int) int {

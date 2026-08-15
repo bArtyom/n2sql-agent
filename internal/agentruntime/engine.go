@@ -239,6 +239,14 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			}
 			toolFinishedData["no_relevant_results"] = toolResult.NoRelevantResults
 			toolFinishedData["result_summary"] = toolResultSummary(toolResult)
+			// Structured tool metadata is forwarded for typed rendering while
+			// staying bounded by what each tool already returns.
+			if documents, ok := toolResult.Metadata["documents"]; ok {
+				toolFinishedData["documents"] = documents
+			}
+			if documentInfo, ok := toolResult.Metadata["document_info"]; ok {
+				toolFinishedData["document_info"] = documentInfo
+			}
 			if err := emitter.emit(agent.EventToolFinished, len(run.Steps()), toolFinishedData); err != nil {
 				return finishError(result, err)
 			}

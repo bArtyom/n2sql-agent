@@ -73,6 +73,7 @@ type RetrievalStats = {
   rerank_fallback: boolean;
 };
 type ResearchEvent = { type: string; round?: number; label: string; detail?: string };
+type AgentDocument = { id: number; original_filename?: string; content_type?: string; size_bytes?: number; processing_status?: string };
 type AgentEvent = {
   type: string;
   step?: number;
@@ -82,6 +83,8 @@ type AgentEvent = {
   arguments?: string;
   resultSummary?: string;
   sourceKeys?: string[];
+  documents?: AgentDocument[];
+  documentInfo?: AgentDocument | null;
   status: "running" | "done" | "error";
 };
 type AgentRunStats = {
@@ -1519,18 +1522,57 @@ function restoreAgentEvents(trace?: StoredAgentTrace): AgentEvent[] {
   return events;
 }
 
-function finishLastAgentToolEvent(answer: ChatMessage, detail: string, status: AgentEvent["status"] = "done", toolCallID = "", sourceKeys: string[] = []) {
+function finishLastAgentToolEvent(
+  answer: ChatMessage,
+  options: {
+    label: string;
+    detail: string;
+    status?: AgentEvent["status"];
+    toolCallID?: string;
+    sourceKeys?: string[];
+    documents?: AgentDocument[];
+    documentInfo?: AgentDocument | null;
+  },
+) {
   const events = answer.agentEvents ?? [];
   const latest = [...events].reverse().find((item) => item.type === "tool_called"
     && item.status === "running"
-    && (!toolCallID || item.toolCallID === toolCallID));
+    && (!options.toolCallID || item.toolCallID === options.toolCallID));
   if (latest) {
-    latest.label = "知识库检索完成";
-    latest.detail = detail.slice(0, 140);
-    latest.resultSummary = detail.slice(0, 140);
-    latest.sourceKeys = sourceKeys.slice(0, 20);
-    latest.status = status;
+    latest.label = options.label;
+    latest.detail = options.detail.slice(0, 140);
+    latest.resultSummary = options.detail.slice(0, 140);
+    latest.sourceKeys = (options.sourceKeys ?? []).slice(0, 20);
+    latest.status = options.status ?? "done";
+    if (options.documents?.length) latest.documents = options.documents;
+    if (options.documentInfo) latest.documentInfo = options.documentInfo;
   }
+}
+
+function toolFinishedLabel(toolName: string): string {
+  switch (toolName) {
+    case "knowledge_search": return "知识库检索完成";
+    case "document_list": return "查看文档列表完成";
+    case "document_info": return "查看文档状态完成";
+    case "document_read": return "读取文档正文完成";
+    default: return "工具调用完成";
+  }
+}
+
+function parseAgentDocuments(value: unknown): AgentDocument[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is AgentDocument => {
+      if (!item || typeof item !== "object") return false;
+      return typeof (item as Record<string, unknown>).id === "number";
+    })
+    .slice(0, 20);
+}
+
+function parseAgentDocumentInfo(value: unknown): AgentDocument | null {
+  if (!value || typeof value !== "object") return null;
+  const doc = value as Record<string, unknown>;
+  return typeof doc.id === "number" ? doc as AgentDocument : null;
 }
 
 function agentTraceKey(trace: AgentEvent, index: number) {
@@ -1645,13 +1687,16 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         if (!researchMode) {
           const sources = parseSources(eventData.sources);
           answer.sources = mergeSources(answer.sources ?? [], sources);
-          finishLastAgentToolEvent(
-            answer,
-            dataString("result_summary") || (eventData.no_relevant_results === true ? "没有找到足够相关资料" : `${sources.length || "已"} 条结果已返回`),
-            "done",
-            dataString("tool_call_id"),
-            sources.map(sourceKey),
-          );
+          const toolName = dataString("tool_name") || "knowledge_search";
+          finishLastAgentToolEvent(answer, {
+            label: toolFinishedLabel(toolName),
+            detail: dataString("result_summary") || (eventData.no_relevant_results === true ? "没有找到足够相关资料" : `${sources.length || "已"} 条结果已返回`),
+            status: "done",
+            toolCallID: dataString("tool_call_id"),
+            sourceKeys: sources.map(sourceKey),
+            documents: parseAgentDocuments(eventData.documents),
+            documentInfo: parseAgentDocumentInfo(eventData.document_info),
+          });
         }
         if (Object.prototype.hasOwnProperty.call(eventData, "sources")) {
           answer.sources = mergeSources(answer.sources ?? [], parseSources(eventData.sources));
@@ -2065,6 +2110,23 @@ onUnmounted(() => {
                     <template v-if="isAgentTraceExpanded(message, trace, traceIndex)">
                       <small v-if="trace.arguments">参数：{{ trace.arguments }}</small>
                       <small v-if="trace.resultSummary && trace.resultSummary !== trace.detail">结果：{{ trace.resultSummary }}</small>
+                      <div v-if="trace.documents?.length" class="agent-trace-table">
+                        <table>
+                          <thead><tr><th>文档</th><th>类型</th><th>大小</th><th>状态</th></tr></thead>
+                          <tbody>
+                            <tr v-for="doc in trace.documents" :key="doc.id">
+                              <td>{{ doc.original_filename || "未命名文档" }}</td>
+                              <td>{{ doc.content_type || "—" }}</td>
+                              <td>{{ formatBytes(doc.size_bytes ?? 0) }}</td>
+                              <td>{{ statusLabel(doc.processing_status ?? "") }}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                      <div v-if="trace.documentInfo" class="agent-trace-info">
+                        <span>文档 #{{ trace.documentInfo.id }}：{{ trace.documentInfo.original_filename || "未命名文档" }}</span>
+                        <span>{{ trace.documentInfo.content_type || "未知类型" }} · {{ formatBytes(trace.documentInfo.size_bytes ?? 0) }} · {{ statusLabel(trace.documentInfo.processing_status ?? "") }}</span>
+                      </div>
                       <div v-if="traceSources(message, trace).length" class="agent-trace-sources">
                         <span>本次引用：</span>
                         <button v-for="source in traceSources(message, trace)" :key="sourceKey(source)" type="button" @click="openSource(source)">

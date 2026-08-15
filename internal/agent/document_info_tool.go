@@ -86,22 +86,25 @@ func (t *DocumentInfoTool) Call(ctx context.Context, raw json.RawMessage) (ToolR
 		if item.ID != input.DocumentID {
 			continue
 		}
-		payload, err := json.Marshal(struct {
-			Document documentListItem `json:"document"`
-		}{Document: documentListItem{
+		info := documentListItem{
 			ID:               item.ID,
 			OriginalFilename: item.OriginalFilename,
 			ContentType:      item.ContentType,
 			SizeBytes:        item.SizeBytes,
 			ProcessingStatus: item.ProcessingStatus,
-		}})
+		}
+		payload, err := json.Marshal(struct {
+			Document documentListItem `json:"document"`
+		}{Document: info})
 		if err != nil {
 			return ToolResult{}, fmt.Errorf("marshal document info: %w", err)
 		}
 		if len(payload) > t.maxResultBytes {
 			return ToolResult{}, fmt.Errorf("document info result exceeds %d bytes", t.maxResultBytes)
 		}
-		return ToolResult{Content: string(payload)}, nil
+		// Structured metadata lets the UI render a key-value card instead of
+		// the raw text summary.
+		return ToolResult{Content: string(payload), Metadata: map[string]any{"document_info": info}}, nil
 	}
 	return ToolResult{}, fmt.Errorf("document %d: %w", input.DocumentID, document.ErrDocumentNotFound)
 }
