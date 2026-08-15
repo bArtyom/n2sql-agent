@@ -21,7 +21,7 @@
 
 ## 当前代码状态
 
-- 最新提交：`a68fc65 feat: add on-demand follow-up suggestions`。
+- 最新提交：`6cb1c24 feat: stop generation for running agent answers`。
 - 当前工作区在该提交后保持干净。
 - 第一阶段知识库问答底座已完成：知识库、文档上传和 Worker、Markdown/TXT/PDF 提取、OCR 最小骨架、父子 chunk、embedding、混合检索、Rerank、引用和普通 RAG/SSE。
 - Agent Runtime 最小闭环已完成：Tool Registry、Function Calling、受限 ReAct、最大步数/超时/取消、工具失败安全降级、SSE 事件、上下文摘要、会话历史、幂等和运行摘要。
@@ -29,7 +29,7 @@
 - 检索已具备向量 + PostgreSQL 关键词、RRF 融合、关键词阈值、可选 Rerank、Query Rewrite、缓存、父块上下文去重、HNSW 和检索统计。
 - Multi-Agent、只读 MCP 和 PostgreSQL 持久化 A2A 已有最小可运行适配；它们不是完整官方协议或生产级多租户方案。
 - 前端已支持会话、引用卡片与懒加载原文、检索统计、Agent 工具轨迹折叠、断线恢复、A2A/协作研究模式、正文分页预览、固定起步问题和按需生成追问建议。
-- 最新追问建议切片：正常回答不额外调用模型；用户点击“生成更具体的追问”后才调用后端接口，返回最多 3 条结构化建议，不写入会话历史。
+- 最新停止生成切片：标准 Agent 流式回答期间输入栏显示“停止生成”按钮，调用 `POST /api/knowledge-bases/{id}/agent-runs/{runID}/stop` 取消执行上下文；引擎发 `run_canceled` 事件，前端标记独立 stopped 终态（保留部分内容、不显示重新生成、不写会话历史）；断线恢复与用户停止语义分离；停止按知识库 ID 隔离。
 
 ## 明确后置或不做
 
@@ -42,7 +42,7 @@
 
 默认继续沿着 WeKnora 对照后的 Agent/RAG 用户可见能力推进：先阅读相关现有代码和 `docs/` 记录，选择一个小而完整的功能切片，再实现后端链路、前端反馈和必要文档。不要因为看到后置项就直接开始 Redis、完整协议或大规模评测。
 
-如果没有用户指定具体功能，下一轮先做“当前 WeKnora 对照缺口和 Agent/RAG 用户体验”的小范围盘点，再确定一个可运行切片；不要大范围重构。
+下一轮候选（按对照盘点顺序）：会话置顶 + 日期分组（#2）、会话自动标题（#3）、追问建议“换一批”（#4）、会话更多菜单（#7，清空/复制 Markdown）、正文内引用标记（#5，中规模）。
 
 ## 交付要求
 
