@@ -156,6 +156,39 @@ class APIError extends Error {
   }
 }
 
+// 未完成的 Agent 运行记录：刷新页面后据此尝试从 Hub 重放剩余事件。
+// 只在标准 Agent 模式使用；run 结束或恢复失败后清除。
+type PendingAgentRun = { knowledgeBaseId: number; runID: string; conversationId?: number | null };
+const PENDING_RUN_KEY = "n2sql-pending-agent-run";
+
+function savePendingRun(run: PendingAgentRun) {
+  try {
+    localStorage.setItem(PENDING_RUN_KEY, JSON.stringify(run));
+  } catch {
+    // 隐私模式等场景忽略持久化失败，不影响问答。
+  }
+}
+
+function readPendingRun(): PendingAgentRun | null {
+  try {
+    const raw = localStorage.getItem(PENDING_RUN_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PendingAgentRun;
+    if (typeof parsed?.runID !== "string" || typeof parsed.knowledgeBaseId !== "number") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function clearPendingRun() {
+  try {
+    localStorage.removeItem(PENDING_RUN_KEY);
+  } catch {
+    // 忽略清除失败。
+  }
+}
+
 const knowledgeBases = ref<KnowledgeBase[]>([]);
 const selectedKnowledgeBaseId = ref<number | null>(null);
 const documents = ref<DocumentItem[]>([]);
@@ -1093,7 +1126,13 @@ async function streamAgentQuestion(prompt: string, answerIndex: number, activeCo
   }
   try {
     const initialRunID = response.headers.get("X-Agent-Run-ID");
-    if (initialRunID) messages.value[answerIndex].runID = initialRunID;
+    if (initialRunID) {
+      messages.value[answerIndex].runID = initialRunID;
+      // 记住未完成运行：刷新后可以重连 Hub 恢复，而不用重新调用模型。
+      if (!researchMode && activeConversationID) {
+        savePendingRun({ knowledgeBaseId: selectedKnowledgeBaseId.value, runID: initialRunID, conversationId: activeConversationID });
+      }
+    }
     await readAgentSSE(response, answerIndex, researchMode);
   } catch (error) {
     const currentAnswer = messages.value[answerIndex];
@@ -1119,6 +1158,7 @@ async function streamAgentQuestion(prompt: string, answerIndex: number, activeCo
       currentAnswer.content = currentAnswer.content || "流式响应提前结束，请重试。";
     }
   }
+  if (!researchMode) clearPendingRun();
 }
 
 async function readAgentSSE(response: Response, answerIndex: number, researchMode: boolean) {
@@ -1139,7 +1179,7 @@ async function readAgentSSE(response: Response, answerIndex: number, researchMod
 
 async function resumeAgentStream(answer: ChatMessage, answerIndex: number) {
   if (!selectedKnowledgeBaseId.value || !answer.runID) return;
-  answer.activity = "连接已断开，正在恢复 Agent 运行…";
+  answer.activity = "正在恢复 Agent 运行…";
   const response = await fetch(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/agent-runs/${encodeURIComponent(answer.runID)}/stream`, {
     method: "GET",
     headers: { Accept: "text/event-stream" },
@@ -1148,6 +1188,34 @@ async function resumeAgentStream(answer: ChatMessage, answerIndex: number) {
     throw new Error("无法恢复 Agent 运行，可能已超过保留时间。");
   }
   await readAgentSSE(response, answerIndex, false);
+}
+
+// 页面刷新后尝试恢复上次未完成的 Agent 运行（仅标准 Agent 模式）。
+// Hub 在进程内保留事件快照（约 10 分钟），恢复失败时降级为普通错误消息。
+async function restorePendingAgentRun() {
+  const pending = readPendingRun();
+  if (!pending || pending.knowledgeBaseId !== selectedKnowledgeBaseId.value) return;
+  clearPendingRun();
+  const answer: ChatMessage = {
+    role: "assistant",
+    content: "",
+    sources: [],
+    status: "streaming",
+    runID: pending.runID,
+    conversationId: pending.conversationId ?? null,
+    mode: "agent",
+    seenEventIDs: new Set(),
+  };
+  messages.value.push(answer);
+  const answerIndex = messages.value.length - 1;
+  streaming.value = true;
+  try {
+    await resumeAgentStream(answer, answerIndex);
+  } catch (error) {
+    markAnswerFailure(answerIndex, error);
+  } finally {
+    streaming.value = false;
+  }
 }
 
 function markAnswerFailure(answerIndex: number, error: unknown) {
@@ -1521,6 +1589,7 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         answer.activity = "正在组织答案…";
         break;
       case "run_finished":
+        clearPendingRun();
         if (!researchMode) {
           for (const agentEvent of answer.agentEvents ?? []) {
             if (agentEvent.status === "running") agentEvent.status = "done";
@@ -1594,6 +1663,7 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
       case "error":
         // 用户主动停止后引擎已发 run_canceled；后续通用 error 事件不应覆盖已停止状态。
         if (answer.status === "stopped") break;
+        clearPendingRun();
         if (!researchMode) {
           for (const agentEvent of answer.agentEvents ?? []) {
             if (agentEvent.status === "running") agentEvent.status = "error";
@@ -1606,6 +1676,7 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         answer.content = dataString("error") || payload.error || "问答失败。";
         break;
       case "run_canceled":
+        clearPendingRun();
         if (!researchMode) {
           for (const agentEvent of answer.agentEvents ?? []) {
             if (agentEvent.status === "running") agentEvent.status = "error";
@@ -1678,7 +1749,7 @@ function formatBytes(size: number) {
 
 onMounted(() => {
   window.addEventListener("keydown", closeSourceOnEscape);
-  void loadKnowledgeBases().then(() => loadConversation());
+  void loadKnowledgeBases().then(() => loadConversation()).then(() => restorePendingAgentRun());
 });
 onUnmounted(() => {
   window.clearInterval(documentPollTimer);
