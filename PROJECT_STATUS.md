@@ -21,7 +21,7 @@
 
 ## 当前代码状态
 
-- 最新提交：`6cb1c24 feat: stop generation for running agent answers`。
+- 最新提交：`1cb41c2 feat: pin conversations and group list by date`。
 - 当前工作区在该提交后保持干净。
 - 第一阶段知识库问答底座已完成：知识库、文档上传和 Worker、Markdown/TXT/PDF 提取、OCR 最小骨架、父子 chunk、embedding、混合检索、Rerank、引用和普通 RAG/SSE。
 - Agent Runtime 最小闭环已完成：Tool Registry、Function Calling、受限 ReAct、最大步数/超时/取消、工具失败安全降级、SSE 事件、上下文摘要、会话历史、幂等和运行摘要。
@@ -30,6 +30,7 @@
 - Multi-Agent、只读 MCP 和 PostgreSQL 持久化 A2A 已有最小可运行适配；它们不是完整官方协议或生产级多租户方案。
 - 前端已支持会话、引用卡片与懒加载原文、检索统计、Agent 工具轨迹折叠、断线恢复、A2A/协作研究模式、正文分页预览、固定起步问题和按需生成追问建议。
 - 最新停止生成切片：标准 Agent 流式回答期间输入栏显示“停止生成”按钮，调用 `POST /api/knowledge-bases/{id}/agent-runs/{runID}/stop` 取消执行上下文；引擎发 `run_canceled` 事件，前端标记独立 stopped 终态（保留部分内容、不显示重新生成、不写会话历史）；断线恢复与用户停止语义分离；停止按知识库 ID 隔离。
+- 最新会话置顶切片：`conversations.is_pinned` 列 + 排序索引；列表按置顶优先、组内按更新时间排序；`PATCH /conversations/{id}` 支持 `{"is_pinned": true/false}`（与重命名共用端点，跨库 404）；前端会话列表按「置顶 + 今天/昨天/N 天前」分组，置顶项 📌 标记与置顶/取消置顶按钮。
 
 ## 明确后置或不做
 
@@ -42,7 +43,7 @@
 
 默认继续沿着 WeKnora 对照后的 Agent/RAG 用户可见能力推进：先阅读相关现有代码和 `docs/` 记录，选择一个小而完整的功能切片，再实现后端链路、前端反馈和必要文档。不要因为看到后置项就直接开始 Redis、完整协议或大规模评测。
 
-下一轮候选（按对照盘点顺序）：会话置顶 + 日期分组（#2）、会话自动标题（#3）、追问建议“换一批”（#4）、会话更多菜单（#7，清空/复制 Markdown）、正文内引用标记（#5，中规模）。
+下一轮候选（按对照盘点顺序）：会话自动标题（#3）、追问建议“换一批”（#4）、会话更多菜单（#7，清空/复制 Markdown）、正文内引用标记（#5，中规模）。
 
 ## 交付要求
 
