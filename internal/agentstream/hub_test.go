@@ -66,3 +66,52 @@ func TestHubBoundsEventsPerRun(t *testing.T) {
 		t.Fatalf("snapshot events = %d, want bounded 512", len(snapshot))
 	}
 }
+
+func TestHubCancelInvokesRegisteredCancelOnce(t *testing.T) {
+	hub := agentstream.NewHub()
+	if err := hub.Start("run-1", 7); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	if err := hub.RegisterCancel("run-1", func() { calls++ }); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := hub.Cancel("run-1", 7); err != nil {
+			t.Fatalf("cancel attempt %d error = %v, want nil", attempt, err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("cancel calls = %d, want exactly one", calls)
+	}
+}
+
+func TestHubCancelRejectsUnknownRunOrWrongKnowledgeBase(t *testing.T) {
+	hub := agentstream.NewHub()
+	if err := hub.Start("run-1", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.RegisterCancel("run-1", func() {}); err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.Cancel("run-unknown", 7); err != agentstream.ErrRunNotFound {
+		t.Fatalf("unknown run error = %v, want ErrRunNotFound", err)
+	}
+	if err := hub.Cancel("run-1", 8); err != agentstream.ErrRunNotFound {
+		t.Fatalf("wrong knowledge base error = %v, want ErrRunNotFound", err)
+	}
+	// The cancel function must not have been invoked by the rejected calls.
+	if err := hub.Cancel("run-1", 7); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHubCancelWithoutRegisteredCancelIsNoOp(t *testing.T) {
+	hub := agentstream.NewHub()
+	if err := hub.Start("run-1", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.Cancel("run-1", 7); err != nil {
+		t.Fatalf("cancel without registration error = %v, want nil", err)
+	}
+}

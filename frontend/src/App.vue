@@ -39,7 +39,7 @@ type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   sources?: Source[];
-  status?: "streaming" | "done" | "error";
+  status?: "streaming" | "done" | "error" | "stopped";
   activity?: string;
   researchEvents?: ResearchEvent[];
   agentEvents?: AgentEvent[];
@@ -56,6 +56,8 @@ type ChatMessage = {
   expandedAgentEvents?: Set<string>;
   generatedFollowUps?: QuestionSuggestion[];
   followUpLoading?: boolean;
+  // 只用于当前页面：已向后端请求停止本次生成。
+  stopRequested?: boolean;
 };
 type QueryRewriteStatus = { enabled: boolean; applied: boolean; fallback: boolean; variant_count: number };
 type RetrievalStats = {
@@ -171,6 +173,7 @@ const deletingKnowledgeBase = ref(false);
 const uploading = ref(false);
 const deletingDocumentID = ref<number | null>(null);
 const streaming = ref(false);
+const stopping = ref(false);
 const errorMessage = ref("");
 const mobileRailOpen = ref(false);
 const fileInput = ref<HTMLInputElement | null>(null);
@@ -1081,6 +1084,29 @@ async function retryAnswer(answer: ChatMessage, answerIndex: number) {
   }
 }
 
+// 只有标准 Agent 流式回答才有进程内 run_id 可供停止；协作研究和异步任务不显示停止按钮。
+const canStopGeneration = computed(() => {
+  if (!streaming.value || stopping.value) return false;
+  const current = messages.value.find((message) => message.role === "assistant" && message.status === "streaming");
+  return current?.mode === "agent" && Boolean(current.runID) && !current.stopRequested;
+});
+
+async function stopGeneration() {
+  const current = messages.value.find((message) => message.role === "assistant" && message.status === "streaming");
+  if (!current?.runID || !selectedKnowledgeBaseId.value || current.stopRequested) return;
+  current.stopRequested = true;
+  current.activity = "正在停止生成…";
+  try {
+    const response = await fetch(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/agent-runs/${encodeURIComponent(current.runID)}/stop`, {
+      method: "POST",
+    });
+    // 运行可能刚好结束（404）：保持当前状态，让流式事件自然收尾并允许再次点击。
+    if (!response.ok) current.stopRequested = false;
+  } catch {
+    current.stopRequested = false;
+  }
+}
+
 async function askA2ATask(prompt: string, answerIndex: number) {
   if (!selectedKnowledgeBaseId.value) throw new Error("请先选择知识库。");
   const answer = messages.value[answerIndex];
@@ -1466,6 +1492,8 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         break;
       case "run_failed":
       case "error":
+        // 用户主动停止后引擎已发 run_canceled；后续通用 error 事件不应覆盖已停止状态。
+        if (answer.status === "stopped") break;
         if (!researchMode) {
           for (const agentEvent of answer.agentEvents ?? []) {
             if (agentEvent.status === "running") agentEvent.status = "error";
@@ -1478,11 +1506,16 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         answer.content = dataString("error") || payload.error || "问答失败。";
         break;
       case "run_canceled":
-        if (!researchMode) recordAgentEvent(answer, event, "Agent 已取消", "请求被取消", payload.step_number, "error");
-        answer.status = "error";
-        answer.retryable = true;
+        if (!researchMode) {
+          for (const agentEvent of answer.agentEvents ?? []) {
+            if (agentEvent.status === "running") agentEvent.status = "error";
+          }
+          recordAgentEvent(answer, event, "Agent 已停止", "用户停止生成", payload.step_number, "error");
+        }
+        answer.status = "stopped";
+        answer.retryable = false;
         answer.activity = "";
-        answer.content = "请求已取消。";
+        if (!answer.content) answer.content = "已停止生成。";
         break;
       case "done":
         answer.activity = "";
@@ -1819,7 +1852,11 @@ onUnmounted(() => {
           </div>
           <form class="composer" @submit.prevent="askQuestion">
             <textarea v-model="question" rows="2" :disabled="!selectedKnowledgeBase || streaming" placeholder="问问这套资料…" @keydown.enter.exact.prevent="askQuestion" />
-            <div class="composer-footer"><span>Enter 发送 · Shift + Enter 换行</span><button class="send-button" type="submit" :disabled="!question.trim() || streaming || !selectedKnowledgeBase" aria-label="发送问题">↗</button></div>
+            <div class="composer-footer">
+              <span>Enter 发送 · Shift + Enter 换行</span>
+              <button v-if="canStopGeneration" class="stop-button" type="button" aria-label="停止生成" @click="stopGeneration">停止生成</button>
+              <button class="send-button" type="submit" :disabled="!question.trim() || streaming || !selectedKnowledgeBase" aria-label="发送问题">↗</button>
+            </div>
           </form>
         </div>
       </section>

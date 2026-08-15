@@ -77,6 +77,15 @@ func NewKnowledgeBaseAgentChatStreamWithHub(answerer agentservice.EventAnswerer,
 			writeKnowledgeBaseAgentChatError(w, fmt.Errorf("start agent stream: %w", err))
 			return
 		}
+		// The execution context outlives the request so a disconnected browser
+		// does not cancel the Agent run (it can reconnect to the hub replay).
+		// The stop endpoint cancels this same context via the registered
+		// function; the engine maps the cancellation to a run_canceled event.
+		executionContext, stopRun := context.WithCancel(context.WithoutCancel(r.Context()))
+		if err := hub.RegisterCancel(runID, stopRun); err != nil {
+			writeKnowledgeBaseAgentChatError(w, fmt.Errorf("register agent run cancel: %w", err))
+			return
+		}
 		defer func() {
 			if err := hub.Finish(runID); err != nil {
 				slog.WarnContext(r.Context(), "agent_stream_finish_failed", "run_id", runID, "error", err)
@@ -141,7 +150,6 @@ func NewKnowledgeBaseAgentChatStreamWithHub(answerer agentservice.EventAnswerer,
 		}
 		var response agentservice.Response
 		var conversationSaveErr error
-		executionContext := context.WithoutCancel(r.Context())
 		err = withConversationSummaryLock(executionContext, conversations, knowledgeBaseID, request.ConversationID, func() error {
 			if idempotencyKey != "" {
 				if preloaded {
@@ -201,6 +209,14 @@ func NewKnowledgeBaseAgentChatStreamWithHub(answerer agentservice.EventAnswerer,
 		if err != nil {
 			logAgentRequest(r.Context(), started, request, response, err, registry, !replayed)
 			if r.Context().Err() != nil {
+				return
+			}
+			// A user-initiated stop cancels the execution context but not the
+			// request context; the Agent engine already published a
+			// run_canceled event with a safe message, so publishing the
+			// generic handler error event here would override the stopped
+			// state in the browser. Timeouts keep their dedicated error event.
+			if errors.Is(err, context.Canceled) {
 				return
 			}
 			message, _ := knowledgeBaseAgentChatError(err)

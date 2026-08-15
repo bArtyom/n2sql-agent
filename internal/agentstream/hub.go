@@ -36,6 +36,10 @@ type Event struct {
 
 type run struct {
 	knowledgeBaseID int64
+	// cancel stops the underlying Agent execution context. It is registered by
+	// the HTTP handler after Start and invoked exactly once by Cancel; a nil
+	// value means the run is finished or no cancel was registered.
+	cancel          func()
 	events          []Event
 	subscribers     map[chan Event]struct{}
 	done            bool
@@ -89,6 +93,49 @@ func (h *Hub) Start(runID string, knowledgeBaseID int64) error {
 		knowledgeBaseID: knowledgeBaseID,
 		subscribers:     make(map[chan Event]struct{}),
 		expiresAt:       time.Now().Add(h.ttl),
+	}
+	return nil
+}
+
+// RegisterCancel attaches the caller-provided cancel function to an active
+// run. The handler owns the underlying context; the Hub only remembers how to
+// stop the run so the stop endpoint can reach it without sharing context
+// across handlers.
+func (h *Hub) RegisterCancel(runID string, cancel func()) error {
+	if h == nil || runID == "" || cancel == nil {
+		return ErrRunNotFound
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	run, ok := h.runs[runID]
+	if !ok {
+		return ErrRunNotFound
+	}
+	run.cancel = cancel
+	return nil
+}
+
+// Cancel stops an active run by invoking its registered cancel function once.
+// The run is scoped by knowledge base ID like Subscribe, so a stop request
+// cannot cancel another knowledge base's run. Canceling a finished or
+// unknown run is a no-op for the former and ErrRunNotFound for the latter.
+func (h *Hub) Cancel(runID string, knowledgeBaseID int64) error {
+	if h == nil || runID == "" || knowledgeBaseID <= 0 {
+		return ErrRunNotFound
+	}
+	h.mu.Lock()
+	run, ok := h.runs[runID]
+	if !ok || run.knowledgeBaseID != knowledgeBaseID {
+		h.mu.Unlock()
+		return ErrRunNotFound
+	}
+	cancel := run.cancel
+	run.cancel = nil
+	h.mu.Unlock()
+	// The cancel function is called outside the lock: it may synchronously
+	// wake the Agent loop, which must not contend with hub mutations.
+	if cancel != nil {
+		cancel()
 	}
 	return nil
 }
