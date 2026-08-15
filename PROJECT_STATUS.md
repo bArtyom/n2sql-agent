@@ -21,7 +21,7 @@
 
 ## 当前代码状态
 
-- 最新提交：`42005a5 feat: show live retrieval progress in answers`。
+- 最新提交：`8e5acd3 feat: typed rendering of agent tool results`。
 - 当前工作区在该提交后保持干净。
 - 第一阶段知识库问答底座已完成：知识库、文档上传和 Worker、Markdown/TXT/PDF 提取、OCR 最小骨架、父子 chunk、embedding、混合检索、Rerank、引用和普通 RAG/SSE。
 - Agent Runtime 最小闭环已完成：Tool Registry、Function Calling、受限 ReAct、最大步数/超时/取消、工具失败安全降级、SSE 事件、上下文摘要、会话历史、幂等和运行摘要。
@@ -33,6 +33,7 @@
 - 最新会话置顶切片：`conversations.is_pinned` 列 + 排序索引；列表按置顶优先、组内按更新时间排序；`PATCH /conversations/{id}` 支持 `{"is_pinned": true/false}`（与重命名共用端点，跨库 404）；前端会话列表按「置顶 + 今天/昨天/N 天前」分组，置顶项 📌 标记与置顶/取消置顶按钮。
 - 会话体验四连切片：①自动标题——首轮问答后若仍是默认标题，用问题摘要（30 字截断）重命名，不覆盖用户已命名；②追问"换一批"——生成建议后按钮变为换一批，接口无状态直接再次调用；③会话更多菜单——"⋯"菜单（置顶/改名/清空消息/复制 Markdown/删除），清空走 `DELETE /conversations/{id}/messages`（事务删消息/摘要/幂等键，保留会话），复制为纯前端拼 Markdown；④正文内引用标记——提示词要求模型输出 `<kb doc_id pos/>`，前端渲染成可点击引用 pill（事件委托打开原文抽屉），流式显示"〔引用〕"，模型不输出标签时行为不变（来源卡片照旧）。
 - 可靠性三连切片：①断流续传——未完成的标准 Agent 运行持久化到 localStorage，刷新后重建占位消息并重连 Hub 重放（后端复用已有 `GET /agent-runs/{runID}/stream`，零新增接口）；②历史消息游标分页——`GET /conversations/{id}/messages` 支持 `before_id`+`limit`（默认 50/上限 200）返回 `{messages, has_more}`，前端滚动到顶部加载更早并保持视口；③实时检索进度——普通 RAG 流式新增 `retrieval_started`/`retrieval_finished` 阶段事件，Agent 轨迹头部流式中显示"正在检索知识库…/搜索完成 · N 条引用"实时徽标。
+- 最新工具结果类型化渲染：`document_list`/`document_info` 工具返回有界结构化 metadata（`documents`/`document_info`），engine 在 `tool_finished` 事件透传；前端展开工具轨迹时 document_list 渲染为表格（文档/类型/大小/状态）、document_info 渲染为键值卡片；工具完成 label 按工具名区分（知识库检索完成/查看文档列表完成等）。
 
 ## 明确后置或不做
 
