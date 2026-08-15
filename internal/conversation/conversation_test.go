@@ -319,3 +319,25 @@ func TestServicePinsAndUnpinsOwnedConversation(t *testing.T) {
 		t.Fatalf("invalid conversation error = %v, want ErrInvalidConversation", err)
 	}
 }
+
+func TestServiceAutoTitlesDefaultConversation(t *testing.T) {
+	store := &storeStub{conversation: conversation.Conversation{ID: 9, KnowledgeBaseID: 7, Title: conversation.DefaultTitle}}
+	service := conversation.NewService(store)
+	if err := service.AutoTitle(context.Background(), 9, 7, "请总结这篇文档的奖励函数设计，并且把记忆写入机制也一起说一下，最后讲讲原创性风险"); err != nil {
+		t.Fatalf("AutoTitle() error = %v", err)
+	}
+	if !strings.HasPrefix(store.conversation.Title, "请总结这篇文档的奖励函数设计") || !strings.HasSuffix(store.conversation.Title, "…") {
+		t.Fatalf("AutoTitle() title = %q, want capped question summary", store.conversation.Title)
+	}
+}
+
+func TestServiceAutoTitleSkipsUserRenamedConversation(t *testing.T) {
+	store := &storeStub{conversation: conversation.Conversation{ID: 9, KnowledgeBaseID: 7, Title: "我的笔记"}}
+	service := conversation.NewService(store)
+	if err := service.AutoTitle(context.Background(), 9, 7, "另一个问题"); err != nil {
+		t.Fatalf("AutoTitle() error = %v", err)
+	}
+	if store.conversation.Title != "我的笔记" {
+		t.Fatalf("AutoTitle() overwrote user title = %q, want untouched", store.conversation.Title)
+	}
+}

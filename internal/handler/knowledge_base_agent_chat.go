@@ -81,7 +81,7 @@ func NewKnowledgeBaseAgentChatWithConversationAndMetrics(answerer agentservice.A
 			if err != nil {
 				return err
 			}
-			if err := saveConversationExchange(r.Context(), conversations, request, response); err != nil {
+			if err := saveConversationExchange(r.Context(), conversations, knowledgeBaseID, request, response); err != nil {
 				return err
 			}
 			if err := saveConversationSummary(r.Context(), conversations, knowledgeBaseID, request, response); err != nil {
@@ -345,13 +345,17 @@ func loadConversationHistory(ctx context.Context, conversations *conversation.Se
 	return nil
 }
 
-func saveConversationExchange(ctx context.Context, conversations *conversation.Service, request agentservice.ChatRequest, response agentservice.Response) error {
+func saveConversationExchange(ctx context.Context, conversations *conversation.Service, knowledgeBaseID int64, request agentservice.ChatRequest, response agentservice.Response) error {
 	if request.ConversationID == 0 || conversations == nil {
 		return nil
 	}
 	metadata := conversationMetadataFromAgentResponse(response)
 	if err := conversations.SaveExchangeWithMetadata(ctx, request.ConversationID, request.Message, response.Answer, metadata); err != nil {
 		return fmt.Errorf("save conversation exchange: %w", err)
+	}
+	// 首轮问答后把默认标题换成问题摘要；失败只记录，不阻断回答保存。
+	if err := conversations.AutoTitle(ctx, request.ConversationID, knowledgeBaseID, request.Message); err != nil {
+		slog.WarnContext(ctx, "conversation_auto_title_failed", "conversation_id", request.ConversationID, "error", err)
 	}
 	return nil
 }

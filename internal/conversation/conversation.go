@@ -15,11 +15,14 @@ import (
 )
 
 const (
-	defaultTitle                    = "新对话"
-	maxTitleBytes                   = 200
-	maxMessageSize                  = 64 * 1024
-	maxIdempotencyKeySize           = 128
-	conversationLockNamespace int64 = 0x6e327361
+	// DefaultTitle is the placeholder title of a new conversation until the
+	// first exchange is saved and AutoTitle replaces it.
+	DefaultTitle                 = "新对话"
+	maxTitleBytes                = 200
+	maxMessageSize               = 64 * 1024
+	maxIdempotencyKeySize        = 128
+	conversationLockNamespace    = 0x6e327361
+	maxAutoTitleRunes            = 30
 )
 
 var (
@@ -216,7 +219,7 @@ func (s *Service) Create(ctx context.Context, knowledgeBaseID int64, title strin
 	}
 	title = strings.TrimSpace(title)
 	if title == "" {
-		title = defaultTitle
+		title = DefaultTitle
 	}
 	if len(title) > maxTitleBytes {
 		return Conversation{}, ErrInvalidTitle
@@ -255,6 +258,44 @@ func (s *Service) SetPinned(ctx context.Context, conversationID, knowledgeBaseID
 		return Conversation{}, err
 	}
 	return s.store.SetPinned(ctx, conversationID, pinned)
+}
+
+// AutoTitle replaces the default placeholder title with a short version of
+// the first user question. It is a no-op when the conversation was already
+// renamed by the user, so it never overwrites an explicit title.
+func (s *Service) AutoTitle(ctx context.Context, conversationID, knowledgeBaseID int64, question string) error {
+	if conversationID <= 0 || knowledgeBaseID <= 0 {
+		return ErrInvalidConversation
+	}
+	record, err := s.getOwnedConversation(ctx, conversationID, knowledgeBaseID)
+	if err != nil {
+		return err
+	}
+	if record.Title != DefaultTitle {
+		return nil
+	}
+	title := titleFromQuestion(question)
+	if title == "" {
+		return nil
+	}
+	_, err = s.store.UpdateTitle(ctx, conversationID, title)
+	return err
+}
+
+// titleFromQuestion collapses whitespace and caps the first line at
+// maxAutoTitleRunes runes so a question with newlines or trailing details
+// still produces a readable list title.
+func titleFromQuestion(question string) string {
+	firstLine := strings.Split(strings.TrimSpace(question), "\n")[0]
+	text := strings.Join(strings.Fields(firstLine), " ")
+	if text == "" {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= maxAutoTitleRunes {
+		return text
+	}
+	return string(runes[:maxAutoTitleRunes]) + "…"
 }
 
 func (s *Service) Delete(ctx context.Context, conversationID, knowledgeBaseID int64) error {

@@ -677,6 +677,16 @@ async function loadConversation() {
   }
 }
 
+// 只刷新会话列表（标题/置顶），不重选会话、不重置当前消息视图。
+async function refreshConversationList() {
+  if (!selectedKnowledgeBaseId.value) return;
+  try {
+    conversations.value = await requestJSON<Conversation[]>(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations`);
+  } catch {
+    // 保持现有列表，问答结果不受影响。
+  }
+}
+
 async function selectConversation(id: number | null) {
   conversationId.value = id;
   retrievalDetailsOpen.value = new Set();
@@ -978,6 +988,8 @@ async function askQuestion() {
     showError(error);
   } finally {
     streaming.value = false;
+    // 首轮问答后后端会把默认标题换成问题摘要，刷新列表让标题即时可见。
+    void refreshConversationList();
   }
 }
 
