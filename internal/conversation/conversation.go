@@ -148,6 +148,7 @@ type Store interface {
 	Get(context.Context, int64) (Conversation, error)
 	List(context.Context, int64) ([]Conversation, error)
 	ListMessages(context.Context, int64) ([]Message, error)
+	ListMessagesPage(context.Context, int64, int64, int) ([]Message, bool, error)
 	GetSummary(context.Context, int64) (Summary, error)
 	SaveSummary(context.Context, int64, int64, string) error
 	AppendExchange(context.Context, int64, string, string) error
@@ -327,6 +328,16 @@ func (s *Service) Messages(ctx context.Context, conversationID, knowledgeBaseID 
 		return nil, err
 	}
 	return s.store.ListMessages(ctx, conversationID)
+}
+
+// MessagesPage returns up to limit messages older than beforeID in ascending
+// order plus whether an earlier page exists. beforeID <= 0 loads the newest
+// page. The conversation must belong to the current knowledge base.
+func (s *Service) MessagesPage(ctx context.Context, conversationID, knowledgeBaseID, beforeID int64, limit int) ([]Message, bool, error) {
+	if _, err := s.getOwnedConversation(ctx, conversationID, knowledgeBaseID); err != nil {
+		return nil, false, err
+	}
+	return s.store.ListMessagesPage(ctx, conversationID, beforeID, limit)
 }
 
 func (s *Service) getOwnedConversation(ctx context.Context, conversationID, knowledgeBaseID int64) (Conversation, error) {
@@ -727,6 +738,59 @@ func (s *PostgresStore) ListMessages(ctx context.Context, conversationID int64) 
 		return nil, fmt.Errorf("iterate conversation messages: %w", err)
 	}
 	return results, nil
+}
+
+// ListMessagesPage fetches at most limit messages with id < beforeID in
+// ascending order. It reads limit+1 rows to report whether an earlier page
+// exists. beforeID <= 0 returns the newest page.
+func (s *PostgresStore) ListMessagesPage(ctx context.Context, conversationID, beforeID int64, limit int) ([]Message, bool, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, conversation_id, role, content, metadata, created_at
+		FROM (
+			SELECT m.id, m.conversation_id, m.role, m.content, m.metadata, m.created_at
+			FROM conversation_messages m
+			JOIN conversations c ON c.id = m.conversation_id
+			WHERE m.conversation_id = $1
+			  AND ($2 <= 0 OR m.id < $2)
+			  AND c.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
+			ORDER BY m.id DESC
+			LIMIT $3
+		) newest
+		ORDER BY id ASC`, conversationID, beforeID, limit+1)
+	if err != nil {
+		return nil, false, fmt.Errorf("list conversation messages page: %w", err)
+	}
+	defer rows.Close()
+	results := make([]Message, 0, limit)
+	for rows.Next() {
+		var result Message
+		var metadataBytes []byte
+		if err := rows.Scan(&result.ID, &result.ConversationID, &result.Role, &result.Content, &metadataBytes, &result.CreatedAt); err != nil {
+			return nil, false, fmt.Errorf("scan conversation message page: %w", err)
+		}
+		if len(metadataBytes) > 0 && string(metadataBytes) != "{}" {
+			var metadata MessageMetadata
+			if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+				return nil, false, fmt.Errorf("decode conversation message metadata: %w", err)
+			}
+			result.Metadata = &metadata
+		}
+		results = append(results, result)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("iterate conversation message page: %w", err)
+	}
+	hasMore := len(results) > limit
+	if hasMore {
+		results = results[:limit]
+	}
+	return results, hasMore, nil
 }
 
 func (s *PostgresStore) GetSummary(ctx context.Context, conversationID int64) (Summary, error) {

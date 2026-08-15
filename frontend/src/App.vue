@@ -221,6 +221,9 @@ const conversationsLoading = ref(false);
 const conversationCreating = ref(false);
 const openConversationMenuId = ref<number | null>(null);
 const copiedConversationID = ref<number | null>(null);
+// 历史消息分页游标：记录当前会话、已加载的最早消息 id 和是否还有更早的。
+const messageCursor = ref<{ conversationId: number | null; beforeId: number | null; hasMore: boolean }>({ conversationId: null, beforeId: null, hasMore: false });
+const loadingOlderMessages = ref(false);
 const chatMode = ref<ChatMode>("agent");
 const topK = ref(5);
 const similarityThreshold = ref(0.65);
@@ -753,11 +756,14 @@ async function selectConversation(id: number | null) {
   closeConversationMenu();
   retrievalDetailsOpen.value = new Set();
   messages.value = [];
+  messageCursor.value = { conversationId: id, beforeId: null, hasMore: false };
   if (!id || !selectedKnowledgeBaseId.value) return;
-  const stored = await requestJSON<ConversationMessage[]>(
-    `/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations/${id}/messages`,
-  );
-  messages.value = stored.map((message) => ({
+  await loadMessagePage(id, null);
+}
+
+// 把后端消息记录转换为页面上的聊天消息。
+function toChatMessage(message: ConversationMessage): ChatMessage {
+  return {
     role: message.role,
     content: message.content,
     status: "done",
@@ -768,7 +774,54 @@ async function selectConversation(id: number | null) {
     agentEvents: message.role === "assistant" ? restoreAgentEvents(message.metadata?.agent_trace) : undefined,
     runID: message.metadata?.agent_trace?.run_id,
     mode: message.role === "assistant" ? "agent" : undefined,
-  }));
+  };
+}
+
+// 加载一页历史消息并更新游标。beforeId 为空加载最新一页。
+async function loadMessagePage(id: number, beforeId: number | null): Promise<boolean> {
+  if (!selectedKnowledgeBaseId.value) return false;
+  const query = beforeId ? `?limit=50&before_id=${beforeId}` : "?limit=50";
+  const stored = await requestJSON<{ messages: ConversationMessage[]; has_more: boolean }>(
+    `/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations/${id}/messages${query}`,
+  );
+  const parsed = stored.messages.map(toChatMessage);
+  if (beforeId) {
+    messages.value = [...parsed, ...messages.value];
+  } else {
+    messages.value = parsed;
+  }
+  messageCursor.value = {
+    conversationId: id,
+    beforeId: stored.messages[0]?.id ?? null,
+    hasMore: stored.has_more,
+  };
+  return stored.has_more;
+}
+
+function onMessagesScroll(event: Event) {
+  const element = event.target as HTMLElement;
+  if (element.scrollTop <= 8 && messageCursor.value.hasMore && !loadingOlderMessages.value && messageCursor.value.conversationId) {
+    void loadOlderMessages();
+  }
+}
+
+async function loadOlderMessages() {
+  const cursor = messageCursor.value;
+  if (!cursor.conversationId || !cursor.hasMore || loadingOlderMessages.value) return;
+  loadingOlderMessages.value = true;
+  const messagesElement = document.querySelector(".messages");
+  const previousScrollHeight = messagesElement?.scrollHeight ?? 0;
+  try {
+    await loadMessagePage(cursor.conversationId, cursor.beforeId);
+    // 新内容插入顶部后把滚动位置向下推，保持用户当前看到的区域不变。
+    requestAnimationFrame(() => {
+      if (messagesElement) messagesElement.scrollTop = messagesElement.scrollHeight - previousScrollHeight;
+    });
+  } catch (error) {
+    showError(error);
+  } finally {
+    loadingOlderMessages.value = false;
+  }
 }
 
 async function createConversation() {
@@ -852,14 +905,23 @@ async function clearConversationMessages(item: Conversation) {
 async function copyConversationMarkdown(item: Conversation) {
   if (!selectedKnowledgeBaseId.value) return;
   try {
-    const stored = await requestJSON<ConversationMessage[]>(
-      `/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations/${item.id}/messages`,
-    );
-    if (!stored.length) {
+    // 分页拉取全部消息（最多 200 条一页），保证复制的会话完整。
+    const all: ConversationMessage[] = [];
+    let beforeId: number | null = null;
+    while (true) {
+      const query: string = beforeId ? `?limit=200&before_id=${beforeId}` : "?limit=200";
+      const page: { messages: ConversationMessage[]; has_more: boolean } = await requestJSON(
+        `/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations/${item.id}/messages${query}`,
+      );
+      all.unshift(...page.messages);
+      if (!page.has_more || !page.messages.length) break;
+      beforeId = page.messages[0].id;
+    }
+    if (!all.length) {
       errorMessage.value = "这个会话还没有消息可复制。";
       return;
     }
-    const lines = stored.map((message) => message.role === "user" ? `**问题**：${message.content}` : `**回答**：${message.content}`);
+    const lines = all.map((message) => message.role === "user" ? `**问题**：${message.content}` : `**回答**：${message.content}`);
     await navigator.clipboard.writeText(`# ${item.title}\n\n${lines.join("\n\n")}`);
     copiedConversationID.value = item.id;
   } catch (error) {
@@ -1952,7 +2014,8 @@ onUnmounted(() => {
                 </template>
             </div>
           </template>
-          <div class="messages" aria-live="polite" @click="onMessagesClick">
+          <div class="messages" aria-live="polite" @click="onMessagesClick" @scroll.passive="onMessagesScroll">
+            <div v-if="loadingOlderMessages" class="messages-loading-older">正在加载更早的消息…</div>
             <div v-if="!messages.length" class="chat-empty">
               <span>“</span>
               <p>问一个关于这套资料的问题，<br />让线索自己浮上来。</p>

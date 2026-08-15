@@ -42,12 +42,20 @@ func NewConversations(service *conversation.Service) http.Handler {
 			}
 			switch r.Method {
 			case http.MethodGet:
-				messages, err := service.Messages(r.Context(), conversationID, knowledgeBaseID)
+				beforeID, limit, err := decodeMessagesPage(r)
+				if err != nil {
+					http.Error(w, `{"error":"invalid message page"}`, http.StatusBadRequest)
+					return
+				}
+				messages, hasMore, err := service.MessagesPage(r.Context(), conversationID, knowledgeBaseID, beforeID, limit)
 				if err != nil {
 					writeConversationError(w, err)
 					return
 				}
-				writeJSON(w, messages)
+				writeJSON(w, struct {
+					Messages []conversation.Message `json:"messages"`
+					HasMore  bool                   `json:"has_more"`
+				}{Messages: messages, HasMore: hasMore})
 			case http.MethodPatch:
 				updateConversation(w, r, service, conversationID, knowledgeBaseID)
 			case http.MethodDelete:
@@ -146,6 +154,32 @@ func parsePositiveID(value string) (int64, error) {
 		return 0, errors.New("invalid ID")
 	}
 	return id, nil
+}
+
+const (
+	defaultMessagePageSize = 50
+	maxMessagePageSize     = 200
+)
+
+// decodeMessagesPage reads optional before_id and limit query parameters.
+// before_id is a message ID cursor; a missing value loads the newest page.
+func decodeMessagesPage(r *http.Request) (beforeID int64, limit int, err error) {
+	limit = defaultMessagePageSize
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || parsed <= 0 || parsed > maxMessagePageSize {
+			return 0, 0, errors.New("invalid limit")
+		}
+		limit = parsed
+	}
+	if raw := r.URL.Query().Get("before_id"); raw != "" {
+		parsed, parseErr := strconv.ParseInt(raw, 10, 64)
+		if parseErr != nil || parsed <= 0 {
+			return 0, 0, errors.New("invalid before_id")
+		}
+		beforeID = parsed
+	}
+	return beforeID, limit, nil
 }
 
 func writeConversationError(w http.ResponseWriter, err error) {

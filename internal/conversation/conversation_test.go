@@ -60,6 +60,22 @@ func (s *storeStub) ListMessages(context.Context, int64) ([]conversation.Message
 	return s.messages, nil
 }
 
+func (s *storeStub) ListMessagesPage(_ context.Context, conversationID, beforeID int64, limit int) ([]conversation.Message, bool, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	older := make([]conversation.Message, 0)
+	for _, message := range s.messages {
+		if message.ConversationID == conversationID && (beforeID <= 0 || message.ID < beforeID) {
+			older = append(older, message)
+		}
+	}
+	if len(older) > limit {
+		return older[len(older)-limit:], true, nil
+	}
+	return older, false, nil
+}
+
 func (s *storeStub) GetSummary(context.Context, int64) (conversation.Summary, error) {
 	return s.summary, s.summaryErr
 }

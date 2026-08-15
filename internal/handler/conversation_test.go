@@ -45,6 +45,22 @@ func (s *conversationStoreStub) ListMessages(_ context.Context, id int64) ([]con
 	}
 	return result, nil
 }
+
+func (s *conversationStoreStub) ListMessagesPage(_ context.Context, id, beforeID int64, limit int) ([]conversation.Message, bool, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	older := make([]conversation.Message, 0)
+	for _, message := range s.messages {
+		if message.ConversationID == id && (beforeID <= 0 || message.ID < beforeID) {
+			older = append(older, message)
+		}
+	}
+	if len(older) > limit {
+		return older[len(older)-limit:], true, nil
+	}
+	return older, false, nil
+}
 func (s *conversationStoreStub) GetSummary(context.Context, int64) (conversation.Summary, error) {
 	return conversation.Summary{}, conversation.ErrNotFound
 }
@@ -148,8 +164,43 @@ func TestConversationHandlerReturnsMessages(t *testing.T) {
 	request.SetPathValue("id", "7")
 	request.SetPathValue("conversationId", "3")
 	endpoint.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"content":"问题"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"content":"问题"`) || !strings.Contains(response.Body.String(), `"has_more":false`) {
 		t.Fatalf("messages response: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestConversationHandlerPaginatesMessages(t *testing.T) {
+	store := &conversationStoreStub{records: []conversation.Conversation{{ID: 3, KnowledgeBaseID: 7, Title: "对话"}}}
+	for id := int64(1); id <= 5; id++ {
+		store.messages = append(store.messages, conversation.Message{ID: id, ConversationID: 3, Role: "user", Content: "消息"})
+	}
+	endpoint := handler.NewConversations(conversation.NewService(store))
+
+	first := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/7/conversations/3/messages?limit=2", nil)
+	request.SetPathValue("id", "7")
+	request.SetPathValue("conversationId", "3")
+	endpoint.ServeHTTP(first, request)
+	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), `"has_more":true`) {
+		t.Fatalf("first page: status=%d body=%s", first.Code, first.Body.String())
+	}
+
+	second := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/7/conversations/3/messages?limit=2&before_id=4", nil)
+	request.SetPathValue("id", "7")
+	request.SetPathValue("conversationId", "3")
+	endpoint.ServeHTTP(second, request)
+	if second.Code != http.StatusOK || !strings.Contains(second.Body.String(), `"has_more":true`) {
+		t.Fatalf("second page: status=%d body=%s", second.Code, second.Body.String())
+	}
+
+	last := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/7/conversations/3/messages?limit=2&before_id=2", nil)
+	request.SetPathValue("id", "7")
+	request.SetPathValue("conversationId", "3")
+	endpoint.ServeHTTP(last, request)
+	if last.Code != http.StatusOK || !strings.Contains(last.Body.String(), `"has_more":false`) {
+		t.Fatalf("last page: status=%d body=%s", last.Code, last.Body.String())
 	}
 }
 
