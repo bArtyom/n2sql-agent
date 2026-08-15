@@ -153,6 +153,7 @@ type Store interface {
 	AppendExchange(context.Context, int64, string, string) error
 	UpdateTitle(context.Context, int64, string) (Conversation, error)
 	SetPinned(context.Context, int64, bool) (Conversation, error)
+	ClearMessages(context.Context, int64) error
 	Delete(context.Context, int64) error
 }
 
@@ -306,6 +307,19 @@ func (s *Service) Delete(ctx context.Context, conversationID, knowledgeBaseID in
 		return err
 	}
 	return s.store.Delete(ctx, conversationID)
+}
+
+// ClearMessages removes every message, summary, and idempotency record of a
+// conversation while keeping the conversation itself, so the list entry and
+// its title survive a wipe.
+func (s *Service) ClearMessages(ctx context.Context, conversationID, knowledgeBaseID int64) error {
+	if conversationID <= 0 || knowledgeBaseID <= 0 {
+		return ErrInvalidConversation
+	}
+	if _, err := s.getOwnedConversation(ctx, conversationID, knowledgeBaseID); err != nil {
+		return err
+	}
+	return s.store.ClearMessages(ctx, conversationID)
 }
 
 func (s *Service) Messages(ctx context.Context, conversationID, knowledgeBaseID int64) ([]Message, error) {
@@ -642,6 +656,41 @@ func (s *PostgresStore) Delete(ctx context.Context, id int64) error {
 	}
 	if affected != 1 {
 		return ErrNotFound
+	}
+	return nil
+}
+
+// ClearMessages wipes the messages, summaries, and idempotency records of one
+// conversation in a single transaction. The conversation row itself is kept.
+// Every statement re-checks administrator ownership so a stale ID cannot
+// clear another administrator's data.
+func (s *PostgresStore) ClearMessages(ctx context.Context, conversationID int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin clear conversation messages: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	statements := []string{
+		`DELETE FROM conversation_messages
+		 WHERE conversation_id = $1
+		   AND $1 IN (SELECT id FROM conversations
+		              WHERE administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1))`,
+		`DELETE FROM conversation_summaries
+		 WHERE conversation_id = $1
+		   AND $1 IN (SELECT id FROM conversations
+		              WHERE administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1))`,
+		`DELETE FROM conversation_idempotency_keys
+		 WHERE conversation_id = $1
+		   AND $1 IN (SELECT id FROM conversations
+		              WHERE administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1))`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement, conversationID); err != nil {
+			return fmt.Errorf("clear conversation data: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit clear conversation messages: %w", err)
 	}
 	return nil
 }

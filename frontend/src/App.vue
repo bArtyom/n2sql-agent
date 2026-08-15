@@ -186,6 +186,8 @@ const providerMessageKind = ref<"idle" | "success" | "error">("idle");
 const providerForm = ref<ModelProvider>(emptyModelProvider());
 const conversationsLoading = ref(false);
 const conversationCreating = ref(false);
+const openConversationMenuId = ref<number | null>(null);
+const copiedConversationID = ref<number | null>(null);
 const chatMode = ref<ChatMode>("agent");
 const topK = ref(5);
 const similarityThreshold = ref(0.65);
@@ -689,6 +691,7 @@ async function refreshConversationList() {
 
 async function selectConversation(id: number | null) {
   conversationId.value = id;
+  closeConversationMenu();
   retrievalDetailsOpen.value = new Set();
   messages.value = [];
   if (!id || !selectedKnowledgeBaseId.value) return;
@@ -758,6 +761,48 @@ async function togglePinConversation(item: Conversation) {
       },
     );
     conversations.value = conversations.value.map((conversation) => conversation.id === updated.id ? updated : conversation);
+  } catch (error) {
+    showError(error);
+  }
+}
+
+function toggleConversationMenu(id: number) {
+  openConversationMenuId.value = openConversationMenuId.value === id ? null : id;
+}
+
+function closeConversationMenu() {
+  openConversationMenuId.value = null;
+}
+
+async function clearConversationMessages(item: Conversation) {
+  if (!selectedKnowledgeBaseId.value || streaming.value) return;
+  if (!window.confirm(`清空“${item.title}”的所有消息？会话本身会保留。`)) return;
+  try {
+    await requestJSON<void>(
+      `/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations/${item.id}/messages`,
+      { method: "DELETE" },
+    );
+    if (conversationId.value === item.id) {
+      messages.value = [];
+    }
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function copyConversationMarkdown(item: Conversation) {
+  if (!selectedKnowledgeBaseId.value) return;
+  try {
+    const stored = await requestJSON<ConversationMessage[]>(
+      `/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations/${item.id}/messages`,
+    );
+    if (!stored.length) {
+      errorMessage.value = "这个会话还没有消息可复制。";
+      return;
+    }
+    const lines = stored.map((message) => message.role === "user" ? `**问题**：${message.content}` : `**回答**：${message.content}`);
+    await navigator.clipboard.writeText(`# ${item.title}\n\n${lines.join("\n\n")}`);
+    copiedConversationID.value = item.id;
   } catch (error) {
     showError(error);
   }
@@ -1797,9 +1842,14 @@ onUnmounted(() => {
                     <span class="conversation-item-title">{{ item.isPinned ? "📌 " : "" }}{{ item.title }}</span>
                     <small>{{ new Date(item.updatedAt).toLocaleDateString("zh-CN") }}</small>
                     <div class="conversation-actions">
-                      <button type="button" :aria-label="item.isPinned ? '取消置顶' : '置顶会话'" :disabled="conversationsLoading || streaming" @click.stop="togglePinConversation(item)">{{ item.isPinned ? "取消置顶" : "置顶" }}</button>
-                      <button type="button" aria-label="重命名会话" :disabled="conversationsLoading || streaming" @click.stop="renameConversation(item)">改名</button>
-                      <button type="button" aria-label="删除会话" :disabled="conversationsLoading || streaming" @click.stop="deleteConversation(item)">删</button>
+                      <button type="button" class="conversation-more" aria-label="会话更多操作" :disabled="conversationsLoading || streaming" @click.stop="toggleConversationMenu(item.id)">⋯</button>
+                      <div v-if="openConversationMenuId === item.id" class="conversation-menu" role="menu" @click.stop>
+                        <button type="button" role="menuitem" @click="togglePinConversation(item); closeConversationMenu()">{{ item.isPinned ? "取消置顶" : "置顶" }}</button>
+                        <button type="button" role="menuitem" @click="renameConversation(item); closeConversationMenu()">改名</button>
+                        <button type="button" role="menuitem" @click="clearConversationMessages(item); closeConversationMenu()">清空消息</button>
+                        <button type="button" role="menuitem" @click="copyConversationMarkdown(item); closeConversationMenu()">{{ copiedConversationID === item.id ? "已复制 Markdown" : "复制 Markdown" }}</button>
+                        <button type="button" role="menuitem" class="conversation-menu--danger" @click="deleteConversation(item); closeConversationMenu()">删除</button>
+                      </div>
                     </div>
                   </div>
                 </template>

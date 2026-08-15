@@ -28,6 +28,18 @@ func NewConversations(service *conversation.Service) http.Handler {
 				http.Error(w, `{"error":"invalid conversation ID"}`, http.StatusBadRequest)
 				return
 			}
+			if r.PathValue("messages") == "messages" {
+				if r.Method != http.MethodDelete {
+					w.WriteHeader(http.StatusMethodNotAllowed)
+					return
+				}
+				if err := service.ClearMessages(r.Context(), conversationID, knowledgeBaseID); err != nil {
+					writeConversationError(w, err)
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
 			switch r.Method {
 			case http.MethodGet:
 				messages, err := service.Messages(r.Context(), conversationID, knowledgeBaseID)

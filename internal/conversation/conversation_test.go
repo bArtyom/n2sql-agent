@@ -92,6 +92,8 @@ func (s *storeStub) SetPinned(_ context.Context, _ int64, pinned bool) (conversa
 	return s.conversation, nil
 }
 
+func (s *storeStub) ClearMessages(context.Context, int64) error { return nil }
+
 func (s *storeStub) Delete(context.Context, int64) error { return nil }
 
 func (s *storeStub) GetIdempotentResponse(_ context.Context, conversationID int64, key string) (conversation.IdempotentResponse, error) {

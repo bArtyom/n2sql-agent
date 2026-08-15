@@ -81,6 +81,17 @@ func (s *conversationStoreStub) SetPinned(_ context.Context, id int64, pinned bo
 	return conversation.Conversation{}, conversation.ErrNotFound
 }
 
+func (s *conversationStoreStub) ClearMessages(_ context.Context, id int64) error {
+	kept := s.messages[:0]
+	for _, message := range s.messages {
+		if message.ConversationID != id {
+			kept = append(kept, message)
+		}
+	}
+	s.messages = kept
+	return nil
+}
+
 func (s *conversationStoreStub) Delete(_ context.Context, id int64) error {
 	for index := range s.records {
 		if s.records[index].ID == id {
@@ -188,5 +199,42 @@ func TestConversationHandlerRejectsPatchWithoutFields(t *testing.T) {
 	endpoint.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("empty patch status = %d, want 400", response.Code)
+	}
+}
+
+func TestConversationHandlerClearsMessages(t *testing.T) {
+	store := &conversationStoreStub{records: []conversation.Conversation{{ID: 3, KnowledgeBaseID: 7, Title: "对话"}}}
+	store.messages = []conversation.Message{
+		{ID: 1, ConversationID: 3, Role: "user", Content: "问题"},
+		{ID: 2, ConversationID: 3, Role: "assistant", Content: "回答"},
+		{ID: 3, ConversationID: 9, Role: "user", Content: "别的会话"},
+	}
+	endpoint := handler.NewConversations(conversation.NewService(store))
+
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodDelete, "/api/knowledge-bases/7/conversations/3/messages", nil)
+	request.SetPathValue("id", "7")
+	request.SetPathValue("conversationId", "3")
+	request.SetPathValue("messages", "messages")
+	endpoint.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("clear status = %d, want 204", response.Code)
+	}
+	if len(store.messages) != 1 || store.messages[0].ConversationID != 9 {
+		t.Fatalf("messages after clear = %#v, want only other conversation", store.messages)
+	}
+}
+
+func TestConversationHandlerRejectsClearOnOtherKnowledgeBase(t *testing.T) {
+	store := &conversationStoreStub{records: []conversation.Conversation{{ID: 3, KnowledgeBaseID: 7, Title: "对话"}}}
+	endpoint := handler.NewConversations(conversation.NewService(store))
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodDelete, "/api/knowledge-bases/8/conversations/3/messages", nil)
+	request.SetPathValue("id", "8")
+	request.SetPathValue("conversationId", "3")
+	request.SetPathValue("messages", "messages")
+	endpoint.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("cross knowledge base clear status = %d, want 404", response.Code)
 	}
 }
