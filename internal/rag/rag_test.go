@@ -171,8 +171,41 @@ func TestServiceStreamsSourcesAndDeltas(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stream() error = %v", err)
 	}
-	if len(events) != 2 || events[0].Type != "sources" || len(events[0].Sources) != 1 || events[1].Type != "delta" || events[1].Delta == "" {
+	if len(events) != 4 || events[2].Type != "sources" || len(events[2].Sources) != 1 || events[3].Type != "delta" || events[3].Delta == "" {
 		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestServiceEmitsRetrievalPhasesBeforeSources(t *testing.T) {
+	chat := &chatStub{}
+	service := rag.NewService(searcherStub{}, chat)
+	var events []rag.StreamEvent
+
+	err := service.Stream(context.Background(), 7, "如何启动服务？", 5, func(event rag.StreamEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	if len(events) < 2 {
+		t.Fatalf("events = %#v, want retrieval phase events", events)
+	}
+	if events[0].Type != "retrieval_started" {
+		t.Fatalf("first event type = %q, want retrieval_started", events[0].Type)
+	}
+	foundFinished := false
+	for _, event := range events[1:] {
+		if event.Type == "retrieval_finished" {
+			foundFinished = true
+			break
+		}
+		if event.Type == "sources" {
+			break
+		}
+	}
+	if !foundFinished {
+		t.Fatalf("events = %#v, want retrieval_finished before sources", events)
 	}
 }
 

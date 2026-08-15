@@ -1435,6 +1435,21 @@ function agentTraceSummary(message: ChatMessage) {
   return parts.length ? parts.join(" · ") : `${message.agentEvents?.length ?? 0} EVENTS`;
 }
 
+// 流式运行中的实时流水线状态：检索工具进行中/完成时显示进度徽标，
+// 回答结束（run_finished）后由 agentTraceSummary 接管展示运行摘要。
+function agentTraceStatus(message: ChatMessage) {
+  const events = message.agentEvents ?? [];
+  const last = events[events.length - 1];
+  if (!last || message.status !== "streaming") return "";
+  if (last.status === "running" && last.type === "tool_called") {
+    return `正在${last.label}…`;
+  }
+  if (last.status === "done" && last.label.includes("检索完成")) {
+    return `搜索完成 · ${(message.sources ?? []).length} 条引用`;
+  }
+  return "";
+}
+
 function recordAgentEvent(
   answer: ChatMessage,
   type: string,
@@ -2030,7 +2045,7 @@ onUnmounted(() => {
                 <span>{{ message.activity }}</span>
               </div>
               <div v-if="message.role === 'assistant' && message.agentEvents?.length" class="agent-trace">
-                <div class="agent-trace-head"><span>Agent 运行轨迹</span><small>{{ agentTraceSummary(message) }}</small></div>
+                <div class="agent-trace-head"><span>Agent 运行轨迹</span><small>{{ agentTraceStatus(message) || agentTraceSummary(message) }}</small></div>
                 <div v-for="(trace, traceIndex) in message.agentEvents" :key="agentTraceKey(trace, traceIndex)" class="agent-trace-row" :class="`agent-trace-row--${trace.status}`">
                   <span class="agent-trace-marker">{{ trace.status === 'done' ? '✓' : trace.status === 'error' ? '!' : '·' }}</span>
                   <button

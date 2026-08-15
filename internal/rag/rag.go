@@ -150,9 +150,15 @@ func (s *Service) stream(ctx context.Context, knowledgeBaseID int64, question st
 	if options.QueryRewrite {
 		ctx = usage.WithQueryRewriteObserver(ctx, tracker)
 	}
+	if err := emit(StreamEvent{Type: "retrieval_started"}); err != nil {
+		return fmt.Errorf("emit retrieval started: %w", err)
+	}
 	sources, err := s.retrieveSources(ctx, knowledgeBaseID, question, topK, maxDistance, options)
 	if err != nil {
 		return err
+	}
+	if err := emit(StreamEvent{Type: "retrieval_finished", Retrieval: retrievalPointer(retrievalTracker)}); err != nil {
+		return fmt.Errorf("emit retrieval finished: %w", err)
 	}
 	if err := emit(StreamEvent{Type: "sources", Sources: sources, QueryRewrite: queryRewritePointer(tracker), Retrieval: retrievalPointer(retrievalTracker)}); err != nil {
 		return fmt.Errorf("emit answer sources: %w", err)

@@ -66,7 +66,7 @@ func NewKnowledgeBaseChatStream(answerer rag.StreamAnswerer) http.Handler {
 
 func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, event string, value any) error {
 	switch event {
-	case "sources", "delta", "done", "error":
+	case "sources", "delta", "done", "error", "retrieval_started", "retrieval_finished":
 	default:
 		return fmt.Errorf("invalid SSE event type")
 	}
