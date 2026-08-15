@@ -191,6 +191,7 @@ const sourceLoading = ref(false);
 const selectedDocument = ref<DocumentItem | null>(null);
 const documentPreview = ref<DocumentPreview | null>(null);
 const documentPreviewLoading = ref(false);
+const documentPreviewPageSize = 8;
 const copiedMessageIndex = ref<number | null>(null);
 const copiedSourceKey = ref<string | null>(null);
 let copyFeedbackTimer: number | undefined;
@@ -376,11 +377,36 @@ async function openDocumentPreview(item: DocumentItem) {
   documentPreviewLoading.value = true;
   try {
     documentPreview.value = await requestJSON<DocumentPreview>(
-      `/api/knowledge-bases/${selectedKnowledgeBaseId.value}/documents/${item.id}/preview?limit=8`,
+      `/api/knowledge-bases/${selectedKnowledgeBaseId.value}/documents/${item.id}/preview?limit=${documentPreviewPageSize}`,
     );
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : "无法读取文档正文。";
     selectedDocument.value = null;
+  } finally {
+    documentPreviewLoading.value = false;
+  }
+}
+
+async function loadMoreDocumentPreview() {
+  const knowledgeBaseID = selectedKnowledgeBaseId.value;
+  const item = selectedDocument.value;
+  const current = documentPreview.value;
+  if (!knowledgeBaseID || !item || !current?.truncated || documentPreviewLoading.value) return;
+
+  const startPosition = current.nextPosition;
+  documentPreviewLoading.value = true;
+  try {
+    const next = await requestJSON<DocumentPreview>(
+      `/api/knowledge-bases/${knowledgeBaseID}/documents/${item.id}/preview?start=${startPosition}&limit=${documentPreviewPageSize}`,
+    );
+    if (selectedDocument.value?.id !== item.id || selectedKnowledgeBaseId.value !== knowledgeBaseID) return;
+    const knownPositions = new Set(current.chunks.map((chunk) => chunk.position));
+    documentPreview.value = {
+      ...next,
+      chunks: [...current.chunks, ...next.chunks.filter((chunk) => !knownPositions.has(chunk.position))],
+    };
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : "无法继续读取文档正文。";
   } finally {
     documentPreviewLoading.value = false;
   }
@@ -1757,7 +1783,10 @@ onUnmounted(() => {
               <span>第 {{ chunk.position + 1 }} 段</span>
               <p>{{ chunk.content }}</p>
             </article>
-            <p v-if="documentPreview.truncated" class="document-preview-note">当前只显示有限片段；如需继续查看，后续可从第 {{ documentPreview.nextPosition + 1 }} 段继续读取。</p>
+            <div v-if="documentPreview.truncated" class="document-preview-actions">
+              <p class="document-preview-note">当前已显示到第 {{ documentPreview.nextPosition }} 段。</p>
+              <button class="source-copy-button" type="button" :disabled="documentPreviewLoading || streaming" @click="loadMoreDocumentPreview">{{ documentPreviewLoading ? "读取中…" : "继续读取" }}</button>
+            </div>
           </template>
         </div>
         <p class="source-panel-note">正文来自当前知识库已处理的 chunk，读取范围受权限和字节上限约束。</p>
