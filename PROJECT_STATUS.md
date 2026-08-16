@@ -21,7 +21,7 @@
 
 ## 当前代码状态
 
-- 最新提交：`84c46b6 feat: show collapsible agent reasoning`（后端切片为前一提交 `a0b4c8d`）。
+- 最新提交：`13f3867 fix: validate chat image payloads`（前置功能提交为 `3333c11`、`5fec38a`）。
 - 当前工作区在该提交后保持干净。
 - 第一阶段知识库问答底座已完成：知识库、文档上传和 Worker、Markdown/TXT/PDF 提取、OCR 最小骨架、父子 chunk、embedding、混合检索、Rerank、引用和普通 RAG/SSE。
 - Agent Runtime 最小闭环已完成：Tool Registry、Function Calling、受限 ReAct、最大步数/超时/取消、工具失败安全降级、SSE 事件、上下文摘要、会话历史、幂等和运行摘要。
@@ -36,6 +36,7 @@
 - 最新工具结果类型化渲染：`document_list`/`document_info` 工具返回有界结构化 metadata（`documents`/`document_info`），engine 在 `tool_finished` 事件透传；前端展开工具轨迹时 document_list 渲染为表格（文档/类型/大小/状态）、document_info 渲染为键值卡片；工具完成 label 按工具名区分（知识库检索完成/查看文档列表完成等）。
 - 最新会话内模型切换切片：Provider 增加服务端聊天模型 allowlist，会话保存 `chat_model`；`PATCH /conversations/{id}` 和 Agent 请求支持选择模型，运行时只接受已配置模型；前端设置抽屉可维护可选聊天模型列表，会话顶部选择器会保存并恢复当前模型。Embedding、Rerank、协作研究和 A2A 未改变。
 - 最新深度思考展示切片：解析 OpenAI-compatible `reasoning_content`，标准 Agent 在 SSE 中发出有界、脱敏的 `reasoning_delta`；前端显示默认折叠的“深度思考”卡片，内容只保留在当前页面，不写入会话历史。协作研究模式不受影响。
+- 最新可控思考与聊天附件切片：标准 Agent 支持 `fast/standard/deep` 思考级别，显式映射为 `reasoning_effort`；输入区支持 PNG/JPEG/WEBP 图片和 TXT/Markdown 文本附件，服务端做数量、大小、base64、UTF-8 和图片签名校验，附件只参与当前一轮模型请求，不写入历史或知识库。
 
 ## 明确后置或不做
 
@@ -48,7 +49,7 @@
 
 默认继续沿着 WeKnora 对照后的 Agent/RAG 用户可见能力推进：先阅读相关现有代码和 `docs/` 记录，选择一个小而完整的功能切片，再实现后端链路、前端反馈和必要文档。不要因为看到后置项就直接开始 Redis、完整协议或大规模评测。
 
-下一轮候选：对照盘点小/中切片已完成（#1 停止生成、#2 置顶分组、#3 自动标题、#4 换一批、#7 更多菜单、#5 正文引用、#9 断流续传、#8 消息分页、#6 实时检索进度、#12 工具结果类型化渲染、#11 会话内模型切换、#13 深度思考展示）。剩余：会话搜索（#14，大，后置）、Web 搜索（#15，边界外）、工具审批（#16，后置）、聊天附件/图片（#10，中偏大）。建议下一步先在真实 Provider 环境验收模型切换与深度思考展示，再进入 #10。
+下一轮候选：对照盘点小/中切片已完成（#1 停止生成、#2 置顶分组、#3 自动标题、#4 换一批、#7 更多菜单、#5 正文引用、#9 断流续传、#8 消息分页、#6 实时检索进度、#12 工具结果类型化渲染、#11 会话内模型切换、#13 深度思考展示、#10 聊天附件/图片）。剩余：会话搜索（#14，大，后置）、Web 搜索（#15，边界外）、工具审批（#16，后置）。建议下一步在真实 Provider 环境验收思考参数与视觉模型，再评估供应商专属 thinking budget。
 
 ## 交付要求
 
