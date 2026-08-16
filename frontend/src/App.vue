@@ -41,6 +41,8 @@ type ChatMessage = {
   sources?: Source[];
   status?: "streaming" | "done" | "error" | "stopped";
   activity?: string;
+  reasoningContent?: string;
+  reasoningExpanded?: boolean;
   researchEvents?: ResearchEvent[];
   agentEvents?: AgentEvent[];
   queryRewrite?: QueryRewriteStatus;
@@ -1401,6 +1403,8 @@ async function retryAnswer(answer: ChatMessage, answerIndex: number) {
   if (!selectedKnowledgeBaseId.value) return;
   answer.content = "";
   answer.sources = [];
+  answer.reasoningContent = "";
+  answer.reasoningExpanded = false;
   answer.agentEvents = [];
   answer.agentStats = undefined;
   answer.expandedAgentEvents = new Set();
@@ -1700,6 +1704,17 @@ function toggleAgentTrace(message: ChatMessage, trace: AgentEvent, index: number
   message.expandedAgentEvents = expanded;
 }
 
+function reasoningStatus(message: ChatMessage) {
+  if (message.status === "streaming") return "思考中";
+  if (message.status === "stopped") return "已停止";
+  if (message.status === "error") return "已结束";
+  return "已完成";
+}
+
+function toggleReasoning(message: ChatMessage) {
+  message.reasoningExpanded = !message.reasoningExpanded;
+}
+
 function consumeSSEBlock(block: string, answerIndex: number, researchMode = false) {
   const answer = messages.value[answerIndex];
   if (!answer) return;
@@ -1806,6 +1821,15 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
           answer.sources = mergeSources(answer.sources ?? [], parseSources(eventData.sources));
         }
         answer.activity = "资料查找完成，正在组织答案…";
+        break;
+      case "reasoning_delta":
+        if (!researchMode) {
+          const reasoning = dataString("content");
+          if (reasoning) {
+            answer.reasoningContent = `${answer.reasoningContent ?? ""}${reasoning}`.slice(0, 12 * 1024);
+            answer.activity = "正在思考…";
+          }
+        }
         break;
       case "message_delta":
         if (!researchMode && !answer.agentEvents?.some((item) => item.type === "answer_started")) {
@@ -2200,6 +2224,22 @@ onUnmounted(() => {
               <div v-if="message.role === 'assistant' && message.status === 'streaming' && message.activity" class="message-activity">
                 <span class="message-activity-dot" />
                 <span>{{ message.activity }}</span>
+              </div>
+              <div v-if="message.role === 'assistant' && message.reasoningContent" class="thinking-card">
+                <button
+                  type="button"
+                  class="thinking-toggle"
+                  :aria-expanded="message.reasoningExpanded === true"
+                  :aria-controls="`thinking-${index}`"
+                  @click="toggleReasoning(message)"
+                >
+                  <span class="thinking-toggle-arrow" :class="{ 'thinking-toggle-arrow--expanded': message.reasoningExpanded }" aria-hidden="true">›</span>
+                  <span class="thinking-toggle-title">深度思考</span>
+                  <small>{{ reasoningStatus(message) }}</small>
+                </button>
+                <div v-if="message.reasoningExpanded" :id="`thinking-${index}`" class="thinking-content" role="region" aria-label="模型深度思考内容">
+                  {{ message.reasoningContent }}
+                </div>
               </div>
               <div v-if="message.role === 'assistant' && message.agentEvents?.length" class="agent-trace">
                 <div class="agent-trace-head"><span>Agent 运行轨迹</span><small>{{ agentTraceStatus(message) || agentTraceSummary(message) }}</small></div>
