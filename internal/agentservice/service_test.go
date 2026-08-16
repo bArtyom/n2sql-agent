@@ -22,7 +22,8 @@ func TestServiceSendsAttachmentPartsAndThinkingEffortContext(t *testing.T) {
 		if len(user.ContentParts) != 2 || user.ContentParts[0].Type != "text" || user.ContentParts[1].Type != "image_url" {
 			t.Fatalf("user content parts = %#v, want text/image", user.ContentParts)
 		}
-		if user.ContentParts[1].ImageURL == nil || user.ContentParts[1].ImageURL.URL != "data:image/png;base64,"+base64.StdEncoding.EncodeToString([]byte("png")) {
+		validPNG := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}
+		if user.ContentParts[1].ImageURL == nil || user.ContentParts[1].ImageURL.URL != "data:image/png;base64,"+base64.StdEncoding.EncodeToString(validPNG) {
 			t.Fatalf("image part = %#v", user.ContentParts[1].ImageURL)
 		}
 		return modelclient.ChatResponse{Message: "已分析图片"}, nil
@@ -37,7 +38,7 @@ func TestServiceSendsAttachmentPartsAndThinkingEffortContext(t *testing.T) {
 		Attachments: []agentservice.ChatAttachment{{
 			Filename:    "chart.png",
 			ContentType: "image/png",
-			DataBase64:  base64.StdEncoding.EncodeToString([]byte("png")),
+			DataBase64:  base64.StdEncoding.EncodeToString([]byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}),
 		}},
 	})
 	if err != nil {

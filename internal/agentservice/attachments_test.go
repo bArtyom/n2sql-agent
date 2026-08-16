@@ -8,7 +8,7 @@ import (
 
 func TestChatContentPartsBuildsImageAndTextParts(t *testing.T) {
 	attachments := []ChatAttachment{
-		{Filename: "chart.png", ContentType: "image/png", DataBase64: base64.StdEncoding.EncodeToString([]byte("png"))},
+		{Filename: "chart.png", ContentType: "image/png", DataBase64: base64.StdEncoding.EncodeToString([]byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a})},
 		{Filename: "notes.txt", ContentType: "text/plain", DataBase64: base64.StdEncoding.EncodeToString([]byte("说明"))},
 	}
 	parts, err := ChatContentParts("请分析", attachments)
@@ -33,6 +33,7 @@ func TestValidateAttachmentsRejectsUnsafeAndOversizedInput(t *testing.T) {
 		wantErr    error
 	}{
 		{name: "unsupported type", attachment: ChatAttachment{Filename: "run.exe", ContentType: "application/octet-stream", DataBase64: "YQ=="}, wantErr: ErrInvalidAttachment},
+		{name: "invalid image signature", attachment: ChatAttachment{Filename: "fake.png", ContentType: "image/png", DataBase64: base64.StdEncoding.EncodeToString([]byte("not png"))}, wantErr: ErrInvalidAttachment},
 		{name: "invalid base64", attachment: ChatAttachment{Filename: "note.txt", ContentType: "text/plain", DataBase64: "not-base64"}, wantErr: ErrInvalidAttachment},
 		{name: "oversized text", attachment: ChatAttachment{Filename: "note.txt", ContentType: "text/plain", DataBase64: base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", MaxTextAttachmentBytes+1)))}, wantErr: ErrAttachmentTooLarge},
 	}

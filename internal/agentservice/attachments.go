@@ -1,6 +1,7 @@
 package agentservice
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -16,7 +17,7 @@ const (
 	MaxImageAttachmentBytes    = 4 << 20
 	MaxTextAttachmentBytes     = 128 << 10
 	MaxAttachmentFilenameBytes = 255
-	MaxAttachmentRequestBytes  = 14 << 20
+	MaxAttachmentRequestBytes  = 18 << 20
 )
 
 var (
@@ -76,6 +77,9 @@ func ValidateAttachments(attachments []ChatAttachment) error {
 		if len(decoded) > limit {
 			return fmt.Errorf("%w: %s", ErrAttachmentTooLarge, attachment.Filename)
 		}
+		if strings.HasPrefix(attachment.ContentType, "image/") && !validImageSignature(attachment.ContentType, decoded) {
+			return fmt.Errorf("%w: invalid image data", ErrInvalidAttachment)
+		}
 		if strings.HasPrefix(attachment.ContentType, "text/") && !utf8.Valid(decoded) {
 			return fmt.Errorf("%w: %s is not valid UTF-8", ErrInvalidAttachment, attachment.Filename)
 		}
@@ -132,4 +136,17 @@ func decodeAttachment(attachment ChatAttachment) ([]byte, error) {
 		return nil, fmt.Errorf("%w: invalid base64", ErrInvalidAttachment)
 	}
 	return decoded, nil
+}
+
+func validImageSignature(contentType string, data []byte) bool {
+	switch contentType {
+	case "image/png":
+		return bytes.HasPrefix(data, []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a})
+	case "image/jpeg":
+		return bytes.HasPrefix(data, []byte{0xff, 0xd8, 0xff})
+	case "image/webp":
+		return len(data) >= 12 && bytes.Equal(data[:4], []byte("RIFF")) && bytes.Equal(data[8:12], []byte("WEBP"))
+	default:
+		return false
+	}
 }

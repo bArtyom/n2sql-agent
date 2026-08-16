@@ -78,7 +78,7 @@ func TestKnowledgeBaseAgentChatPassesSelectedChatModel(t *testing.T) {
 func TestKnowledgeBaseAgentChatPassesThinkingModeAndAttachments(t *testing.T) {
 	answerer := &agentAnswererStub{response: agentservice.Response{Answer: "OK"}}
 	endpoint := handler.NewKnowledgeBaseAgentChat(answerer)
-	body := `{"message":"看图","thinking_mode":"deep","attachments":[{"filename":"chart.png","content_type":"image/png","data_base64":"` + base64.StdEncoding.EncodeToString([]byte("png")) + `"}]}`
+	body := `{"message":"看图","thinking_mode":"deep","attachments":[{"filename":"chart.png","content_type":"image/png","data_base64":"` + base64.StdEncoding.EncodeToString([]byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}) + `"}]}`
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat", strings.NewReader(body))
 	request.SetPathValue("id", "7")
