@@ -2,6 +2,7 @@ package handler_test
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -71,6 +72,35 @@ func TestKnowledgeBaseAgentChatPassesSelectedChatModel(t *testing.T) {
 
 	if response.Code != http.StatusOK || answerer.request.ChatModel != "chat-fast" {
 		t.Fatalf("status=%d chat_model=%q, want 200 and chat-fast", response.Code, answerer.request.ChatModel)
+	}
+}
+
+func TestKnowledgeBaseAgentChatPassesThinkingModeAndAttachments(t *testing.T) {
+	answerer := &agentAnswererStub{response: agentservice.Response{Answer: "OK"}}
+	endpoint := handler.NewKnowledgeBaseAgentChat(answerer)
+	body := `{"message":"看图","thinking_mode":"deep","attachments":[{"filename":"chart.png","content_type":"image/png","data_base64":"` + base64.StdEncoding.EncodeToString([]byte("png")) + `"}]}`
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat", strings.NewReader(body))
+	request.SetPathValue("id", "7")
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || answerer.request.ThinkingMode != "deep" || len(answerer.request.Attachments) != 1 {
+		t.Fatalf("status=%d request=%#v, want deep with one attachment", response.Code, answerer.request)
+	}
+}
+
+func TestKnowledgeBaseAgentChatRejectsInvalidAttachment(t *testing.T) {
+	answerer := &agentAnswererStub{response: agentservice.Response{Answer: "OK"}}
+	endpoint := handler.NewKnowledgeBaseAgentChat(answerer)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat", strings.NewReader(`{"message":"问题","attachments":[{"filename":"script.svg","content_type":"image/svg+xml","data_base64":"YQ=="}]}`))
+	request.SetPathValue("id", "7")
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest || answerer.calls != 0 {
+		t.Fatalf("status=%d calls=%d, want 400 without invoking answerer", response.Code, answerer.calls)
 	}
 }
 

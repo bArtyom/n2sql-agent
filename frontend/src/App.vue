@@ -60,7 +60,17 @@ type ChatMessage = {
   followUpLoading?: boolean;
   // 只用于当前页面：已向后端请求停止本次生成。
   stopRequested?: boolean;
+  attachments?: ChatAttachmentPreview[];
 };
+type ThinkingMode = "fast" | "standard" | "deep";
+type ChatAttachmentPreview = {
+  filename: string;
+  contentType: string;
+  dataBase64?: string;
+  dataURL?: string;
+  sizeBytes: number;
+};
+type ChatAttachmentDraft = ChatAttachmentPreview & { dataBase64: string };
 type QueryRewriteStatus = { enabled: boolean; applied: boolean; fallback: boolean; variant_count: number };
 type RetrievalStats = {
   vector_candidates: number;
@@ -216,6 +226,7 @@ const stopping = ref(false);
 const errorMessage = ref("");
 const mobileRailOpen = ref(false);
 const fileInput = ref<HTMLInputElement | null>(null);
+const chatAttachmentInput = ref<HTMLInputElement | null>(null);
 const providerSettingsOpen = ref(false);
 const providerLoading = ref(false);
 const providerSaving = ref(false);
@@ -229,6 +240,8 @@ const defaultChatModel = ref("");
 const chatModelOptionsLoading = ref(false);
 const chatModelOptionsError = ref("");
 const selectedChatModel = ref("");
+const thinkingMode = ref<ThinkingMode>("standard");
+const chatAttachments = ref<ChatAttachmentDraft[]>([]);
 const conversationsLoading = ref(false);
 const conversationCreating = ref(false);
 const openConversationMenuId = ref<number | null>(null);
@@ -1222,11 +1235,89 @@ function scheduleDocumentPolling() {
   documentPollTimer = window.setInterval(() => void refreshDocuments(), 2500);
 }
 
+const maxChatAttachments = 3;
+const maxChatImageBytes = 4 * 1024 * 1024;
+const maxChatTextBytes = 128 * 1024;
+
+function attachmentContentType(file: File): string {
+  if (["image/png", "image/jpeg", "image/webp"].includes(file.type)) return file.type;
+  const extension = file.name.toLowerCase().split(".").pop();
+  if (extension === "md") return "text/markdown";
+  if (extension === "txt") return "text/plain";
+  return file.type;
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length)));
+  }
+  return btoa(binary);
+}
+
+async function prepareChatAttachment(file: File): Promise<ChatAttachmentDraft> {
+  const contentType = attachmentContentType(file);
+  if (!["image/png", "image/jpeg", "image/webp", "text/plain", "text/markdown"].includes(contentType)) {
+    throw new Error(`不支持附件类型：${file.name}`);
+  }
+  const limit = contentType.startsWith("image/") ? maxChatImageBytes : maxChatTextBytes;
+  if (file.size <= 0 || file.size > limit) {
+    throw new Error(`附件“${file.name}”超过大小限制。`);
+  }
+  const dataBase64 = bytesToBase64(new Uint8Array(await file.arrayBuffer()));
+  return {
+    filename: file.name,
+    contentType,
+    dataBase64,
+    dataURL: `data:${contentType};base64,${dataBase64}`,
+    sizeBytes: file.size,
+  };
+}
+
+async function addChatAttachments(files: File[]) {
+  if (chatMode.value !== "agent") return;
+  const remaining = maxChatAttachments - chatAttachments.value.length;
+  if (remaining <= 0) {
+    errorMessage.value = `一条消息最多添加 ${maxChatAttachments} 个附件。`;
+    return;
+  }
+  try {
+    const prepared = [] as ChatAttachmentDraft[];
+    for (const file of files.slice(0, remaining)) prepared.push(await prepareChatAttachment(file));
+    chatAttachments.value = [...chatAttachments.value, ...prepared];
+    if (files.length > remaining) errorMessage.value = `一条消息最多添加 ${maxChatAttachments} 个附件。`;
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : "无法读取附件。";
+  } finally {
+    if (chatAttachmentInput.value) chatAttachmentInput.value.value = "";
+  }
+}
+
+function onChatAttachmentInput(event: Event) {
+  const target = event.target as HTMLInputElement | null;
+  void addChatAttachments(Array.from(target?.files ?? []));
+}
+
+function removeChatAttachment(index: number) {
+  chatAttachments.value = chatAttachments.value.filter((_, itemIndex) => itemIndex !== index);
+}
+
+function clearChatAttachments() {
+  chatAttachments.value = [];
+  if (chatAttachmentInput.value) chatAttachmentInput.value.value = "";
+}
+
 async function askQuestion() {
   const prompt = question.value.trim();
   if (!prompt || !selectedKnowledgeBaseId.value || streaming.value) return;
   const useResearchMode = chatMode.value === "research";
   const useA2AMode = chatMode.value === "a2a";
+  const outgoingAttachments = [...chatAttachments.value];
+  if ((useResearchMode || useA2AMode) && outgoingAttachments.length > 0) {
+    errorMessage.value = "附件目前只支持标准 Agent 模式。";
+    return;
+  }
   let activeConversationID: number | null = null;
   try {
     if (!useResearchMode && !useA2AMode) activeConversationID = await ensureConversation(prompt);
@@ -1235,9 +1326,14 @@ async function askQuestion() {
     return;
   }
   question.value = "";
+  clearChatAttachments();
   closeSource();
   closeDocumentPreview();
-  messages.value.push({ role: "user", content: prompt });
+  messages.value.push({
+    role: "user",
+    content: prompt,
+    attachments: outgoingAttachments.map(({ filename, contentType, dataURL, sizeBytes }) => ({ filename, contentType, dataURL, sizeBytes })),
+  });
   const answer: ChatMessage = {
     role: "assistant",
     content: "",
@@ -1256,7 +1352,7 @@ async function askQuestion() {
       await askA2ATask(prompt, answerIndex);
       return;
     }
-    await streamAgentQuestion(prompt, answerIndex, activeConversationID, useResearchMode);
+    await streamAgentQuestion(prompt, answerIndex, activeConversationID, useResearchMode, outgoingAttachments);
   } catch (error) {
     markAnswerFailure(answerIndex, error);
     showError(error);
@@ -1267,7 +1363,7 @@ async function askQuestion() {
   }
 }
 
-async function streamAgentQuestion(prompt: string, answerIndex: number, activeConversationID: number | null, researchMode: boolean) {
+async function streamAgentQuestion(prompt: string, answerIndex: number, activeConversationID: number | null, researchMode: boolean, attachments: ChatAttachmentDraft[] = []) {
   if (!selectedKnowledgeBaseId.value) throw new Error("请先选择知识库。");
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -1289,6 +1385,8 @@ async function streamAgentQuestion(prompt: string, answerIndex: number, activeCo
           query_rewrite: queryRewrite.value,
           keyword_threshold: keywordThreshold.value,
           conversation_id: activeConversationID,
+          thinking_mode: thinkingMode.value,
+          attachments: attachments.map(({ filename, contentType, dataBase64 }) => ({ filename, content_type: contentType, data_base64: dataBase64 })),
         }),
   });
   if (!response.ok || !response.body) {
@@ -2297,6 +2395,13 @@ onUnmounted(() => {
                   <small v-if="trace.detail">{{ trace.detail }}</small>
                 </div>
               </div>
+              <div v-if="message.role === 'user' && message.attachments?.length" class="message-attachments" aria-label="本轮附件">
+                <div v-for="attachment in message.attachments" :key="`${attachment.filename}-${attachment.sizeBytes}`" class="message-attachment">
+                  <img v-if="attachment.dataURL?.startsWith('data:image/')" :src="attachment.dataURL" :alt="attachment.filename" />
+                  <span v-else class="message-attachment-icon">TXT</span>
+                  <span>{{ attachment.filename }}</span>
+                </div>
+              </div>
               <div class="message-bubble" :class="{ 'message-bubble--error': message.status === 'error' }">
                 <span v-if="message.role === 'assistant' && !message.content && message.status === 'streaming'" class="typing"><i /><i /><i /></span>
                 <span v-else-if="message.role === 'user' || message.status === 'streaming' || message.status === 'error'">{{ message.role === "assistant" && message.status === "streaming" ? plainAnswerText(message.content) : message.content }}</span>
@@ -2358,8 +2463,30 @@ onUnmounted(() => {
           </div>
           <form class="composer" @submit.prevent="askQuestion">
             <textarea v-model="question" rows="2" :disabled="!selectedKnowledgeBase || streaming" placeholder="问问这套资料…" @keydown.enter.exact.prevent="askQuestion" />
+            <div v-if="chatMode === 'agent' && chatAttachments.length" class="attachment-draft-list" aria-label="待发送附件">
+              <div v-for="(attachment, attachmentIndex) in chatAttachments" :key="`${attachment.filename}-${attachmentIndex}`" class="attachment-draft">
+                <img v-if="attachment.dataURL?.startsWith('data:image/')" :src="attachment.dataURL" :alt="attachment.filename" />
+                <span v-else class="attachment-draft-icon">TXT</span>
+                <span class="attachment-draft-name">{{ attachment.filename }}</span>
+                <button type="button" aria-label="移除附件" @click="removeChatAttachment(attachmentIndex)">×</button>
+              </div>
+            </div>
             <div class="composer-footer">
-              <span>Enter 发送 · Shift + Enter 换行</span>
+              <div class="composer-tools">
+                <label v-if="chatMode === 'agent'" class="attachment-trigger" title="添加图片或文本附件">
+                  <span aria-hidden="true">＋</span>附件
+                  <input ref="chatAttachmentInput" type="file" accept="image/png,image/jpeg,image/webp,text/plain,text/markdown,.txt,.md" multiple :disabled="streaming" @change="onChatAttachmentInput" />
+                </label>
+                <label v-if="chatMode === 'agent'" class="thinking-mode-control">
+                  <span>思考</span>
+                  <select v-model="thinkingMode" :disabled="streaming" aria-label="选择思考模式">
+                    <option value="fast">快速</option>
+                    <option value="standard">标准</option>
+                    <option value="deep">深度</option>
+                  </select>
+                </label>
+                <span>Enter 发送 · Shift + Enter 换行</span>
+              </div>
               <button v-if="canStopGeneration" class="stop-button" type="button" aria-label="停止生成" @click="stopGeneration">停止生成</button>
               <button class="send-button" type="submit" :disabled="!question.trim() || streaming || !selectedKnowledgeBase" aria-label="发送问题">↗</button>
             </div>

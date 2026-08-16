@@ -2,6 +2,7 @@ package agentservice_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -14,6 +15,38 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 )
+
+func TestServiceSendsAttachmentPartsAndThinkingEffortContext(t *testing.T) {
+	chat := chatStub{call: func(messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		user := messages[len(messages)-1]
+		if len(user.ContentParts) != 2 || user.ContentParts[0].Type != "text" || user.ContentParts[1].Type != "image_url" {
+			t.Fatalf("user content parts = %#v, want text/image", user.ContentParts)
+		}
+		if user.ContentParts[1].ImageURL == nil || user.ContentParts[1].ImageURL.URL != "data:image/png;base64,"+base64.StdEncoding.EncodeToString([]byte("png")) {
+			t.Fatalf("image part = %#v", user.ContentParts[1].ImageURL)
+		}
+		return modelclient.ChatResponse{Message: "已分析图片"}, nil
+	}}
+	service, err := agentservice.NewService(chat, &searcherStub{}, 2, time.Minute)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	response, err := service.Answer(context.Background(), 7, agentservice.ChatRequest{
+		Message:      "请分析图片",
+		ThinkingMode: "deep",
+		Attachments: []agentservice.ChatAttachment{{
+			Filename:    "chart.png",
+			ContentType: "image/png",
+			DataBase64:  base64.StdEncoding.EncodeToString([]byte("png")),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Answer() error = %v", err)
+	}
+	if response.Answer != "已分析图片" {
+		t.Fatalf("answer = %q, want attachment answer", response.Answer)
+	}
+}
 
 type searcherStub struct {
 	knowledgeBaseID int64
