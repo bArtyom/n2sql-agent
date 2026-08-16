@@ -725,7 +725,11 @@ func (s *PostgresStore) Search(ctx context.Context, knowledgeBaseID int64, query
 func (s *PostgresStore) SearchMessages(ctx context.Context, knowledgeBaseID int64, query string, limit int) ([]MessageSearchResult, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT c.id, c.knowledge_base_id, c.title, c.is_pinned, c.chat_model, c.created_at, c.updated_at,
-		       m.id, m.role, LEFT(m.content, 240),
+		       m.id, m.role,
+		       CASE
+			   WHEN strpos(lower(m.content), lower($2)) > 80 THEN '…' || substring(m.content from strpos(lower(m.content), lower($2)) - 80 for 240)
+			   ELSE LEFT(m.content, 240)
+		       END,
 		       strpos(lower(m.content), lower($2)), m.created_at
 		FROM conversation_messages m
 		JOIN conversations c ON c.id = m.conversation_id

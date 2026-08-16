@@ -2359,7 +2359,7 @@ onUnmounted(() => {
               <div class="message-search-heading">消息命中{{ messageSearchLoading ? "中…" : "" }}</div>
               <button v-for="result in messageSearchResults" :key="result.messageId" type="button" class="message-search-result" @click="selectConversation(result.conversation.id)">
                 <strong>{{ result.conversation.title }}</strong>
-                <span>{{ result.summary }}</span>
+                <span>{{ result.summary }}<em v-if="result.matchPosition > 0"> · 命中位置 {{ result.matchPosition }}</em></span>
               </button>
             </div>
           </template>
