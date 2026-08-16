@@ -9,7 +9,8 @@ import (
 )
 
 type agentRunApprovalRequest struct {
-	Approved bool `json:"approved"`
+	Approved  bool            `json:"approved"`
+	Arguments json.RawMessage `json:"arguments"`
 }
 
 // NewAgentRunApproval resolves the tool confirmation currently blocking an
@@ -33,12 +34,16 @@ func NewAgentRunApproval(hub *agentstream.Hub) http.Handler {
 			return
 		}
 		var request agentRunApprovalRequest
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 36<<10))
 		if err := decoder.Decode(&request); err != nil {
 			http.Error(w, `{"error":"invalid approval request"}`, http.StatusBadRequest)
 			return
 		}
-		if err := hub.ResolveApproval(runID, knowledgeBaseID, request.Approved); err != nil {
+		if len(request.Arguments) > 32<<10 || (len(request.Arguments) > 0 && !json.Valid(request.Arguments)) {
+			http.Error(w, `{"error":"approval arguments must be valid JSON under 32KB"}`, http.StatusBadRequest)
+			return
+		}
+		if err := hub.ResolveApproval(runID, knowledgeBaseID, request.Approved, request.Arguments); err != nil {
 			if errors.Is(err, agentstream.ErrApprovalNotFound) {
 				http.Error(w, `{"error":"agent approval not found or already resolved"}`, http.StatusNotFound)
 				return

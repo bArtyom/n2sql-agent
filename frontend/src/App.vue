@@ -1901,10 +1901,18 @@ async function resolveApproval(approved: boolean) {
   if (!pending || approvalBusy.value) return;
   approvalBusy.value = true;
   try {
+    let editedArguments: unknown;
+    if (pending.arguments.trim()) {
+      try {
+        editedArguments = JSON.parse(pending.arguments);
+      } catch {
+        throw new Error("工具参数不是合法 JSON");
+      }
+    }
     const response = await fetch(`/api/knowledge-bases/${pending.knowledgeBaseId}/agent-runs/${encodeURIComponent(pending.runID)}/approval`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ approved }),
+      body: JSON.stringify(editedArguments === undefined ? { approved } : { approved, arguments: editedArguments }),
     });
     if (!response.ok) {
       const payload = await response.json().catch(() => null);
@@ -2618,7 +2626,7 @@ onUnmounted(() => {
             <div class="approval-card-copy">
               <strong>Agent 请求执行工具</strong>
               <span>{{ pendingApproval.toolName }} · 请确认后继续</span>
-              <code v-if="pendingApproval.arguments">{{ pendingApproval.arguments }}</code>
+              <textarea v-if="pendingApproval.arguments" v-model="pendingApproval.arguments" rows="3" spellcheck="false" aria-label="工具 JSON 参数" />
             </div>
             <div class="approval-card-actions">
               <button type="button" :disabled="approvalBusy" @click="resolveApproval(false)">拒绝</button>

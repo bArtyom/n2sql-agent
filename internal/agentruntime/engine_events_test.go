@@ -163,9 +163,9 @@ func TestEngineRunWithEventsWaitsForApprovalBeforeToolCall(t *testing.T) {
 	approvalRequested := make(chan struct{})
 	allow := make(chan bool)
 	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 1, agentruntime.EngineOptions{
-		ApprovalGate: func(context.Context, string, json.RawMessage) (bool, error) {
+		ApprovalGate: func(context.Context, string, json.RawMessage) (agentruntime.ApprovalDecision, error) {
 			close(approvalRequested)
-			return <-allow, nil
+			return agentruntime.ApprovalDecision{Approved: <-allow, Arguments: json.RawMessage(`{"query":"edited"}`)}, nil
 		},
 	})
 	if err != nil {
@@ -188,8 +188,8 @@ func TestEngineRunWithEventsWaitsForApprovalBeforeToolCall(t *testing.T) {
 	if err := <-done; err == nil {
 		t.Fatal("RunWithEvents() unexpectedly succeeded with maxSteps=1")
 	}
-	if string(tool.args) != `{"query":"审批"}` {
-		t.Fatalf("tool args = %s, want approval args", tool.args)
+	if string(tool.args) != `{"query":"edited"}` {
+		t.Fatalf("tool args = %s, want edited approval args", tool.args)
 	}
 }
 
@@ -205,8 +205,8 @@ func TestEngineRunWithEventsEmitsApprovalExpired(t *testing.T) {
 		}}}, nil
 	}}
 	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 1, agentruntime.EngineOptions{
-		ApprovalGate: func(context.Context, string, json.RawMessage) (bool, error) {
-			return false, context.DeadlineExceeded
+		ApprovalGate: func(context.Context, string, json.RawMessage) (agentruntime.ApprovalDecision, error) {
+			return agentruntime.ApprovalDecision{}, context.DeadlineExceeded
 		},
 	})
 	if err != nil {

@@ -54,7 +54,12 @@ type run struct {
 type pendingApproval struct {
 	toolName  string
 	arguments string
-	decision  chan bool
+	decision  chan ApprovalDecision
+}
+
+type ApprovalDecision struct {
+	Approved  bool
+	Arguments []byte
 }
 
 // Hub is an in-process, bounded event replay store. It is deliberately not a
@@ -211,7 +216,7 @@ func (h *Hub) Finish(runID string) error {
 	}
 	run.done = true
 	if run.approval != nil {
-		run.approval.decision <- false
+		run.approval.decision <- ApprovalDecision{}
 		run.approval = nil
 	}
 	run.expiresAt = time.Now().Add(h.ttl)
@@ -224,39 +229,39 @@ func (h *Hub) Finish(runID string) error {
 
 // WaitApproval blocks the Agent run until ResolveApproval is called or the
 // run context is canceled. Only one tool approval may be pending per run.
-func (h *Hub) WaitApproval(ctx context.Context, runID string, knowledgeBaseID int64, toolName string, arguments []byte) (bool, error) {
+func (h *Hub) WaitApproval(ctx context.Context, runID string, knowledgeBaseID int64, toolName string, arguments []byte) (ApprovalDecision, error) {
 	if h == nil || ctx == nil || runID == "" || knowledgeBaseID <= 0 || toolName == "" {
-		return false, ErrApprovalNotFound
+		return ApprovalDecision{}, ErrApprovalNotFound
 	}
-	approval := &pendingApproval{toolName: toolName, arguments: string(arguments), decision: make(chan bool, 1)}
+	approval := &pendingApproval{toolName: toolName, arguments: string(arguments), decision: make(chan ApprovalDecision, 1)}
 	h.mu.Lock()
 	run, ok := h.runs[runID]
 	if !ok || run.knowledgeBaseID != knowledgeBaseID || run.done {
 		h.mu.Unlock()
-		return false, ErrApprovalNotFound
+		return ApprovalDecision{}, ErrApprovalNotFound
 	}
 	if run.approval != nil {
 		h.mu.Unlock()
-		return false, ErrApprovalAlreadyPending
+		return ApprovalDecision{}, ErrApprovalAlreadyPending
 	}
 	run.approval = approval
 	h.mu.Unlock()
 
 	select {
-	case approved := <-approval.decision:
-		return approved, nil
+	case decision := <-approval.decision:
+		return decision, nil
 	case <-ctx.Done():
 		h.mu.Lock()
 		if run.approval == approval {
 			run.approval = nil
 		}
 		h.mu.Unlock()
-		return false, ctx.Err()
+		return ApprovalDecision{}, ctx.Err()
 	}
 }
 
 // ResolveApproval applies a user's decision to the current pending tool.
-func (h *Hub) ResolveApproval(runID string, knowledgeBaseID int64, approved bool) error {
+func (h *Hub) ResolveApproval(runID string, knowledgeBaseID int64, approved bool, arguments []byte) error {
 	if h == nil || runID == "" || knowledgeBaseID <= 0 {
 		return ErrApprovalNotFound
 	}
@@ -269,7 +274,7 @@ func (h *Hub) ResolveApproval(runID string, knowledgeBaseID int64, approved bool
 	approval := run.approval
 	run.approval = nil
 	h.mu.Unlock()
-	approval.decision <- approved
+	approval.decision <- ApprovalDecision{Approved: approved, Arguments: append([]byte(nil), arguments...)}
 	return nil
 }
 
