@@ -21,7 +21,7 @@
 
 ## 当前代码状态
 
-- 最新提交：`8e5acd3 feat: typed rendering of agent tool results`。
+- 最新提交：`0320a07 feat: add session chat model selector`（后端切片为前一提交 `893575d`）。
 - 当前工作区在该提交后保持干净。
 - 第一阶段知识库问答底座已完成：知识库、文档上传和 Worker、Markdown/TXT/PDF 提取、OCR 最小骨架、父子 chunk、embedding、混合检索、Rerank、引用和普通 RAG/SSE。
 - Agent Runtime 最小闭环已完成：Tool Registry、Function Calling、受限 ReAct、最大步数/超时/取消、工具失败安全降级、SSE 事件、上下文摘要、会话历史、幂等和运行摘要。
