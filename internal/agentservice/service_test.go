@@ -11,6 +11,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
+	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 )
 
@@ -62,6 +63,26 @@ type blockingChatStub struct{}
 func (blockingChatStub) ChatMessagesWithTools(ctx context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 	<-ctx.Done()
 	return modelclient.ChatResponse{}, ctx.Err()
+}
+
+type modelSelectingChatStub struct {
+	model string
+}
+
+func (s *modelSelectingChatStub) ChatMessagesWithTools(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+	return modelclient.ChatResponse{Message: "default"}, nil
+}
+
+func (s *modelSelectingChatStub) ChatMessagesWithToolsForModel(_ context.Context, model string, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+	s.model = model
+	return modelclient.ChatResponse{Message: "selected"}, nil
+}
+
+func (s *modelSelectingChatStub) ValidateChatModel(_ context.Context, model string) error {
+	if model != "chat-fast" {
+		return modelprovider.ErrInvalidChatModel
+	}
+	return nil
 }
 
 func TestServiceAnswersUsingScopedKnowledgeSearchTool(t *testing.T) {
@@ -138,6 +159,21 @@ func TestServiceAnswersUsingScopedKnowledgeSearchTool(t *testing.T) {
 	}
 	if callCount != 2 {
 		t.Fatalf("model call count = %d, want 2", callCount)
+	}
+}
+
+func TestServiceUsesSelectedChatModelRunner(t *testing.T) {
+	chat := &modelSelectingChatStub{}
+	service, err := agentservice.NewService(chat, &searcherStub{}, 2, time.Minute)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	response, err := service.Answer(context.Background(), 7, agentservice.ChatRequest{Message: "问题", ChatModel: " chat-fast "})
+	if err != nil {
+		t.Fatalf("Answer() error = %v", err)
+	}
+	if response.Answer != "selected" || chat.model != "chat-fast" {
+		t.Fatalf("answer/model = %q/%q, want selected/chat-fast", response.Answer, chat.model)
 	}
 }
 

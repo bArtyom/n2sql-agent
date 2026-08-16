@@ -75,3 +75,19 @@ func TestModelProviderRejectsUnexpectedAPIKeyEnvironmentVariable(t *testing.T) {
 		t.Fatalf("status code = %d, want %d", response.Code, http.StatusBadRequest)
 	}
 }
+
+func TestModelProviderNormalizesChatModelOptions(t *testing.T) {
+	store := &modelProviderStoreStub{}
+	endpoint := handler.NewModelProvider(store, "OPENAI_API_KEY")
+	body := `{"name":"OpenAI Compatible","baseUrl":"https://example.com/v1","apiKeyEnvVar":"OPENAI_API_KEY","chatModel":" chat-default ","chatModels":["chat-fast","chat-default"," chat-fast "],"embeddingModel":"embedding","enabled":true}`
+	response := httptest.NewRecorder()
+
+	endpoint.ServeHTTP(response, httptest.NewRequest(http.MethodPut, "/api/model-provider", strings.NewReader(body)))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
+	}
+	if got := store.provider.ChatModels; len(got) != 2 || got[0] != "chat-default" || got[1] != "chat-fast" {
+		t.Fatalf("chat models = %#v, want default-first de-duplicated options", got)
+	}
+}

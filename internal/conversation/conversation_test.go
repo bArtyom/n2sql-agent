@@ -108,6 +108,11 @@ func (s *storeStub) SetPinned(_ context.Context, _ int64, pinned bool) (conversa
 	return s.conversation, nil
 }
 
+func (s *storeStub) SetChatModel(_ context.Context, _ int64, model string) (conversation.Conversation, error) {
+	s.conversation.ChatModel = model
+	return s.conversation, nil
+}
+
 func (s *storeStub) ClearMessages(context.Context, int64) error { return nil }
 
 func (s *storeStub) Delete(context.Context, int64) error { return nil }
@@ -174,6 +179,22 @@ func TestServiceSavesCompletedExchange(t *testing.T) {
 	}
 	if store.exchangeUser != "问题" || store.exchangeBot != "答案" {
 		t.Fatalf("saved exchange = %q / %q, want trimmed messages", store.exchangeUser, store.exchangeBot)
+	}
+}
+
+func TestServiceSetsScopedChatModel(t *testing.T) {
+	store := &storeStub{conversation: conversation.Conversation{ID: 9, KnowledgeBaseID: 7}}
+	service := conversation.NewService(store)
+
+	updated, err := service.SetChatModel(context.Background(), 9, 7, "  chat-fast  ")
+	if err != nil {
+		t.Fatalf("SetChatModel() error = %v", err)
+	}
+	if updated.ChatModel != "chat-fast" || store.conversation.ChatModel != "chat-fast" {
+		t.Fatalf("chat model = %q / %q, want chat-fast", updated.ChatModel, store.conversation.ChatModel)
+	}
+	if _, err := service.SetChatModel(context.Background(), 9, 8, "chat-fast"); !errors.Is(err, conversation.ErrNotFound) {
+		t.Fatalf("cross-knowledge-base SetChatModel() error = %v, want ErrNotFound", err)
 	}
 }
 

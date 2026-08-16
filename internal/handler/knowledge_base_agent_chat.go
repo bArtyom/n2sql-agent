@@ -173,12 +173,13 @@ func idempotencyRequestHash(knowledgeBaseID int64, request agentservice.ChatRequ
 		KnowledgeBaseID  int64   `json:"knowledge_base_id"`
 		ConversationID   int64   `json:"conversation_id"`
 		Message          string  `json:"message"`
+		ChatModel        string  `json:"chat_model"`
 		TopK             int     `json:"top_k"`
 		Threshold        float64 `json:"similarity_threshold"`
 		KeywordThreshold float64 `json:"keyword_threshold"`
 		DocumentIDs      []int64 `json:"document_ids"`
 		QueryRewrite     bool    `json:"query_rewrite"`
-	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message, TopK: request.TopK, Threshold: request.SimilarityThreshold, KeywordThreshold: request.KeywordThreshold, DocumentIDs: request.DocumentIDs, QueryRewrite: request.QueryRewrite})
+	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message, ChatModel: request.ChatModel, TopK: request.TopK, Threshold: request.SimilarityThreshold, KeywordThreshold: request.KeywordThreshold, DocumentIDs: request.DocumentIDs, QueryRewrite: request.QueryRewrite})
 	if err != nil {
 		return "", err
 	}
@@ -211,6 +212,7 @@ func decodeKnowledgeBaseAgentChatRequest(w http.ResponseWriter, r *http.Request,
 		return 0, agentservice.ChatRequest{}, false
 	}
 	request.Message = strings.TrimSpace(request.Message)
+	request.ChatModel = strings.TrimSpace(request.ChatModel)
 	if request.Message == "" || len(request.Message) > maxChatQuestion {
 		http.Error(w, `{"error":"invalid agent chat message"}`, http.StatusBadRequest)
 		return 0, agentservice.ChatRequest{}, false
@@ -282,6 +284,8 @@ func knowledgeBaseAgentChatError(err error) (string, int) {
 		return "agent chat timed out", http.StatusGatewayTimeout
 	case errors.Is(err, modelprovider.ErrNotFound):
 		return "model provider not configured", http.StatusNotFound
+	case errors.Is(err, modelprovider.ErrInvalidChatModel):
+		return "invalid chat model", http.StatusBadRequest
 	case errors.Is(err, modelruntime.ErrAPIKeyEnvironmentMismatch), errors.Is(err, modelruntime.ErrAPIKeyNotConfigured):
 		return "model provider API key is not configured", http.StatusBadRequest
 	default:
@@ -328,6 +332,13 @@ func loadConversationHistory(ctx context.Context, conversations *conversation.Se
 	if conversations == nil {
 		return errors.New("conversation service is unavailable")
 	}
+	conversationRecord, err := conversations.Get(ctx, request.ConversationID)
+	if err != nil {
+		return fmt.Errorf("load conversation: %w", err)
+	}
+	if request.ChatModel == "" {
+		request.ChatModel = conversationRecord.ChatModel
+	}
 	history, err := conversations.History(ctx, request.ConversationID, knowledgeBaseID)
 	if err != nil {
 		return fmt.Errorf("load conversation history: %w", err)
@@ -352,6 +363,11 @@ func saveConversationExchange(ctx context.Context, conversations *conversation.S
 	metadata := conversationMetadataFromAgentResponse(response)
 	if err := conversations.SaveExchangeWithMetadata(ctx, request.ConversationID, request.Message, response.Answer, metadata); err != nil {
 		return fmt.Errorf("save conversation exchange: %w", err)
+	}
+	if request.ChatModel != "" {
+		if _, err := conversations.SetChatModel(ctx, request.ConversationID, knowledgeBaseID, request.ChatModel); err != nil {
+			slog.WarnContext(ctx, "conversation_chat_model_save_failed", "conversation_id", request.ConversationID, "error", err)
+		}
 	}
 	// 首轮问答后把默认标题换成问题摘要；失败只记录，不阻断回答保存。
 	if err := conversations.AutoTitle(ctx, request.ConversationID, knowledgeBaseID, request.Message); err != nil {

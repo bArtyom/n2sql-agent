@@ -17,12 +17,13 @@ import (
 const (
 	// DefaultTitle is the placeholder title of a new conversation until the
 	// first exchange is saved and AutoTitle replaces it.
-	DefaultTitle                 = "新对话"
-	maxTitleBytes                = 200
-	maxMessageSize               = 64 * 1024
-	maxIdempotencyKeySize        = 128
-	conversationLockNamespace    = 0x6e327361
-	maxAutoTitleRunes            = 30
+	DefaultTitle              = "新对话"
+	maxTitleBytes             = 200
+	maxMessageSize            = 64 * 1024
+	maxIdempotencyKeySize     = 128
+	maxChatModelBytes         = 200
+	conversationLockNamespace = 0x6e327361
+	maxAutoTitleRunes         = 30
 )
 
 var (
@@ -34,6 +35,7 @@ var (
 	ErrIdempotencyConflict    = errors.New("idempotency key reused with a different request")
 	ErrIdempotencyUnavailable = errors.New("conversation idempotency is unavailable")
 	ErrNotFound               = errors.New("conversation not found")
+	ErrInvalidChatModel       = errors.New("invalid conversation chat model")
 )
 
 type Conversation struct {
@@ -41,6 +43,7 @@ type Conversation struct {
 	KnowledgeBaseID int64     `json:"knowledgeBaseId"`
 	Title           string    `json:"title"`
 	IsPinned        bool      `json:"isPinned"`
+	ChatModel       string    `json:"chatModel,omitempty"`
 	CreatedAt       time.Time `json:"createdAt"`
 	UpdatedAt       time.Time `json:"updatedAt"`
 }
@@ -154,6 +157,7 @@ type Store interface {
 	AppendExchange(context.Context, int64, string, string) error
 	UpdateTitle(context.Context, int64, string) (Conversation, error)
 	SetPinned(context.Context, int64, bool) (Conversation, error)
+	SetChatModel(context.Context, int64, string) (Conversation, error)
 	ClearMessages(context.Context, int64) error
 	Delete(context.Context, int64) error
 }
@@ -236,6 +240,16 @@ func (s *Service) List(ctx context.Context, knowledgeBaseID int64) ([]Conversati
 	return s.store.List(ctx, knowledgeBaseID)
 }
 
+// Get returns a conversation owned by the current administrator. Callers
+// that operate in a knowledge-base scope should use the scoped methods below
+// as well, so the knowledge-base relationship is still checked before use.
+func (s *Service) Get(ctx context.Context, conversationID int64) (Conversation, error) {
+	if conversationID <= 0 {
+		return Conversation{}, ErrInvalidConversation
+	}
+	return s.store.Get(ctx, conversationID)
+}
+
 func (s *Service) Rename(ctx context.Context, conversationID, knowledgeBaseID int64, title string) (Conversation, error) {
 	if conversationID <= 0 || knowledgeBaseID <= 0 {
 		return Conversation{}, ErrInvalidConversation
@@ -260,6 +274,23 @@ func (s *Service) SetPinned(ctx context.Context, conversationID, knowledgeBaseID
 		return Conversation{}, err
 	}
 	return s.store.SetPinned(ctx, conversationID, pinned)
+}
+
+// SetChatModel stores the server-validated model selection for a conversation.
+// An empty value resets the conversation to the provider default; the chat
+// execution boundary performs the provider allowlist check before use.
+func (s *Service) SetChatModel(ctx context.Context, conversationID, knowledgeBaseID int64, model string) (Conversation, error) {
+	if conversationID <= 0 || knowledgeBaseID <= 0 {
+		return Conversation{}, ErrInvalidConversation
+	}
+	if _, err := s.getOwnedConversation(ctx, conversationID, knowledgeBaseID); err != nil {
+		return Conversation{}, err
+	}
+	model = strings.TrimSpace(model)
+	if len(model) > maxChatModelBytes {
+		return Conversation{}, ErrInvalidChatModel
+	}
+	return s.store.SetChatModel(ctx, conversationID, model)
 }
 
 // AutoTitle replaces the default placeholder title with a short version of
@@ -557,8 +588,8 @@ func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Conversa
 		FROM system_settings ss
 		JOIN knowledge_bases kb ON kb.administrator_id = ss.administrator_id
 		WHERE ss.id = 1 AND kb.id = $1
-		RETURNING id, knowledge_base_id, title, is_pinned, created_at, updated_at`, input.KnowledgeBaseID, input.Title).Scan(
-		&result.ID, &result.KnowledgeBaseID, &result.Title, &result.IsPinned, &result.CreatedAt, &result.UpdatedAt,
+		RETURNING id, knowledge_base_id, title, is_pinned, chat_model, created_at, updated_at`, input.KnowledgeBaseID, input.Title).Scan(
+		&result.ID, &result.KnowledgeBaseID, &result.Title, &result.IsPinned, &result.ChatModel, &result.CreatedAt, &result.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Conversation{}, ErrNotFound
@@ -572,11 +603,11 @@ func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Conversa
 func (s *PostgresStore) Get(ctx context.Context, id int64) (Conversation, error) {
 	var result Conversation
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, knowledge_base_id, title, is_pinned, created_at, updated_at
+		SELECT id, knowledge_base_id, title, is_pinned, chat_model, created_at, updated_at
 		FROM conversations
 		WHERE id = $1
 		  AND administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, id).Scan(
-		&result.ID, &result.KnowledgeBaseID, &result.Title, &result.IsPinned, &result.CreatedAt, &result.UpdatedAt,
+		&result.ID, &result.KnowledgeBaseID, &result.Title, &result.IsPinned, &result.ChatModel, &result.CreatedAt, &result.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Conversation{}, ErrNotFound
@@ -589,7 +620,7 @@ func (s *PostgresStore) Get(ctx context.Context, id int64) (Conversation, error)
 
 func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Conversation, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, knowledge_base_id, title, is_pinned, created_at, updated_at
+		SELECT id, knowledge_base_id, title, is_pinned, chat_model, created_at, updated_at
 		FROM conversations
 		WHERE knowledge_base_id = $1
 		  AND administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
@@ -601,7 +632,7 @@ func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Conv
 	results := make([]Conversation, 0)
 	for rows.Next() {
 		var result Conversation
-		if err := rows.Scan(&result.ID, &result.KnowledgeBaseID, &result.Title, &result.IsPinned, &result.CreatedAt, &result.UpdatedAt); err != nil {
+		if err := rows.Scan(&result.ID, &result.KnowledgeBaseID, &result.Title, &result.IsPinned, &result.ChatModel, &result.CreatedAt, &result.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan conversation: %w", err)
 		}
 		results = append(results, result)
@@ -619,8 +650,8 @@ func (s *PostgresStore) UpdateTitle(ctx context.Context, id int64, title string)
 		SET title = $2
 		WHERE id = $1
 		  AND administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
-		RETURNING id, knowledge_base_id, title, is_pinned, created_at, updated_at`, id, title).Scan(
-		&result.ID, &result.KnowledgeBaseID, &result.Title, &result.IsPinned, &result.CreatedAt, &result.UpdatedAt,
+		RETURNING id, knowledge_base_id, title, is_pinned, chat_model, created_at, updated_at`, id, title).Scan(
+		&result.ID, &result.KnowledgeBaseID, &result.Title, &result.IsPinned, &result.ChatModel, &result.CreatedAt, &result.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Conversation{}, ErrNotFound
@@ -641,14 +672,33 @@ func (s *PostgresStore) SetPinned(ctx context.Context, id int64, pinned bool) (C
 		SET is_pinned = $2
 		WHERE id = $1
 		  AND administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
-		RETURNING id, knowledge_base_id, title, is_pinned, created_at, updated_at`, id, pinned).Scan(
-		&result.ID, &result.KnowledgeBaseID, &result.Title, &result.IsPinned, &result.CreatedAt, &result.UpdatedAt,
+		RETURNING id, knowledge_base_id, title, is_pinned, chat_model, created_at, updated_at`, id, pinned).Scan(
+		&result.ID, &result.KnowledgeBaseID, &result.Title, &result.IsPinned, &result.ChatModel, &result.CreatedAt, &result.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Conversation{}, ErrNotFound
 	}
 	if err != nil {
 		return Conversation{}, fmt.Errorf("update conversation pinned: %w", err)
+	}
+	return result, nil
+}
+
+func (s *PostgresStore) SetChatModel(ctx context.Context, id int64, model string) (Conversation, error) {
+	var result Conversation
+	err := s.db.QueryRowContext(ctx, `
+		UPDATE conversations
+		SET chat_model = $2
+		WHERE id = $1
+		  AND administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
+		RETURNING id, knowledge_base_id, title, is_pinned, chat_model, created_at, updated_at`, id, model).Scan(
+		&result.ID, &result.KnowledgeBaseID, &result.Title, &result.IsPinned, &result.ChatModel, &result.CreatedAt, &result.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Conversation{}, ErrNotFound
+	}
+	if err != nil {
+		return Conversation{}, fmt.Errorf("update conversation chat model: %w", err)
 	}
 	return result, nil
 }

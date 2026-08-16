@@ -28,6 +28,18 @@ type ToolChatRunner interface {
 	ChatMessagesWithTools(context.Context, []modelclient.ChatMessage, []agent.FunctionDefinition) (modelclient.ChatResponse, error)
 }
 
+// ToolChatRunnerWithModel is the optional extension used by a session that
+// selected a server-configured chat model. Implementations must still enforce
+// their own allowlist; the model name is never treated as a URL or credential.
+type ToolChatRunnerWithModel interface {
+	ToolChatRunner
+	ChatMessagesWithToolsForModel(context.Context, string, []modelclient.ChatMessage, []agent.FunctionDefinition) (modelclient.ChatResponse, error)
+}
+
+type ChatModelValidator interface {
+	ValidateChatModel(context.Context, string) error
+}
+
 // MessageChatRunner is the no-tools chat boundary used by infrastructure tasks
 // such as history summarization.
 type MessageChatRunner interface {
@@ -76,12 +88,20 @@ func (s *ChatService) ChatMessages(ctx context.Context, messages []modelclient.C
 }
 
 func (s *ChatService) ChatMessagesWithTools(ctx context.Context, messages []modelclient.ChatMessage, definitions []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+	return s.ChatMessagesWithToolsForModel(ctx, "", messages, definitions)
+}
+
+func (s *ChatService) ChatMessagesWithToolsForModel(ctx context.Context, requestedModel string, messages []modelclient.ChatMessage, definitions []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 	provider, apiKey, err := s.credentials(ctx)
 	if err != nil {
 		return modelclient.ChatResponse{}, err
 	}
+	model, err := provider.ResolveChatModel(requestedModel)
+	if err != nil {
+		return modelclient.ChatResponse{}, err
+	}
 	response, err := s.completer.Chat(ctx, provider.BaseURL, apiKey, modelclient.ChatRequest{
-		Model:    provider.ChatModel,
+		Model:    model,
 		Messages: messages,
 		Tools:    modelToolDefinitions(definitions),
 		Stream:   false,
@@ -90,6 +110,15 @@ func (s *ChatService) ChatMessagesWithTools(ctx context.Context, messages []mode
 		return modelclient.ChatResponse{}, &ChatCallError{Err: fmt.Errorf("complete chat with tools: %w", err)}
 	}
 	return response, nil
+}
+
+func (s *ChatService) ValidateChatModel(ctx context.Context, requestedModel string) error {
+	provider, err := s.providers.Current(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = provider.ResolveChatModel(requestedModel)
+	return err
 }
 
 func modelToolDefinitions(definitions []agent.FunctionDefinition) []modelclient.ToolDefinition {

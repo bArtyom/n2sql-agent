@@ -35,7 +35,13 @@ func NewModelProvider(store modelprovider.Store, apiKeyEnvVar string) http.Handl
 				http.Error(w, `{"error":"invalid model provider"}`, http.StatusBadRequest)
 				return
 			}
-			provider, err := store.Save(r.Context(), provider)
+			normalized, err := modelprovider.NormalizeChatModels(provider)
+			if err != nil {
+				http.Error(w, `{"error":"invalid model provider chat models"}`, http.StatusBadRequest)
+				return
+			}
+			provider = normalized
+			provider, err = store.Save(r.Context(), provider)
 			if err != nil {
 				http.Error(w, `{"error":"unable to save model provider"}`, http.StatusInternalServerError)
 				return

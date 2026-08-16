@@ -67,6 +67,15 @@ type Service struct {
 	sequence           atomic.Uint64
 }
 
+type selectedToolChatRunner struct {
+	runner modelruntime.ToolChatRunnerWithModel
+	model  string
+}
+
+func (r selectedToolChatRunner) ChatMessagesWithTools(ctx context.Context, messages []modelclient.ChatMessage, definitions []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+	return r.runner.ChatMessagesWithToolsForModel(ctx, r.model, messages, definitions)
+}
+
 func NewService(chat modelruntime.ToolChatRunner, searcher retrieval.Searcher, maxSteps int, timeout time.Duration) (*Service, error) {
 	return NewServiceWithLimits(chat, searcher, maxSteps, timeout, agent.DefaultMaxToolResultBytes, agent.DefaultMaxHistoryMessages, agent.DefaultMaxHistoryBytes)
 }
@@ -133,6 +142,7 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		return Response{}, agentruntime.ErrInvalidContext
 	}
 	request.Message = strings.TrimSpace(request.Message)
+	request.ChatModel = strings.TrimSpace(request.ChatModel)
 	if knowledgeBaseID <= 0 || request.Message == "" || len(request.Message) > maxQuestionBytes {
 		return Response{}, ErrInvalidRequest
 	}
@@ -154,6 +164,21 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	}
 	runContext, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
+	chatRunner := s.chat
+	if request.ChatModel != "" {
+		validator, ok := s.chat.(modelruntime.ChatModelValidator)
+		if !ok {
+			return Response{}, ErrInvalidRequest
+		}
+		if err := validator.ValidateChatModel(runContext, request.ChatModel); err != nil {
+			return Response{}, err
+		}
+		selected, ok := s.chat.(modelruntime.ToolChatRunnerWithModel)
+		if !ok {
+			return Response{}, ErrInvalidRequest
+		}
+		chatRunner = selectedToolChatRunner{runner: selected, model: request.ChatModel}
+	}
 	history, historySummaryStats, err := buildHistoryMessages(runContext, request.History, s.maxHistoryMessages, s.maxHistoryBytes, s.historySummarizer, request.CachedSummary)
 	if err != nil {
 		return Response{}, err
@@ -176,7 +201,7 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	if err != nil {
 		return Response{}, fmt.Errorf("create knowledge search registry: %w", err)
 	}
-	engine, err := agentruntime.NewEngine(s.chat, registry, s.maxSteps)
+	engine, err := agentruntime.NewEngine(chatRunner, registry, s.maxSteps)
 	if err != nil {
 		return Response{}, fmt.Errorf("create agent engine: %w", err)
 	}

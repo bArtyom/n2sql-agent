@@ -9,12 +9,20 @@ import (
 	"strings"
 
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
+	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 )
 
 const maxConversationRequestBytes = 4096
 
 // NewConversations exposes conversation creation, listing, and message history.
 func NewConversations(service *conversation.Service) http.Handler {
+	return NewConversationsWithModelProvider(service, nil)
+}
+
+// NewConversationsWithModelProvider additionally validates chat model changes
+// against the server-side Provider allowlist. The nil form preserves the
+// lightweight constructor used by isolated conversation tests.
+func NewConversationsWithModelProvider(service *conversation.Service, providers modelprovider.Store) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		knowledgeBaseID, err := parsePositiveID(r.PathValue("id"))
 		if err != nil {
@@ -57,7 +65,7 @@ func NewConversations(service *conversation.Service) http.Handler {
 					HasMore  bool                   `json:"has_more"`
 				}{Messages: messages, HasMore: hasMore})
 			case http.MethodPatch:
-				updateConversation(w, r, service, conversationID, knowledgeBaseID)
+				updateConversation(w, r, service, providers, conversationID, knowledgeBaseID)
 			case http.MethodDelete:
 				if err := service.Delete(r.Context(), conversationID, knowledgeBaseID); err != nil {
 					writeConversationError(w, err)
@@ -88,10 +96,11 @@ func NewConversations(service *conversation.Service) http.Handler {
 
 // updateConversation handles PATCH with either a new title or a pinned flag.
 // A pointer keeps "is_pinned: false" distinct from "field not provided".
-func updateConversation(w http.ResponseWriter, r *http.Request, service *conversation.Service, conversationID, knowledgeBaseID int64) {
+func updateConversation(w http.ResponseWriter, r *http.Request, service *conversation.Service, providers modelprovider.Store, conversationID, knowledgeBaseID int64) {
 	var request struct {
-		Title    string `json:"title"`
-		IsPinned *bool  `json:"is_pinned"`
+		Title     string  `json:"title"`
+		IsPinned  *bool   `json:"is_pinned"`
+		ChatModel *string `json:"chat_model"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxConversationRequestBytes))
 	decoder.DisallowUnknownFields()
@@ -114,6 +123,30 @@ func updateConversation(w http.ResponseWriter, r *http.Request, service *convers
 	}
 	if request.IsPinned != nil {
 		updated, err := service.SetPinned(r.Context(), conversationID, knowledgeBaseID, *request.IsPinned)
+		if err != nil {
+			writeConversationError(w, err)
+			return
+		}
+		writeJSON(w, updated)
+		return
+	}
+	if request.ChatModel != nil {
+		if providers != nil && strings.TrimSpace(*request.ChatModel) != "" {
+			provider, err := providers.Current(r.Context())
+			if err != nil {
+				if errors.Is(err, modelprovider.ErrNotFound) {
+					http.Error(w, `{"error":"model provider not configured"}`, http.StatusNotFound)
+				} else {
+					http.Error(w, `{"error":"unable to load model provider"}`, http.StatusInternalServerError)
+				}
+				return
+			}
+			if _, err := provider.ResolveChatModel(*request.ChatModel); err != nil {
+				http.Error(w, `{"error":"invalid chat model"}`, http.StatusBadRequest)
+				return
+			}
+		}
+		updated, err := service.SetChatModel(r.Context(), conversationID, knowledgeBaseID, *request.ChatModel)
 		if err != nil {
 			writeConversationError(w, err)
 			return
@@ -184,7 +217,7 @@ func decodeMessagesPage(r *http.Request) (beforeID int64, limit int, err error) 
 
 func writeConversationError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, conversation.ErrInvalidConversation), errors.Is(err, conversation.ErrInvalidKnowledgeBase), errors.Is(err, conversation.ErrInvalidTitle):
+	case errors.Is(err, conversation.ErrInvalidConversation), errors.Is(err, conversation.ErrInvalidKnowledgeBase), errors.Is(err, conversation.ErrInvalidTitle), errors.Is(err, conversation.ErrInvalidChatModel):
 		http.Error(w, `{"error":"invalid conversation request"}`, http.StatusBadRequest)
 	case errors.Is(err, conversation.ErrNotFound):
 		http.Error(w, `{"error":"conversation not found"}`, http.StatusNotFound)

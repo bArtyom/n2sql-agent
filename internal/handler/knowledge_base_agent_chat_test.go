@@ -60,6 +60,35 @@ func TestKnowledgeBaseAgentChatReturnsAnswer(t *testing.T) {
 	}
 }
 
+func TestKnowledgeBaseAgentChatPassesSelectedChatModel(t *testing.T) {
+	answerer := &agentAnswererStub{response: agentservice.Response{Answer: "OK"}}
+	endpoint := handler.NewKnowledgeBaseAgentChat(answerer)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat", strings.NewReader(`{"message":"问题","chat_model":" chat-fast "}`))
+	request.SetPathValue("id", "7")
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || answerer.request.ChatModel != "chat-fast" {
+		t.Fatalf("status=%d chat_model=%q, want 200 and chat-fast", response.Code, answerer.request.ChatModel)
+	}
+}
+
+func TestKnowledgeBaseAgentChatRestoresConversationChatModel(t *testing.T) {
+	store := &conversationStoreStub{records: []conversation.Conversation{{ID: 9, KnowledgeBaseID: 7, ChatModel: "chat-fast"}}}
+	answerer := &agentAnswererStub{response: agentservice.Response{Answer: "OK"}}
+	endpoint := handler.NewKnowledgeBaseAgentChatWithConversation(answerer, conversation.NewService(store), 64*1024)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat", strings.NewReader(`{"conversation_id":9,"message":"问题"}`))
+	request.SetPathValue("id", "7")
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || answerer.request.ChatModel != "chat-fast" {
+		t.Fatalf("status=%d chat_model=%q, want 200 and restored chat-fast", response.Code, answerer.request.ChatModel)
+	}
+}
+
 func TestKnowledgeBaseAgentChatRecordsMetrics(t *testing.T) {
 	registry := metrics.New()
 	answerer := &agentAnswererStub{response: agentservice.Response{Answer: "答案", RunID: "run-metrics", Status: agent.RunSucceeded}}

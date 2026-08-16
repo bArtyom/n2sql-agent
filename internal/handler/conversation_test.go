@@ -11,6 +11,7 @@ import (
 
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/handler"
+	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 )
 
 type conversationStoreStub struct {
@@ -91,6 +92,16 @@ func (s *conversationStoreStub) SetPinned(_ context.Context, id int64, pinned bo
 	for index := range s.records {
 		if s.records[index].ID == id {
 			s.records[index].IsPinned = pinned
+			return s.records[index], nil
+		}
+	}
+	return conversation.Conversation{}, conversation.ErrNotFound
+}
+
+func (s *conversationStoreStub) SetChatModel(_ context.Context, id int64, model string) (conversation.Conversation, error) {
+	for index := range s.records {
+		if s.records[index].ID == id {
+			s.records[index].ChatModel = model
 			return s.records[index], nil
 		}
 	}
@@ -224,6 +235,40 @@ func TestConversationHandlerPinsAndUnpinsConversation(t *testing.T) {
 	endpoint.ServeHTTP(unpin, request)
 	if unpin.Code != http.StatusOK || !strings.Contains(unpin.Body.String(), `"isPinned":false`) {
 		t.Fatalf("unpin response: status=%d body=%s", unpin.Code, unpin.Body.String())
+	}
+}
+
+func TestConversationHandlerUpdatesChatModel(t *testing.T) {
+	store := &conversationStoreStub{records: []conversation.Conversation{{ID: 3, KnowledgeBaseID: 7, Title: "对话"}}}
+	endpoint := handler.NewConversations(conversation.NewService(store))
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPatch, "/api/knowledge-bases/7/conversations/3", strings.NewReader(`{"chat_model":"chat-fast"}`))
+	request.SetPathValue("id", "7")
+	request.SetPathValue("conversationId", "3")
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"chatModel":"chat-fast"`) {
+		t.Fatalf("chat model response: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestConversationHandlerRejectsUnconfiguredChatModel(t *testing.T) {
+	store := &conversationStoreStub{records: []conversation.Conversation{{ID: 3, KnowledgeBaseID: 7, Title: "对话"}}}
+	providers := &modelProviderStoreStub{provider: modelprovider.Provider{
+		ChatModel:  "chat-default",
+		ChatModels: []string{"chat-default", "chat-fast"},
+	}}
+	endpoint := handler.NewConversationsWithModelProvider(conversation.NewService(store), providers)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPatch, "/api/knowledge-bases/7/conversations/3", strings.NewReader(`{"chat_model":"unconfigured"}`))
+	request.SetPathValue("id", "7")
+	request.SetPathValue("conversationId", "3")
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusBadRequest)
 	}
 }
 

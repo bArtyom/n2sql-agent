@@ -147,6 +147,43 @@ func TestChatServiceForwardsToolDefinitions(t *testing.T) {
 	}
 }
 
+func TestChatServiceUsesRequestedConfiguredChatModel(t *testing.T) {
+	store := providerStoreStub{provider: modelprovider.Provider{
+		BaseURL:      "https://api.example.com/v1",
+		APIKeyEnvVar: "TEST_MODEL_PROVIDER_API_KEY",
+		ChatModel:    "chat-default",
+		ChatModels:   []string{"chat-default", "chat-fast"},
+	}}
+	completer := &chatCompleterStub{}
+	service := modelruntime.NewChatService(store, completer, "TEST_MODEL_PROVIDER_API_KEY", func(string) (string, bool) {
+		return "test-secret", true
+	})
+
+	if _, err := service.ChatMessagesWithToolsForModel(context.Background(), "chat-fast", []modelclient.ChatMessage{{Role: "user", Content: "查年假"}}, nil); err != nil {
+		t.Fatalf("ChatMessagesWithToolsForModel() error = %v", err)
+	}
+	if completer.request.Model != "chat-fast" {
+		t.Fatalf("model = %q, want chat-fast", completer.request.Model)
+	}
+}
+
+func TestChatServiceRejectsUnconfiguredChatModel(t *testing.T) {
+	store := providerStoreStub{provider: modelprovider.Provider{
+		BaseURL:      "https://api.example.com/v1",
+		APIKeyEnvVar: "TEST_MODEL_PROVIDER_API_KEY",
+		ChatModel:    "chat-default",
+		ChatModels:   []string{"chat-default"},
+	}}
+	service := modelruntime.NewChatService(store, &chatCompleterStub{}, "TEST_MODEL_PROVIDER_API_KEY", func(string) (string, bool) {
+		return "test-secret", true
+	})
+
+	err := service.ValidateChatModel(context.Background(), "unconfigured")
+	if !errors.Is(err, modelprovider.ErrInvalidChatModel) {
+		t.Fatalf("ValidateChatModel() error = %v, want ErrInvalidChatModel", err)
+	}
+}
+
 func TestChatServiceWrapsToolCompletionFailure(t *testing.T) {
 	store := providerStoreStub{provider: modelprovider.Provider{
 		BaseURL:      "https://api.example.com/v1",
