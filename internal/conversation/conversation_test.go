@@ -63,6 +63,13 @@ func (s *storeStub) Search(_ context.Context, _ int64, query string, limit int) 
 	s.searchLimit = limit
 	return []conversation.Conversation{s.conversation}, nil
 }
+func (s *storeStub) ListPage(_ context.Context, _ int64, limit, offset int) ([]conversation.Conversation, bool, error) {
+	return []conversation.Conversation{s.conversation}, offset == 0 && limit < 2, nil
+}
+func (s *storeStub) SearchPage(_ context.Context, _ int64, query string, limit, offset int) ([]conversation.Conversation, bool, error) {
+	s.searchQuery, s.searchLimit = query, limit
+	return []conversation.Conversation{s.conversation}, offset == 0 && limit < 2, nil
+}
 
 func (s *storeStub) ListMessages(context.Context, int64) ([]conversation.Message, error) {
 	return s.messages, nil

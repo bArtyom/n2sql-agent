@@ -151,11 +151,20 @@ type CreateInput struct {
 	Title           string
 }
 
+type Page struct {
+	Items   []Conversation `json:"items"`
+	HasMore bool           `json:"has_more"`
+	Offset  int            `json:"offset"`
+	Limit   int            `json:"limit"`
+}
+
 type Store interface {
 	Create(context.Context, CreateInput) (Conversation, error)
 	Get(context.Context, int64) (Conversation, error)
 	List(context.Context, int64) ([]Conversation, error)
 	Search(context.Context, int64, string, int) ([]Conversation, error)
+	ListPage(context.Context, int64, int, int) ([]Conversation, bool, error)
+	SearchPage(context.Context, int64, string, int, int) ([]Conversation, bool, error)
 	ListMessages(context.Context, int64) ([]Message, error)
 	ListMessagesPage(context.Context, int64, int64, int) ([]Message, bool, error)
 	GetSummary(context.Context, int64) (Summary, error)
@@ -263,6 +272,26 @@ func (s *Service) Search(ctx context.Context, knowledgeBaseID int64, query strin
 		return nil, ErrInvalidSearchLimit
 	}
 	return s.store.Search(ctx, knowledgeBaseID, query, limit)
+}
+
+func (s *Service) ListPage(ctx context.Context, knowledgeBaseID int64, limit, offset int) (Page, error) {
+	if knowledgeBaseID <= 0 || limit <= 0 || limit > maxConversationLimit || offset < 0 {
+		return Page{}, ErrInvalidSearchLimit
+	}
+	items, hasMore, err := s.store.ListPage(ctx, knowledgeBaseID, limit, offset)
+	return Page{Items: items, HasMore: hasMore, Offset: offset, Limit: limit}, err
+}
+
+func (s *Service) SearchPage(ctx context.Context, knowledgeBaseID int64, query string, limit, offset int) (Page, error) {
+	if knowledgeBaseID <= 0 || limit <= 0 || limit > maxConversationLimit || offset < 0 {
+		return Page{}, ErrInvalidSearchLimit
+	}
+	query = strings.TrimSpace(query)
+	if query == "" || len(query) > maxSearchQueryBytes {
+		return Page{}, ErrInvalidSearchQuery
+	}
+	items, hasMore, err := s.store.SearchPage(ctx, knowledgeBaseID, query, limit, offset)
+	return Page{Items: items, HasMore: hasMore, Offset: offset, Limit: limit}, err
 }
 
 // Get returns a conversation owned by the current administrator. Callers
@@ -668,6 +697,10 @@ func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Conv
 	return results, nil
 }
 
+func (s *PostgresStore) ListPage(ctx context.Context, knowledgeBaseID int64, limit, offset int) ([]Conversation, bool, error) {
+	return s.queryConversationPage(ctx, knowledgeBaseID, "", limit, offset)
+}
+
 func (s *PostgresStore) Search(ctx context.Context, knowledgeBaseID int64, query string, limit int) ([]Conversation, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT c.id, c.knowledge_base_id, c.title, c.is_pinned, c.chat_model, c.created_at, c.updated_at
@@ -693,6 +726,51 @@ func (s *PostgresStore) Search(ctx context.Context, knowledgeBaseID int64, query
 		return nil, fmt.Errorf("iterate searched conversations: %w", err)
 	}
 	return results, nil
+}
+
+func (s *PostgresStore) SearchPage(ctx context.Context, knowledgeBaseID int64, query string, limit, offset int) ([]Conversation, bool, error) {
+	return s.queryConversationPage(ctx, knowledgeBaseID, query, limit, offset)
+}
+
+func (s *PostgresStore) queryConversationPage(ctx context.Context, knowledgeBaseID int64, query string, limit, offset int) ([]Conversation, bool, error) {
+	condition := ""
+	args := []any{knowledgeBaseID}
+	if strings.TrimSpace(query) != "" {
+		condition = " AND lower(c.title) LIKE '%' || lower($2) || '%'"
+		args = append(args, query)
+	}
+	args = append(args, limit+1, offset)
+	limitArg, offsetArg := "$2", "$3"
+	if query != "" {
+		limitArg, offsetArg = "$3", "$4"
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT c.id, c.knowledge_base_id, c.title, c.is_pinned, c.chat_model, c.created_at, c.updated_at
+		FROM conversations c
+		WHERE c.knowledge_base_id = $1
+		  AND c.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)%s
+		ORDER BY c.is_pinned DESC, c.updated_at DESC, c.id DESC
+		LIMIT %s OFFSET %s`, condition, limitArg, offsetArg), args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("page conversations: %w", err)
+	}
+	defer rows.Close()
+	results := make([]Conversation, 0, limit)
+	for rows.Next() {
+		var result Conversation
+		if err := rows.Scan(&result.ID, &result.KnowledgeBaseID, &result.Title, &result.IsPinned, &result.ChatModel, &result.CreatedAt, &result.UpdatedAt); err != nil {
+			return nil, false, fmt.Errorf("scan paged conversation: %w", err)
+		}
+		results = append(results, result)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("iterate paged conversations: %w", err)
+	}
+	hasMore := len(results) > limit
+	if hasMore {
+		results = results[:limit]
+	}
+	return results, hasMore, nil
 }
 
 func (s *PostgresStore) UpdateTitle(ctx context.Context, id int64, title string) (Conversation, error) {

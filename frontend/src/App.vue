@@ -129,6 +129,7 @@ type A2ATask = {
   error?: string;
 };
 type Conversation = { id: number; knowledgeBaseId: number; title: string; isPinned: boolean; chatModel?: string; createdAt: string; updatedAt: string };
+type ConversationPage = { items: Conversation[]; has_more: boolean; offset: number; limit: number };
 type ConversationMessage = {
   id: number;
   conversationId: number;
@@ -244,6 +245,9 @@ const thinkingMode = ref<ThinkingMode>("standard");
 const chatAttachments = ref<ChatAttachmentDraft[]>([]);
 const conversationsLoading = ref(false);
 const conversationSearch = ref("");
+const conversationHasMore = ref(false);
+const conversationOffset = ref(0);
+const conversationPageSize = 30;
 let conversationSearchTimer: number | undefined;
 const conversationCreating = ref(false);
 const openConversationMenuId = ref<number | null>(null);
@@ -817,7 +821,10 @@ async function loadConversation() {
   }
   conversationsLoading.value = true;
   try {
-    conversations.value = await fetchConversationList();
+    conversationOffset.value = 0;
+    const page = await fetchConversationList(0);
+    conversations.value = page.items;
+    conversationHasMore.value = page.has_more;
     const latest = conversations.value[0];
     await selectConversation(latest?.id ?? null);
   } catch (error) {
@@ -831,7 +838,10 @@ async function loadConversation() {
 async function refreshConversationList() {
   if (!selectedKnowledgeBaseId.value) return;
   try {
-    conversations.value = await fetchConversationList();
+    conversationOffset.value = 0;
+    const page = await fetchConversationList(0);
+    conversations.value = page.items;
+    conversationHasMore.value = page.has_more;
   } catch {
     // 保持现有列表，问答结果不受影响。
   }
@@ -851,11 +861,26 @@ async function selectConversation(id: number | null) {
   await loadMessagePage(id, null);
 }
 
-async function fetchConversationList(): Promise<Conversation[]> {
-  if (!selectedKnowledgeBaseId.value) return [];
+async function fetchConversationList(offset = conversationOffset.value): Promise<ConversationPage> {
+  if (!selectedKnowledgeBaseId.value) return { items: [], has_more: false, offset, limit: conversationPageSize };
   const query = conversationSearch.value.trim();
-  const suffix = query ? `?q=${encodeURIComponent(query)}` : "";
-  return requestJSON<Conversation[]>(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations${suffix}`);
+  const params = new URLSearchParams({ limit: String(conversationPageSize), offset: String(offset) });
+  if (query) params.set("q", query);
+  return requestJSON<ConversationPage>(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations?${params.toString()}`);
+}
+
+async function loadMoreConversations() {
+  if (!conversationHasMore.value || conversationsLoading.value) return;
+  conversationsLoading.value = true;
+  try {
+    const nextOffset = conversationOffset.value + conversationPageSize;
+    const page = await fetchConversationList(nextOffset);
+    conversations.value = [...conversations.value, ...page.items];
+    conversationOffset.value = nextOffset;
+    conversationHasMore.value = page.has_more;
+  } finally {
+    conversationsLoading.value = false;
+  }
 }
 
 function scheduleConversationSearch() {
@@ -1101,6 +1126,8 @@ async function ensureConversation(title: string): Promise<number> {
 function selectKnowledgeBase(id: number) {
   if (streaming.value) return;
 	conversationSearch.value = "";
+	conversationOffset.value = 0;
+	conversationHasMore.value = false;
 	if (conversationSearchTimer !== undefined) window.clearTimeout(conversationSearchTimer);
 	selectedKnowledgeBaseId.value = id;
 	selectedDocumentIDs.value = [];
@@ -2333,6 +2360,7 @@ onUnmounted(() => {
                 </template>
             </div>
             <p v-else-if="conversationSearch.trim()" class="conversation-search-empty">没有找到匹配的会话。</p>
+            <button v-if="conversationHasMore" type="button" class="conversation-load-more" :disabled="conversationsLoading" @click="loadMoreConversations">{{ conversationsLoading ? "加载中…" : "加载更多会话" }}</button>
           </template>
           <div class="messages" aria-live="polite" @click="onMessagesClick" @scroll.passive="onMessagesScroll">
             <div v-if="loadingOlderMessages" class="messages-loading-older">正在加载更早的消息…</div>

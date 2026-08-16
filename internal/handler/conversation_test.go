@@ -44,6 +44,13 @@ func (s *conversationStoreStub) Search(_ context.Context, _ int64, query string,
 	s.searchLimit = limit
 	return s.records, nil
 }
+func (s *conversationStoreStub) ListPage(_ context.Context, _ int64, limit, offset int) ([]conversation.Conversation, bool, error) {
+	return s.records, offset == 0 && limit < 2, nil
+}
+func (s *conversationStoreStub) SearchPage(_ context.Context, _ int64, query string, limit, offset int) ([]conversation.Conversation, bool, error) {
+	s.searchQuery, s.searchLimit = query, limit
+	return s.records, offset == 0 && limit < 2, nil
+}
 func (s *conversationStoreStub) ListMessages(_ context.Context, id int64) ([]conversation.Message, error) {
 	result := make([]conversation.Message, 0)
 	for _, message := range s.messages {
@@ -168,7 +175,7 @@ func TestConversationHandlerCreatesAndListsConversation(t *testing.T) {
 	request = httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/7/conversations", nil)
 	request.SetPathValue("id", "7")
 	endpoint.ServeHTTP(list, request)
-	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"knowledgeBaseId":7`) {
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"knowledgeBaseId":7`) || !strings.Contains(list.Body.String(), `"items"`) {
 		t.Fatalf("list response: status=%d body=%s", list.Code, list.Body.String())
 	}
 }
@@ -180,7 +187,7 @@ func TestConversationHandlerSearchesConversations(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/7/conversations?q=%E5%B9%B4%E5%81%87&limit=12", nil)
 	request.SetPathValue("id", "7")
 	endpoint.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || store.searchQuery != "年假" || store.searchLimit != 12 {
+	if response.Code != http.StatusOK || store.searchQuery != "年假" || store.searchLimit != 12 || !strings.Contains(response.Body.String(), `"has_more"`) {
 		t.Fatalf("search: status=%d query=%q limit=%d", response.Code, store.searchQuery, store.searchLimit)
 	}
 }

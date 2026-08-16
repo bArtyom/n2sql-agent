@@ -86,22 +86,22 @@ func NewConversationsWithModelProvider(service *conversation.Service, providers 
 		switch r.Method {
 		case http.MethodGet:
 			query := strings.TrimSpace(r.URL.Query().Get("q"))
-			limit, err := decodeConversationSearchLimit(r)
+			limit, offset, err := decodeConversationPage(r)
 			if err != nil {
 				http.Error(w, `{"error":"invalid conversation search"}`, http.StatusBadRequest)
 				return
 			}
-			var conversations []conversation.Conversation
+			var page conversation.Page
 			if query == "" {
-				conversations, err = service.List(r.Context(), knowledgeBaseID)
+				page, err = service.ListPage(r.Context(), knowledgeBaseID, limit, offset)
 			} else {
-				conversations, err = service.Search(r.Context(), knowledgeBaseID, query, limit)
+				page, err = service.SearchPage(r.Context(), knowledgeBaseID, query, limit, offset)
 			}
 			if err != nil {
 				writeConversationError(w, err)
 				return
 			}
-			writeJSON(w, conversations)
+			writeJSON(w, page)
 		case http.MethodPost:
 			createConversation(w, r, service, knowledgeBaseID)
 		default:
@@ -110,16 +110,25 @@ func NewConversationsWithModelProvider(service *conversation.Service, providers 
 	})
 }
 
-func decodeConversationSearchLimit(r *http.Request) (int, error) {
+func decodeConversationPage(r *http.Request) (int, int, error) {
+	limit := defaultConversationSearchLimit
 	raw := r.URL.Query().Get("limit")
-	if raw == "" {
-		return defaultConversationSearchLimit, nil
+	if raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || parsed > maxConversationSearchLimit {
+			return 0, 0, errors.New("invalid conversation page")
+		}
+		limit = parsed
 	}
-	limit, err := strconv.Atoi(raw)
-	if err != nil || limit <= 0 || limit > maxConversationSearchLimit {
-		return 0, errors.New("invalid conversation search limit")
+	offset := 0
+	if raw = r.URL.Query().Get("offset"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			return 0, 0, errors.New("invalid conversation page")
+		}
+		offset = parsed
 	}
-	return limit, nil
+	return limit, offset, nil
 }
 
 // updateConversation handles PATCH with either a new title or a pinned flag.
