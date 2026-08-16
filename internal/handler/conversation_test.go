@@ -142,6 +142,7 @@ func (s *conversationStoreStub) Delete(_ context.Context, id int64) error {
 	}
 	return conversation.ErrNotFound
 }
+func (s *conversationStoreStub) DeleteMany(context.Context, int64, []int64) error { return nil }
 
 func (s *conversationStoreStub) GetIdempotentResponse(_ context.Context, conversationID int64, key string) (conversation.IdempotentResponse, error) {
 	response, ok := s.idempotency[fmt.Sprintf("%d:%s", conversationID, key)]

@@ -130,7 +130,8 @@ func (s *storeStub) SetChatModel(_ context.Context, _ int64, model string) (conv
 
 func (s *storeStub) ClearMessages(context.Context, int64) error { return nil }
 
-func (s *storeStub) Delete(context.Context, int64) error { return nil }
+func (s *storeStub) Delete(context.Context, int64) error              { return nil }
+func (s *storeStub) DeleteMany(context.Context, int64, []int64) error { return nil }
 
 func (s *storeStub) GetIdempotentResponse(_ context.Context, conversationID int64, key string) (conversation.IdempotentResponse, error) {
 	if response, ok := s.idempotency[fmt.Sprintf("%d:%s", conversationID, key)]; ok {

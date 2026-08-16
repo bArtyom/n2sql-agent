@@ -175,6 +175,7 @@ type Store interface {
 	SetChatModel(context.Context, int64, string) (Conversation, error)
 	ClearMessages(context.Context, int64) error
 	Delete(context.Context, int64) error
+	DeleteMany(context.Context, int64, []int64) error
 }
 
 type idempotencyStore interface {
@@ -393,6 +394,18 @@ func (s *Service) Delete(ctx context.Context, conversationID, knowledgeBaseID in
 		return err
 	}
 	return s.store.Delete(ctx, conversationID)
+}
+
+func (s *Service) DeleteMany(ctx context.Context, knowledgeBaseID int64, ids []int64) error {
+	if knowledgeBaseID <= 0 || len(ids) == 0 || len(ids) > 100 {
+		return ErrInvalidConversation
+	}
+	for _, id := range ids {
+		if id <= 0 {
+			return ErrInvalidConversation
+		}
+	}
+	return s.store.DeleteMany(ctx, knowledgeBaseID, ids)
 }
 
 // ClearMessages removes every message, summary, and idempotency record of a
@@ -847,6 +860,14 @@ func (s *PostgresStore) Delete(ctx context.Context, id int64) error {
 	}
 	if affected != 1 {
 		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeleteMany(ctx context.Context, knowledgeBaseID int64, ids []int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM conversations WHERE knowledge_base_id = $1 AND id = ANY($2) AND administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, knowledgeBaseID, ids)
+	if err != nil {
+		return fmt.Errorf("delete conversations: %w", err)
 	}
 	return nil
 }

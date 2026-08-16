@@ -77,6 +77,7 @@ func New(dependencies Dependencies) http.Handler {
 	if dependencies.Conversations != nil {
 		conversationHandler := handler.NewConversationsWithModelProvider(dependencies.Conversations, dependencies.Providers)
 		mux.Handle("POST /api/knowledge-bases/{id}/conversations", conversationHandler)
+		mux.Handle("POST /api/knowledge-bases/{id}/conversations/batch-delete", conversationHandler)
 		mux.Handle("GET /api/knowledge-bases/{id}/conversations", conversationHandler)
 		mux.Handle("GET /api/knowledge-bases/{id}/conversations/{conversationId}/messages", conversationHandler)
 		mux.Handle("PATCH /api/knowledge-bases/{id}/conversations/{conversationId}", conversationHandler)

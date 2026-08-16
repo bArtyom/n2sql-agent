@@ -103,11 +103,31 @@ func NewConversationsWithModelProvider(service *conversation.Service, providers 
 			}
 			writeJSON(w, page)
 		case http.MethodPost:
-			createConversation(w, r, service, knowledgeBaseID)
+			if r.URL.Path == "/api/knowledge-bases/"+r.PathValue("id")+"/conversations/batch-delete" {
+				deleteConversations(w, r, service, knowledgeBaseID)
+			} else {
+				createConversation(w, r, service, knowledgeBaseID)
+			}
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
 	})
+}
+
+func deleteConversations(w http.ResponseWriter, r *http.Request, service *conversation.Service, knowledgeBaseID int64) {
+	var request struct {
+		IDs []int64 `json:"ids"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxConversationRequestBytes))
+	if err := decoder.Decode(&request); err != nil {
+		http.Error(w, `{"error":"invalid conversation request"}`, http.StatusBadRequest)
+		return
+	}
+	if err := service.DeleteMany(r.Context(), knowledgeBaseID, request.IDs); err != nil {
+		writeConversationError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func decodeConversationPage(r *http.Request) (int, int, error) {
