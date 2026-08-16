@@ -908,6 +908,24 @@ async function deleteSelectedConversations() {
   } catch (error) { showError(error); } finally { conversationBatchBusy.value = false; }
 }
 
+async function pinSelectedConversations(pinned: boolean) {
+  if (!selectedKnowledgeBaseId.value || !selectedConversationIDs.value.length || conversationBatchBusy.value) return;
+  conversationBatchBusy.value = true;
+  try {
+    await requestJSON<void>(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations/batch-pin`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: selectedConversationIDs.value, pinned }) });
+    clearConversationSelection();
+    await refreshConversationList();
+  } catch (error) { showError(error); } finally { conversationBatchBusy.value = false; }
+}
+
+function exportSelectedConversations() {
+  const selected = conversations.value.filter((item) => selectedConversationIDs.value.includes(item.id));
+  if (!selected.length) return;
+  const markdown = selected.map((item) => `# ${item.title}\n\n- 会话 ID：${item.id}\n- 更新时间：${item.updatedAt}`).join("\n\n");
+  const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+  const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = "conversations.md"; link.click(); URL.revokeObjectURL(link.href);
+}
+
 function scheduleConversationSearch() {
   if (conversationSearchTimer !== undefined) window.clearTimeout(conversationSearchTimer);
   conversationSearchTimer = window.setTimeout(() => {
@@ -2363,6 +2381,9 @@ onUnmounted(() => {
             <div v-if="selectedConversationIDs.length" class="conversation-batch-toolbar">
               <span>已选 {{ selectedConversationIDs.length }} 个</span>
               <button type="button" :disabled="conversationBatchBusy || streaming" @click="deleteSelectedConversations">{{ conversationBatchBusy ? "删除中…" : "批量删除" }}</button>
+              <button type="button" :disabled="conversationBatchBusy" @click="pinSelectedConversations(true)">批量置顶</button>
+              <button type="button" :disabled="conversationBatchBusy" @click="pinSelectedConversations(false)">取消置顶</button>
+              <button type="button" :disabled="conversationBatchBusy" @click="exportSelectedConversations">导出 Markdown</button>
               <button type="button" :disabled="conversationBatchBusy" @click="clearConversationSelection">取消选择</button>
             </div>
             <div v-if="conversations.length" class="conversation-list" aria-label="会话列表">

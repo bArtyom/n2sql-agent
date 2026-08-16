@@ -408,6 +408,24 @@ func (s *Service) DeleteMany(ctx context.Context, knowledgeBaseID int64, ids []i
 	return s.store.DeleteMany(ctx, knowledgeBaseID, ids)
 }
 
+func (s *Service) SetPinnedMany(ctx context.Context, knowledgeBaseID int64, ids []int64, pinned bool) error {
+	if knowledgeBaseID <= 0 || len(ids) == 0 || len(ids) > 100 {
+		return ErrInvalidConversation
+	}
+	for _, id := range ids {
+		if id <= 0 {
+			return ErrInvalidConversation
+		}
+		if _, err := s.getOwnedConversation(ctx, id, knowledgeBaseID); err != nil {
+			return err
+		}
+		if _, err := s.store.SetPinned(ctx, id, pinned); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ClearMessages removes every message, summary, and idempotency record of a
 // conversation while keeping the conversation itself, so the list entry and
 // its title survive a wipe.

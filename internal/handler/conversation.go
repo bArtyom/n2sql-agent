@@ -103,8 +103,10 @@ func NewConversationsWithModelProvider(service *conversation.Service, providers 
 			}
 			writeJSON(w, page)
 		case http.MethodPost:
-			if r.URL.Path == "/api/knowledge-bases/"+r.PathValue("id")+"/conversations/batch-delete" {
+			if strings.HasSuffix(r.URL.Path, "/batch-delete") {
 				deleteConversations(w, r, service, knowledgeBaseID)
+			} else if strings.HasSuffix(r.URL.Path, "/batch-pin") {
+				pinConversations(w, r, service, knowledgeBaseID)
 			} else {
 				createConversation(w, r, service, knowledgeBaseID)
 			}
@@ -124,6 +126,22 @@ func deleteConversations(w http.ResponseWriter, r *http.Request, service *conver
 		return
 	}
 	if err := service.DeleteMany(r.Context(), knowledgeBaseID, request.IDs); err != nil {
+		writeConversationError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func pinConversations(w http.ResponseWriter, r *http.Request, service *conversation.Service, knowledgeBaseID int64) {
+	var request struct {
+		IDs    []int64 `json:"ids"`
+		Pinned bool    `json:"pinned"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxConversationRequestBytes)).Decode(&request); err != nil {
+		http.Error(w, `{"error":"invalid conversation request"}`, http.StatusBadRequest)
+		return
+	}
+	if err := service.SetPinnedMany(r.Context(), knowledgeBaseID, request.IDs, request.Pinned); err != nil {
 		writeConversationError(w, err)
 		return
 	}
