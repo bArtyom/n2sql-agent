@@ -143,6 +143,15 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	}
 	request.Message = strings.TrimSpace(request.Message)
 	request.ChatModel = strings.TrimSpace(request.ChatModel)
+	thinkingModeRequested := request.ThinkingMode != ""
+	thinkingMode, err := NormalizeThinkingMode(request.ThinkingMode)
+	if err != nil {
+		return Response{}, ErrInvalidRequest
+	}
+	request.ThinkingMode = thinkingMode
+	if err := ValidateAttachments(request.Attachments); err != nil {
+		return Response{}, ErrInvalidRequest
+	}
 	if knowledgeBaseID <= 0 || request.Message == "" || len(request.Message) > maxQuestionBytes {
 		return Response{}, ErrInvalidRequest
 	}
@@ -164,6 +173,9 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	}
 	runContext, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
+	if thinkingModeRequested {
+		runContext = modelruntime.WithReasoningEffort(runContext, ReasoningEffortForMode(request.ThinkingMode))
+	}
 	chatRunner := s.chat
 	if request.ChatModel != "" {
 		validator, ok := s.chat.(modelruntime.ChatModelValidator)
@@ -214,7 +226,15 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		{Role: "system", Content: systemPromptFor(s.documents != nil, s.chunks != nil)},
 	}
 	messages = append(messages, history...)
-	messages = append(messages, modelclient.ChatMessage{Role: "user", Content: request.Message})
+	userMessage := modelclient.ChatMessage{Role: "user", Content: request.Message}
+	if len(request.Attachments) > 0 {
+		parts, err := ChatContentParts(request.Message, request.Attachments)
+		if err != nil {
+			return Response{}, ErrInvalidRequest
+		}
+		userMessage.ContentParts = parts
+	}
+	messages = append(messages, userMessage)
 	collector := newSourceCollector()
 	traceCollector := newTraceCollector()
 	eventSink := traceCollector.Sink(collector.Sink(withHistorySummaryStats(sink, historySummaryStats)))

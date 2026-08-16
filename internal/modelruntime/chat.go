@@ -10,6 +10,20 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 )
 
+type reasoningEffortContextKey struct{}
+
+// WithReasoningEffort carries a provider-neutral reasoning effort to the
+// model boundary without expanding every Agent runner interface. The value is
+// emitted only when non-empty, so existing providers receive the old payload.
+func WithReasoningEffort(ctx context.Context, effort string) context.Context {
+	return context.WithValue(ctx, reasoningEffortContextKey{}, effort)
+}
+
+func reasoningEffort(ctx context.Context) string {
+	value, _ := ctx.Value(reasoningEffortContextKey{}).(string)
+	return value
+}
+
 var ErrStreamingUnavailable = errors.New("streaming chat is unavailable")
 
 type ChatCallError struct {
@@ -101,10 +115,11 @@ func (s *ChatService) ChatMessagesWithToolsForModel(ctx context.Context, request
 		return modelclient.ChatResponse{}, err
 	}
 	response, err := s.completer.Chat(ctx, provider.BaseURL, apiKey, modelclient.ChatRequest{
-		Model:    model,
-		Messages: messages,
-		Tools:    modelToolDefinitions(definitions),
-		Stream:   false,
+		Model:           model,
+		Messages:        messages,
+		Tools:           modelToolDefinitions(definitions),
+		ReasoningEffort: reasoningEffort(ctx),
+		Stream:          false,
 	})
 	if err != nil {
 		return modelclient.ChatResponse{}, &ChatCallError{Err: fmt.Errorf("complete chat with tools: %w", err)}

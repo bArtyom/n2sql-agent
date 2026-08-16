@@ -28,6 +28,8 @@ type ChatRequest struct {
 	RunID               string                `json:"-"`
 	TopK                int                   `json:"top_k,omitempty"`
 	ChatModel           string                `json:"chat_model,omitempty"`
+	ThinkingMode        string                `json:"thinking_mode,omitempty"`
+	Attachments         []ChatAttachment      `json:"attachments,omitempty"`
 	SimilarityThreshold float64               `json:"similarity_threshold,omitempty"`
 	KeywordThreshold    float64               `json:"keyword_threshold,omitempty"`
 	DocumentIDs         []int64               `json:"document_ids,omitempty"`

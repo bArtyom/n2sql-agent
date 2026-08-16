@@ -83,15 +83,32 @@ type RerankResponse struct {
 type TokenUsage = usage.TokenUsage
 
 type ChatMessage struct {
-	Role             string     `json:"role"`
-	Content          string     `json:"content"`
-	ReasoningContent string     `json:"reasoning_content,omitempty"`
-	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID       string     `json:"tool_call_id,omitempty"`
+	Role             string            `json:"role"`
+	Content          string            `json:"content"`
+	ReasoningContent string            `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall        `json:"tool_calls,omitempty"`
+	ToolCallID       string            `json:"tool_call_id,omitempty"`
+	ContentParts     []ChatContentPart `json:"-"`
+}
+
+// ChatContentPart is an OpenAI-compatible multimodal content part. It is
+// intentionally kept separate from Content so ordinary text messages keep
+// their existing wire shape.
+type ChatContentPart struct {
+	Type     string        `json:"type"`
+	Text     string        `json:"text,omitempty"`
+	ImageURL *ChatImageURL `json:"image_url,omitempty"`
+}
+
+type ChatImageURL struct {
+	URL string `json:"url"`
 }
 
 func (m ChatMessage) MarshalJSON() ([]byte, error) {
 	content := any(m.Content)
+	if len(m.ContentParts) > 0 {
+		content = m.ContentParts
+	}
 	if m.Content == "" && len(m.ToolCalls) > 0 {
 		content = nil
 	}
@@ -111,10 +128,11 @@ func (m ChatMessage) MarshalJSON() ([]byte, error) {
 }
 
 type ChatRequest struct {
-	Model    string           `json:"model"`
-	Messages []ChatMessage    `json:"messages"`
-	Stream   bool             `json:"stream"`
-	Tools    []ToolDefinition `json:"tools,omitempty"`
+	Model           string           `json:"model"`
+	Messages        []ChatMessage    `json:"messages"`
+	Stream          bool             `json:"stream"`
+	ReasoningEffort string           `json:"reasoning_effort,omitempty"`
+	Tools           []ToolDefinition `json:"tools,omitempty"`
 }
 
 type ChatResponse struct {

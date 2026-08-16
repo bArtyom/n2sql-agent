@@ -167,6 +167,25 @@ func TestChatServiceUsesRequestedConfiguredChatModel(t *testing.T) {
 	}
 }
 
+func TestChatServiceForwardsReasoningEffortFromContext(t *testing.T) {
+	store := providerStoreStub{provider: modelprovider.Provider{
+		BaseURL:      "https://api.example.com/v1",
+		APIKeyEnvVar: "TEST_MODEL_PROVIDER_API_KEY",
+		ChatModel:    "reasoning-model",
+	}}
+	completer := &chatCompleterStub{}
+	service := modelruntime.NewChatService(store, completer, "TEST_MODEL_PROVIDER_API_KEY", func(string) (string, bool) {
+		return "test-secret", true
+	})
+	ctx := modelruntime.WithReasoningEffort(context.Background(), "high")
+	if _, err := service.ChatMessagesWithToolsForModel(ctx, "reasoning-model", []modelclient.ChatMessage{{Role: "user", Content: "问题"}}, nil); err != nil {
+		t.Fatalf("ChatMessagesWithToolsForModel() error = %v", err)
+	}
+	if completer.request.ReasoningEffort != "high" {
+		t.Fatalf("reasoning effort = %q, want high", completer.request.ReasoningEffort)
+	}
+}
+
 func TestChatServiceRejectsUnconfiguredChatModel(t *testing.T) {
 	store := providerStoreStub{provider: modelprovider.Provider{
 		BaseURL:      "https://api.example.com/v1",

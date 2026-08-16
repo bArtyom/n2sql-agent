@@ -170,16 +170,18 @@ func decodeIdempotencyKey(w http.ResponseWriter, r *http.Request, conversationID
 
 func idempotencyRequestHash(knowledgeBaseID int64, request agentservice.ChatRequest) (string, error) {
 	payload, err := json.Marshal(struct {
-		KnowledgeBaseID  int64   `json:"knowledge_base_id"`
-		ConversationID   int64   `json:"conversation_id"`
-		Message          string  `json:"message"`
-		ChatModel        string  `json:"chat_model"`
-		TopK             int     `json:"top_k"`
-		Threshold        float64 `json:"similarity_threshold"`
-		KeywordThreshold float64 `json:"keyword_threshold"`
-		DocumentIDs      []int64 `json:"document_ids"`
-		QueryRewrite     bool    `json:"query_rewrite"`
-	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message, ChatModel: request.ChatModel, TopK: request.TopK, Threshold: request.SimilarityThreshold, KeywordThreshold: request.KeywordThreshold, DocumentIDs: request.DocumentIDs, QueryRewrite: request.QueryRewrite})
+		KnowledgeBaseID  int64                         `json:"knowledge_base_id"`
+		ConversationID   int64                         `json:"conversation_id"`
+		Message          string                        `json:"message"`
+		ChatModel        string                        `json:"chat_model"`
+		ThinkingMode     string                        `json:"thinking_mode"`
+		Attachments      []agentservice.ChatAttachment `json:"attachments"`
+		TopK             int                           `json:"top_k"`
+		Threshold        float64                       `json:"similarity_threshold"`
+		KeywordThreshold float64                       `json:"keyword_threshold"`
+		DocumentIDs      []int64                       `json:"document_ids"`
+		QueryRewrite     bool                          `json:"query_rewrite"`
+	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message, ChatModel: request.ChatModel, ThinkingMode: request.ThinkingMode, Attachments: request.Attachments, TopK: request.TopK, Threshold: request.SimilarityThreshold, KeywordThreshold: request.KeywordThreshold, DocumentIDs: request.DocumentIDs, QueryRewrite: request.QueryRewrite})
 	if err != nil {
 		return "", err
 	}
@@ -201,7 +203,7 @@ func decodeKnowledgeBaseAgentChatRequest(w http.ResponseWriter, r *http.Request,
 	}
 
 	var request agentservice.ChatRequest
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, int64(maxChatQuestion+maxHistoryBytes+4096)))
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, int64(maxChatQuestion+maxHistoryBytes+agentservice.MaxAttachmentRequestBytes+4096)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
 		writeAgentChatDecodeError(w, err)
@@ -213,6 +215,20 @@ func decodeKnowledgeBaseAgentChatRequest(w http.ResponseWriter, r *http.Request,
 	}
 	request.Message = strings.TrimSpace(request.Message)
 	request.ChatModel = strings.TrimSpace(request.ChatModel)
+	thinkingMode, err := agentservice.NormalizeThinkingMode(request.ThinkingMode)
+	if err != nil {
+		http.Error(w, `{"error":"invalid thinking mode"}`, http.StatusBadRequest)
+		return 0, agentservice.ChatRequest{}, false
+	}
+	request.ThinkingMode = thinkingMode
+	if err := agentservice.ValidateAttachments(request.Attachments); err != nil {
+		if errors.Is(err, agentservice.ErrAttachmentTooLarge) {
+			http.Error(w, `{"error":"chat attachment is too large"}`, http.StatusRequestEntityTooLarge)
+		} else {
+			http.Error(w, `{"error":"invalid chat attachment"}`, http.StatusBadRequest)
+		}
+		return 0, agentservice.ChatRequest{}, false
+	}
 	if request.Message == "" || len(request.Message) > maxChatQuestion {
 		http.Error(w, `{"error":"invalid agent chat message"}`, http.StatusBadRequest)
 		return 0, agentservice.ChatRequest{}, false

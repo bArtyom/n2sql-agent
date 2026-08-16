@@ -237,6 +237,58 @@ func TestHTTPClientParsesReasoningContent(t *testing.T) {
 	}
 }
 
+func TestHTTPClientMarshalsReasoningEffortAndMultimodalParts(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			ReasoningEffort string `json:"reasoning_effort"`
+			Messages        []struct {
+				Content []struct {
+					Type     string `json:"type"`
+					Text     string `json:"text"`
+					ImageURL *struct {
+						URL string `json:"url"`
+					} `json:"image_url"`
+				} `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if request.ReasoningEffort != "high" {
+			t.Fatalf("reasoning_effort = %q, want high", request.ReasoningEffort)
+		}
+		if len(request.Messages) != 1 || len(request.Messages[0].Content) != 2 {
+			t.Fatalf("messages = %#v, want two content parts", request.Messages)
+		}
+		if request.Messages[0].Content[0].Type != "text" || request.Messages[0].Content[0].Text != "看图" {
+			t.Fatalf("text part = %#v", request.Messages[0].Content[0])
+		}
+		if request.Messages[0].Content[1].Type != "image_url" || request.Messages[0].Content[1].ImageURL == nil || request.Messages[0].Content[1].ImageURL.URL != "data:image/png;base64,abc" {
+			t.Fatalf("image part = %#v", request.Messages[0].Content[1])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"收到"}}]}`))
+	}))
+	defer server.Close()
+
+	client := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
+	_, err := client.Chat(context.Background(), server.URL+"/v1", "test-secret", modelclient.ChatRequest{
+		Model:           "test-chat-model",
+		ReasoningEffort: "high",
+		Messages: []modelclient.ChatMessage{{
+			Role:    "user",
+			Content: "看图",
+			ContentParts: []modelclient.ChatContentPart{
+				{Type: "text", Text: "看图"},
+				{Type: "image_url", ImageURL: &modelclient.ChatImageURL{URL: "data:image/png;base64,abc"}},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+}
+
 func TestHTTPClientCarriesToolDefinitionsAndParsesToolCalls(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
