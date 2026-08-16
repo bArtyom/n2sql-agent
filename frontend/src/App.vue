@@ -248,6 +248,8 @@ const conversationSearch = ref("");
 const conversationHasMore = ref(false);
 const conversationOffset = ref(0);
 const conversationPageSize = 30;
+const selectedConversationIDs = ref<number[]>([]);
+const conversationBatchBusy = ref(false);
 let conversationSearchTimer: number | undefined;
 const conversationCreating = ref(false);
 const openConversationMenuId = ref<number | null>(null);
@@ -883,6 +885,29 @@ async function loadMoreConversations() {
   }
 }
 
+function toggleConversationSelection(id: number) {
+  selectedConversationIDs.value = selectedConversationIDs.value.includes(id)
+    ? selectedConversationIDs.value.filter((item) => item !== id)
+    : [...selectedConversationIDs.value, id];
+}
+
+function clearConversationSelection() { selectedConversationIDs.value = []; }
+
+async function deleteSelectedConversations() {
+  if (!selectedKnowledgeBaseId.value || !selectedConversationIDs.value.length || conversationBatchBusy.value) return;
+  if (!window.confirm(`删除选中的 ${selectedConversationIDs.value.length} 个会话？`)) return;
+  conversationBatchBusy.value = true;
+  try {
+    await requestJSON<void>(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations/batch-delete`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: selectedConversationIDs.value }),
+    });
+    const deletingCurrent = conversationId.value !== null && selectedConversationIDs.value.includes(conversationId.value);
+    clearConversationSelection();
+    await refreshConversationList();
+    if (deletingCurrent) await selectConversation(conversations.value[0]?.id ?? null);
+  } catch (error) { showError(error); } finally { conversationBatchBusy.value = false; }
+}
+
 function scheduleConversationSearch() {
   if (conversationSearchTimer !== undefined) window.clearTimeout(conversationSearchTimer);
   conversationSearchTimer = window.setTimeout(() => {
@@ -1130,6 +1155,7 @@ function selectKnowledgeBase(id: number) {
 	conversationHasMore.value = false;
 	if (conversationSearchTimer !== undefined) window.clearTimeout(conversationSearchTimer);
 	selectedKnowledgeBaseId.value = id;
+	clearConversationSelection();
 	selectedDocumentIDs.value = [];
   closeSource();
   closeDocumentPreview();
@@ -2334,6 +2360,11 @@ onUnmounted(() => {
               <input v-model="conversationSearch" type="search" placeholder="搜索会话标题或消息" aria-label="搜索会话标题或消息" @input="scheduleConversationSearch" />
               <button v-if="conversationSearch" type="button" aria-label="清除会话搜索" @click="conversationSearch = ''; scheduleConversationSearch()">清除</button>
             </div>
+            <div v-if="selectedConversationIDs.length" class="conversation-batch-toolbar">
+              <span>已选 {{ selectedConversationIDs.length }} 个</span>
+              <button type="button" :disabled="conversationBatchBusy || streaming" @click="deleteSelectedConversations">{{ conversationBatchBusy ? "删除中…" : "批量删除" }}</button>
+              <button type="button" :disabled="conversationBatchBusy" @click="clearConversationSelection">取消选择</button>
+            </div>
             <div v-if="conversations.length" class="conversation-list" aria-label="会话列表">
                 <template v-for="group in conversationGroups" :key="group.label">
                   <div class="conversation-group-label">{{ group.label }}</div>
@@ -2344,6 +2375,7 @@ onUnmounted(() => {
                     :class="{ 'conversation-item--active': item.id === conversationId, 'conversation-item--pinned': item.isPinned }"
                     @click="selectConversation(item.id)"
                   >
+                    <input class="conversation-select" type="checkbox" :checked="selectedConversationIDs.includes(item.id)" aria-label="选择会话" @click.stop="toggleConversationSelection(item.id)" />
                     <span class="conversation-item-title">{{ item.isPinned ? "📌 " : "" }}{{ item.title }}</span>
                     <small>{{ new Date(item.updatedAt).toLocaleDateString("zh-CN") }}</small>
                     <div class="conversation-actions">
