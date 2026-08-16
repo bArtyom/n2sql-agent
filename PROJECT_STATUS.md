@@ -40,7 +40,7 @@
 - 最新会话搜索切片：`GET /api/knowledge-bases/{id}/conversations?q=...&limit=...` 搜索当前知识库内会话标题和消息内容；服务端沿用管理员隔离并限制查询长度/返回条数，前端会话栏提供 250ms 防抖搜索和无结果提示。
 - 当前会话搜索范围：暂时只保留会话标题搜索，使用标题索引；历史消息跨会话搜索先搁置，避免当前版本引入较慢的消息查询链路。
 - 最新会话列表分页：会话列表接口返回 `items/has_more/offset/limit`，默认前端每页加载 30 条；标题搜索和普通列表共用分页查询，前端支持“加载更多”。
-- 最新工具审批切片：标准 Agent 在工具真正执行前发送 `approval_required` SSE 事件并暂停；前端确认卡片调用 `POST /api/knowledge-bases/{id}/agent-runs/{runID}/approval` 恢复或拒绝运行；审批状态按知识库 ID 和运行 ID 隔离，取消/结束时释放；默认 30 秒未确认会发送 `approval_expired` 并结束本轮；当前为进程内 Hub，Redis/持久化审批后置。
+- 最新工具审批切片：审批采用工具策略控制；当前只读 RAG 工具默认不弹确认，未来有写入或外部副作用的工具实现 `RequiresApproval() bool` 后才进入审批；进入审批的标准 Agent 会发送 `approval_required`，前端调用 `POST /api/knowledge-bases/{id}/agent-runs/{runID}/approval` 恢复或拒绝运行；审批状态按知识库 ID 和运行 ID 隔离，取消/结束时释放；默认 30 秒未确认会发送 `approval_expired` 并结束本轮；当前为进程内 Hub，Redis/持久化审批后置。
 
 ## 明确后置或不做
 

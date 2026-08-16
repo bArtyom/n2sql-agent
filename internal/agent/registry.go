@@ -26,6 +26,12 @@ type Tool interface {
 	Call(context.Context, json.RawMessage) (ToolResult, error)
 }
 
+// ApprovalAwareTool optionally marks tools that can change state or trigger
+// external side effects. Read-only tools do not need to implement it.
+type ApprovalAwareTool interface {
+	RequiresApproval() bool
+}
+
 // ToolResult is the normalized result returned by a tool.
 type ToolResult struct {
 	Content           string         `json:"content"`
@@ -107,6 +113,17 @@ func (r *ToolRegistry) Find(name string) (Tool, error) {
 		return nil, fmt.Errorf("%w: %s", ErrToolNotFound, name)
 	}
 	return tool, nil
+}
+
+// RequiresApproval reports whether a registered tool should pass through the
+// user approval gate. The safe default is false for existing read-only tools.
+func (r *ToolRegistry) RequiresApproval(name string) bool {
+	tool, ok := r.Get(name)
+	if !ok {
+		return false
+	}
+	aware, ok := tool.(ApprovalAwareTool)
+	return ok && aware.RequiresApproval()
 }
 
 func (r *ToolRegistry) isAllowed(name string) bool {

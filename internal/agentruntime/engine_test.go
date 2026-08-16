@@ -35,6 +35,8 @@ type toolStub struct {
 
 func (t *toolStub) Name() string { return "knowledge_search" }
 
+func (t *toolStub) RequiresApproval() bool { return true }
+
 func (t *toolStub) Description() string { return "search the knowledge base" }
 
 func (t *toolStub) Parameters() json.RawMessage {

@@ -18,6 +18,10 @@ type invalidDefinitionTool struct {
 	parameters json.RawMessage
 }
 
+type approvingTool struct{ stubTool }
+
+func (approvingTool) RequiresApproval() bool { return true }
+
 func (t invalidDefinitionTool) Parameters() json.RawMessage {
 	return t.parameters
 }
@@ -52,6 +56,22 @@ func TestToolRegistryReturnsRegisteredTool(t *testing.T) {
 	}
 	if got.Name() != tool.Name() {
 		t.Fatalf("Get() name = %q, want %q", got.Name(), tool.Name())
+	}
+}
+
+func TestToolRegistryApprovalPolicyDefaultsToReadOnly(t *testing.T) {
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(stubTool{name: "knowledge_search"}); err != nil {
+		t.Fatal(err)
+	}
+	if registry.RequiresApproval("knowledge_search") {
+		t.Fatal("read-only tool unexpectedly requires approval")
+	}
+	if err := registry.Register(approvingTool{stubTool{name: "document_write"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !registry.RequiresApproval("document_write") {
+		t.Fatal("approval-aware tool does not require approval")
 	}
 }
 

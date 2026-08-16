@@ -240,7 +240,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				return addToolFailureWithEvents(result, toolCall.Function.Name, err, emitter)
 			}
 			arguments := json.RawMessage(toolCall.Function.Arguments)
-			if approvalGate != nil {
+			if approvalGate != nil && e.registry.RequiresApproval(toolCall.Function.Name) {
 				if err := emitter.emit(agent.EventApprovalRequired, len(run.Steps())+1, map[string]any{"tool_name": toolCall.Function.Name, "arguments": boundedEventText(toolCall.Function.Arguments)}); err != nil {
 					return result, err
 				}
