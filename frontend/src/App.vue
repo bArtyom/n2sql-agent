@@ -116,7 +116,7 @@ type A2ATask = {
   updated_at?: string;
   error?: string;
 };
-type Conversation = { id: number; knowledgeBaseId: number; title: string; isPinned: boolean; createdAt: string; updatedAt: string };
+type Conversation = { id: number; knowledgeBaseId: number; title: string; isPinned: boolean; chatModel?: string; createdAt: string; updatedAt: string };
 type ConversationMessage = {
   id: number;
   conversationId: number;
@@ -146,6 +146,7 @@ type ModelProvider = {
   baseUrl: string;
   apiKeyEnvVar: string;
   chatModel: string;
+  chatModels?: string[];
   embeddingModel: string;
   rerankBaseUrl: string;
   rerankModel: string;
@@ -220,6 +221,12 @@ const providerTesting = ref(false);
 const providerMessage = ref("");
 const providerMessageKind = ref<"idle" | "success" | "error">("idle");
 const providerForm = ref<ModelProvider>(emptyModelProvider());
+const providerChatModelsText = ref("");
+const chatModelOptions = ref<string[]>([]);
+const defaultChatModel = ref("");
+const chatModelOptionsLoading = ref(false);
+const chatModelOptionsError = ref("");
+const selectedChatModel = ref("");
 const conversationsLoading = ref(false);
 const conversationCreating = ref(false);
 const openConversationMenuId = ref<number | null>(null);
@@ -283,11 +290,45 @@ function emptyModelProvider(): ModelProvider {
     baseUrl: "https://api.openai.com/v1",
     apiKeyEnvVar: "OPENAI_API_KEY",
     chatModel: "",
+    chatModels: [],
     embeddingModel: "",
     rerankBaseUrl: "",
     rerankModel: "",
     enabled: true,
   };
+}
+
+function normalizedChatModelOptions(provider: ModelProvider): string[] {
+  const candidates = [provider.chatModel, ...(provider.chatModels ?? [])];
+  const seen = new Set<string>();
+  return candidates
+    .filter((candidate): candidate is string => typeof candidate === "string")
+    .map((candidate) => candidate.trim())
+    .filter((candidate) => candidate.length > 0 && candidate.length <= 200)
+    .filter((candidate) => {
+      if (seen.has(candidate)) return false;
+      seen.add(candidate);
+      return true;
+    })
+    .slice(0, 16);
+}
+
+function applyModelProvider(provider: ModelProvider) {
+  const options = normalizedChatModelOptions(provider);
+  defaultChatModel.value = typeof provider.chatModel === "string" ? provider.chatModel.trim() : "";
+  chatModelOptions.value = options;
+  const conversationModel = selectedConversation.value?.chatModel?.trim();
+  if (conversationModel && options.includes(conversationModel)) {
+    selectedChatModel.value = conversationModel;
+  } else if (!selectedChatModel.value || !options.includes(selectedChatModel.value)) {
+    selectedChatModel.value = defaultChatModel.value && options.includes(defaultChatModel.value) ? defaultChatModel.value : (options[0] ?? "");
+  }
+}
+
+function setProviderForm(provider: ModelProvider) {
+  providerForm.value = provider;
+  providerChatModelsText.value = normalizedChatModelOptions(provider).join(", ");
+  applyModelProvider(provider);
 }
 
 function parseSources(value: unknown): Source[] {
@@ -625,20 +666,40 @@ async function openProviderSettings() {
   providerMessage.value = "";
   providerMessageKind.value = "idle";
   try {
-    providerForm.value = await requestJSON<ModelProvider>("/api/model-provider");
+    const provider = await requestJSON<ModelProvider>("/api/model-provider");
+    setProviderForm(provider);
   } catch (error) {
     if (error instanceof APIError && error.status === 404) {
       const payload = error.payload;
       const apiKeyEnvVar = payload && typeof payload === "object" && "apiKeyEnvVar" in payload && typeof payload.apiKeyEnvVar === "string"
         ? payload.apiKeyEnvVar
         : emptyModelProvider().apiKeyEnvVar;
-      providerForm.value = { ...emptyModelProvider(), apiKeyEnvVar };
+      setProviderForm({ ...emptyModelProvider(), apiKeyEnvVar });
     } else {
       providerMessageKind.value = "error";
       providerMessage.value = error instanceof Error ? error.message : "无法读取模型配置。";
     }
   } finally {
     providerLoading.value = false;
+  }
+}
+
+async function loadChatModelOptions() {
+  chatModelOptionsLoading.value = true;
+  chatModelOptionsError.value = "";
+  try {
+    const provider = await requestJSON<ModelProvider>("/api/model-provider");
+    applyModelProvider(provider);
+  } catch (error) {
+    if (error instanceof APIError && error.status === 404) {
+      chatModelOptions.value = [];
+      defaultChatModel.value = "";
+      selectedChatModel.value = "";
+    } else {
+      chatModelOptionsError.value = error instanceof Error ? error.message : "无法读取聊天模型列表。";
+    }
+  } finally {
+    chatModelOptionsLoading.value = false;
   }
 }
 
@@ -660,8 +721,13 @@ async function saveProvider() {
     providerForm.value = await requestJSON<ModelProvider>("/api/model-provider", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...form, apiKeyEnvVar: form.apiKeyEnvVar }),
+      body: JSON.stringify({
+        ...form,
+        apiKeyEnvVar: form.apiKeyEnvVar,
+        chatModels: providerChatModelsText.value.split(",").map((item) => item.trim()).filter(Boolean),
+      }),
     });
+    setProviderForm(providerForm.value);
     providerMessageKind.value = "success";
     providerMessage.value = "模型配置已保存。";
   } catch (error) {
@@ -756,12 +822,47 @@ async function refreshConversationList() {
 
 async function selectConversation(id: number | null) {
   conversationId.value = id;
+  const conversationModel = selectedConversation.value?.chatModel?.trim();
+  selectedChatModel.value = conversationModel && chatModelOptions.value.includes(conversationModel)
+    ? conversationModel
+    : defaultChatModel.value;
   closeConversationMenu();
   retrievalDetailsOpen.value = new Set();
   messages.value = [];
   messageCursor.value = { conversationId: id, beforeId: null, hasMore: false };
   if (!id || !selectedKnowledgeBaseId.value) return;
   await loadMessagePage(id, null);
+}
+
+async function persistConversationChatModel(id: number, model: string): Promise<Conversation> {
+  if (!selectedKnowledgeBaseId.value) throw new Error("请先选择知识库。");
+  return requestJSON<Conversation>(
+    `/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations/${id}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_model: model }),
+    },
+  );
+}
+
+async function updateConversationChatModel() {
+  if (!selectedKnowledgeBaseId.value || !conversationId.value || streaming.value) return;
+  const model = selectedChatModel.value;
+  if (!chatModelOptions.value.includes(model)) {
+    selectedChatModel.value = selectedConversation.value?.chatModel?.trim() || defaultChatModel.value;
+    errorMessage.value = "请选择服务端已配置的聊天模型。";
+    return;
+  }
+  const previous = selectedConversation.value?.chatModel?.trim() || defaultChatModel.value;
+  try {
+    const updated = await persistConversationChatModel(conversationId.value, model);
+    conversations.value = conversations.value.map((item) => item.id === updated.id ? updated : item);
+    selectedChatModel.value = updated.chatModel?.trim() || defaultChatModel.value;
+  } catch (error) {
+    selectedChatModel.value = previous;
+    showError(error);
+  }
 }
 
 // 把后端消息记录转换为页面上的聊天消息。
@@ -831,11 +932,12 @@ async function createConversation() {
   if (!selectedKnowledgeBaseId.value || conversationCreating.value || streaming.value) return;
   conversationCreating.value = true;
   try {
-    const created = await requestJSON<Conversation>(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations`, {
+    let created = await requestJSON<Conversation>(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: "新对话" }),
     });
+    if (selectedChatModel.value) created = await persistConversationChatModel(created.id, selectedChatModel.value);
     conversations.value = [created, ...conversations.value];
     await selectConversation(created.id);
   } catch (error) {
@@ -952,11 +1054,12 @@ async function deleteConversation(item: Conversation) {
 async function ensureConversation(title: string): Promise<number> {
   if (conversationId.value) return conversationId.value;
   if (!selectedKnowledgeBaseId.value) throw new Error("请先选择知识库。");
-  const created = await requestJSON<Conversation>(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations`, {
+  let created = await requestJSON<Conversation>(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title: title.slice(0, 80) }),
   });
+  if (selectedChatModel.value) created = await persistConversationChatModel(created.id, selectedChatModel.value);
   conversationId.value = created.id;
   conversations.value = [created, ...conversations.value.filter((item) => item.id !== created.id)];
   return created.id;
@@ -1177,6 +1280,7 @@ async function streamAgentQuestion(prompt: string, answerIndex: number, activeCo
       ? { message: prompt, topK: topK.value, document_ids: selectedDocumentIDs.value, query_rewrite: queryRewrite.value, keyword_threshold: keywordThreshold.value }
       : {
           message: prompt,
+          chat_model: selectedChatModel.value || undefined,
           top_k: topK.value,
           similarity_threshold: similarityThreshold.value,
           document_ids: selectedDocumentIDs.value,
@@ -1871,6 +1975,7 @@ function formatBytes(size: number) {
 
 onMounted(() => {
   window.addEventListener("keydown", closeSourceOnEscape);
+  void loadChatModelOptions();
   void loadKnowledgeBases().then(() => loadConversation()).then(() => restorePendingAgentRun());
 });
 onUnmounted(() => {
@@ -2044,6 +2149,13 @@ onUnmounted(() => {
                 <span class="conversation-caption">当前会话</span>
                 <strong>{{ selectedConversation?.title || "还没有会话" }}</strong>
               </div>
+              <label v-if="chatModelOptions.length" class="conversation-model">
+                <span>回答模型</span>
+                <select v-model="selectedChatModel" :disabled="streaming || chatModelOptionsLoading" aria-label="选择回答模型" @change="updateConversationChatModel">
+                  <option v-for="model in chatModelOptions" :key="model" :value="model">{{ model }}</option>
+                </select>
+              </label>
+              <span v-else-if="chatModelOptionsError" class="conversation-model-error">模型列表不可用</span>
               <button class="conversation-new" type="button" :disabled="conversationCreating || streaming || !selectedKnowledgeBase" @click="createConversation">
                 {{ conversationCreating ? "创建中…" : "+ 新对话" }}
               </button>
@@ -2238,6 +2350,7 @@ onUnmounted(() => {
             <label>聊天模型<input v-model="providerForm.chatModel" type="text" placeholder="例如：gpt-4o-mini" required /></label>
             <label>嵌入模型<input v-model="providerForm.embeddingModel" type="text" placeholder="例如：text-embedding-3-small" required /></label>
           </div>
+          <label>可选聊天模型<input v-model="providerChatModelsText" type="text" placeholder="用逗号分隔，例如：gpt-4o-mini,qwen-plus" maxlength="3200" /><small class="settings-help">会话选择器只显示这里配置的模型；默认聊天模型会自动保留。</small></label>
           <div class="settings-two-column">
             <label>Rerank Base URL（可选）<input v-model="providerForm.rerankBaseUrl" type="url" placeholder="例如：https://…/compatible-api/v1" /></label>
             <label>Rerank 模型（可选）<input v-model="providerForm.rerankModel" type="text" placeholder="例如：qwen3-rerank" /></label>
