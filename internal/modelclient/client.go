@@ -83,10 +83,11 @@ type RerankResponse struct {
 type TokenUsage = usage.TokenUsage
 
 type ChatMessage struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Role             string     `json:"role"`
+	Content          string     `json:"content"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
 }
 
 func (m ChatMessage) MarshalJSON() ([]byte, error) {
@@ -95,15 +96,17 @@ func (m ChatMessage) MarshalJSON() ([]byte, error) {
 		content = nil
 	}
 	return json.Marshal(struct {
-		Role       string     `json:"role"`
-		Content    any        `json:"content"`
-		ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-		ToolCallID string     `json:"tool_call_id,omitempty"`
+		Role             string     `json:"role"`
+		Content          any        `json:"content"`
+		ReasoningContent string     `json:"reasoning_content,omitempty"`
+		ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+		ToolCallID       string     `json:"tool_call_id,omitempty"`
 	}{
-		Role:       m.Role,
-		Content:    content,
-		ToolCalls:  m.ToolCalls,
-		ToolCallID: m.ToolCallID,
+		Role:             m.Role,
+		Content:          content,
+		ReasoningContent: m.ReasoningContent,
+		ToolCalls:        m.ToolCalls,
+		ToolCallID:       m.ToolCallID,
 	})
 }
 
@@ -115,9 +118,10 @@ type ChatRequest struct {
 }
 
 type ChatResponse struct {
-	Message   string      `json:"message"`
-	ToolCalls []ToolCall  `json:"tool_calls,omitempty"`
-	Usage     *TokenUsage `json:"usage,omitempty"`
+	Message          string      `json:"message"`
+	ReasoningContent string      `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall  `json:"tool_calls,omitempty"`
+	Usage            *TokenUsage `json:"usage,omitempty"`
 }
 
 // ToolDefinition is the OpenAI-compatible function tool shape sent with a
@@ -412,7 +416,7 @@ func (c *HTTPClient) Chat(ctx context.Context, baseURL, apiKey string, chatReque
 			return ChatResponse{}, fmt.Errorf("chat response contains invalid tool call: %w", err)
 		}
 	}
-	return ChatResponse{Message: message.Content, ToolCalls: message.ToolCalls, Usage: payload.Usage}, nil
+	return ChatResponse{Message: message.Content, ReasoningContent: message.ReasoningContent, ToolCalls: message.ToolCalls, Usage: payload.Usage}, nil
 }
 
 // OCR sends one JPEG page to an OpenAI-compatible vision chat endpoint and

@@ -310,6 +310,7 @@ func writeAgentSSEEvent(w http.ResponseWriter, flusher http.Flusher, eventType s
 		string(agent.EventStepStarted),
 		string(agent.EventToolCalled),
 		string(agent.EventToolFinished),
+		string(agent.EventReasoningDelta),
 		string(agent.EventMessageDelta),
 		string(agent.EventRunFinished),
 		string(agent.EventRunFailed),

@@ -11,14 +11,15 @@ var ErrInvalidEvent = errors.New("invalid agent event")
 type EventType string
 
 const (
-	EventRunStarted   EventType = "run_started"
-	EventStepStarted  EventType = "step_started"
-	EventToolCalled   EventType = "tool_called"
-	EventToolFinished EventType = "tool_finished"
-	EventMessageDelta EventType = "message_delta"
-	EventRunFinished  EventType = "run_finished"
-	EventRunFailed    EventType = "run_failed"
-	EventRunCanceled  EventType = "run_canceled"
+	EventRunStarted     EventType = "run_started"
+	EventStepStarted    EventType = "step_started"
+	EventToolCalled     EventType = "tool_called"
+	EventToolFinished   EventType = "tool_finished"
+	EventReasoningDelta EventType = "reasoning_delta"
+	EventMessageDelta   EventType = "message_delta"
+	EventRunFinished    EventType = "run_finished"
+	EventRunFailed      EventType = "run_failed"
+	EventRunCanceled    EventType = "run_canceled"
 )
 
 // Event is an observable occurrence in one Agent run.
@@ -56,6 +57,7 @@ func validEventType(eventType EventType) bool {
 		EventStepStarted,
 		EventToolCalled,
 		EventToolFinished,
+		EventReasoningDelta,
 		EventMessageDelta,
 		EventRunFinished,
 		EventRunFailed,

@@ -19,6 +19,9 @@ func TestAgentRunStreamReplaysFinishedRun(t *testing.T) {
 	if err := hub.PublishAgent(agent.Event{ID: "event-1", RunID: "run-1", Type: agent.EventRunStarted}); err != nil {
 		t.Fatal(err)
 	}
+	if err := hub.PublishAgent(agent.Event{ID: "event-reasoning", RunID: "run-1", Type: agent.EventReasoningDelta, Data: map[string]any{"content": "先检查资料"}}); err != nil {
+		t.Fatal(err)
+	}
 	if err := hub.PublishAgent(agent.Event{ID: "event-2", RunID: "run-1", Type: agent.EventRunFinished, Data: map[string]any{"answer": "完成"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +39,7 @@ func TestAgentRunStreamReplaysFinishedRun(t *testing.T) {
 		t.Fatalf("status=%d content-type=%q", response.Code, response.Header().Get("Content-Type"))
 	}
 	body := response.Body.String()
-	if !strings.Contains(body, "event: run_started\n") || !strings.Contains(body, `"answer":"完成"`) {
+	if !strings.Contains(body, "event: run_started\n") || !strings.Contains(body, "event: reasoning_delta\n") || !strings.Contains(body, `"content":"先检查资料"`) || !strings.Contains(body, `"answer":"完成"`) {
 		t.Fatalf("body=%q, want replayed events", body)
 	}
 }

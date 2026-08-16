@@ -47,6 +47,51 @@ func TestEngineRunWithEventsEmitsDirectAnswerLifecycle(t *testing.T) {
 	}
 }
 
+func TestEngineRunWithEventsEmitsReasoningBeforeAnswer(t *testing.T) {
+	chat := chatStub{call: func(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		return modelclient.ChatResponse{ReasoningContent: "先检索资料，再组织答案", Message: "最终答案"}, nil
+	}}
+	engine, err := agentruntime.NewEngine(chat, agent.NewToolRegistry(), 2)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	var events []agent.Event
+
+	_, err = engine.RunWithEvents(context.Background(), "run-reasoning", []modelclient.ChatMessage{{Role: "user", Content: "问题"}}, func(event agent.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("RunWithEvents() error = %v", err)
+	}
+	assertEventTypes(t, events, agent.EventRunStarted, agent.EventReasoningDelta, agent.EventMessageDelta, agent.EventRunFinished)
+	reasoning, ok := events[1].Data.(map[string]any)
+	if !ok || reasoning["content"] != "先检索资料，再组织答案" {
+		t.Fatalf("reasoning event = %#v, want bounded content", events[1].Data)
+	}
+}
+
+func TestEngineRunWithEventsBoundsReasoningContent(t *testing.T) {
+	chat := chatStub{call: func(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		return modelclient.ChatResponse{ReasoningContent: strings.Repeat("思", 20_000), Message: "最终答案"}, nil
+	}}
+	engine, err := agentruntime.NewEngine(chat, agent.NewToolRegistry(), 1)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	var events []agent.Event
+	if _, err := engine.RunWithEvents(context.Background(), "run-reasoning-limit", []modelclient.ChatMessage{{Role: "user", Content: "问题"}}, func(event agent.Event) error {
+		events = append(events, event)
+		return nil
+	}); err != nil {
+		t.Fatalf("RunWithEvents() error = %v", err)
+	}
+	reasoning, ok := events[1].Data.(map[string]any)
+	if !ok || len(reasoning["content"].(string)) > 12*1024 {
+		t.Fatalf("reasoning content bytes = %d, want at most 12288", len(reasoning["content"].(string)))
+	}
+}
+
 func TestEngineRunWithEventsEmitsToolLifecycle(t *testing.T) {
 	tool := &toolStub{metadata: map[string]any{
 		"sources": []map[string]any{{

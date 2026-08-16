@@ -28,7 +28,10 @@ var (
 
 const untrustedToolResultPrefix = "UNTRUSTED_TOOL_RESULT\n"
 
-const maxToolArgumentsEventBytes = 1024
+const (
+	maxToolArgumentsEventBytes = 1024
+	maxReasoningEventBytes     = 12 * 1024
+)
 
 type untrustedToolResultEnvelope struct {
 	Trusted bool   `json:"trusted"`
@@ -147,6 +150,13 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 		}
 		if err := run.AddStep(agent.Step{Kind: agent.StepModelDecision, Status: agent.StepSucceeded}); err != nil {
 			return finishErrorWithEvents(result, err, emitter)
+		}
+		if reasoning := boundedReasoningText(response.ReasoningContent); reasoning != "" {
+			if err := emitter.emit(agent.EventReasoningDelta, len(run.Steps()), map[string]any{
+				"content": reasoning,
+			}); err != nil {
+				return finishError(result, err)
+			}
 		}
 
 		if len(response.ToolCalls) == 0 {
@@ -275,6 +285,18 @@ func boundedEventText(value string) string {
 	}
 	runes := []rune(value)
 	for len(runes) > 0 && len(string(runes)) > maxToolArgumentsEventBytes {
+		runes = runes[:len(runes)-1]
+	}
+	return string(runes)
+}
+
+func boundedReasoningText(value string) string {
+	value = security.RedactText(strings.TrimSpace(value))
+	if len(value) <= maxReasoningEventBytes {
+		return value
+	}
+	runes := []rune(value)
+	for len(runes) > 0 && len(string(runes)) > maxReasoningEventBytes {
 		runes = runes[:len(runes)-1]
 	}
 	return string(runes)

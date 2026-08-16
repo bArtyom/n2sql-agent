@@ -217,6 +217,26 @@ func TestHTTPClientCompletesChat(t *testing.T) {
 	}
 }
 
+func TestHTTPClientParsesReasoningContent(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"最终答案","reasoning_content":"先检索资料，再组织答案"}}]}`))
+	}))
+	defer server.Close()
+
+	client := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
+	response, err := client.Chat(context.Background(), server.URL+"/v1", "test-secret", modelclient.ChatRequest{
+		Model:    "test-chat-model",
+		Messages: []modelclient.ChatMessage{{Role: "user", Content: "问题"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if response.Message != "最终答案" || response.ReasoningContent != "先检索资料，再组织答案" {
+		t.Fatalf("response = %#v, want answer and reasoning content", response)
+	}
+}
+
 func TestHTTPClientCarriesToolDefinitionsAndParsesToolCalls(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
