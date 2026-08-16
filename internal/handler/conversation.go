@@ -14,6 +14,11 @@ import (
 
 const maxConversationRequestBytes = 4096
 
+const (
+	defaultConversationSearchLimit = 50
+	maxConversationSearchLimit     = 100
+)
+
 // NewConversations exposes conversation creation, listing, and message history.
 func NewConversations(service *conversation.Service) http.Handler {
 	return NewConversationsWithModelProvider(service, nil)
@@ -80,7 +85,18 @@ func NewConversationsWithModelProvider(service *conversation.Service, providers 
 
 		switch r.Method {
 		case http.MethodGet:
-			conversations, err := service.List(r.Context(), knowledgeBaseID)
+			query := strings.TrimSpace(r.URL.Query().Get("q"))
+			limit, err := decodeConversationSearchLimit(r)
+			if err != nil {
+				http.Error(w, `{"error":"invalid conversation search"}`, http.StatusBadRequest)
+				return
+			}
+			var conversations []conversation.Conversation
+			if query == "" {
+				conversations, err = service.List(r.Context(), knowledgeBaseID)
+			} else {
+				conversations, err = service.Search(r.Context(), knowledgeBaseID, query, limit)
+			}
 			if err != nil {
 				writeConversationError(w, err)
 				return
@@ -92,6 +108,18 @@ func NewConversationsWithModelProvider(service *conversation.Service, providers 
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
 	})
+}
+
+func decodeConversationSearchLimit(r *http.Request) (int, error) {
+	raw := r.URL.Query().Get("limit")
+	if raw == "" {
+		return defaultConversationSearchLimit, nil
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit <= 0 || limit > maxConversationSearchLimit {
+		return 0, errors.New("invalid conversation search limit")
+	}
+	return limit, nil
 }
 
 // updateConversation handles PATCH with either a new title or a pinned flag.
@@ -217,7 +245,7 @@ func decodeMessagesPage(r *http.Request) (beforeID int64, limit int, err error) 
 
 func writeConversationError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, conversation.ErrInvalidConversation), errors.Is(err, conversation.ErrInvalidKnowledgeBase), errors.Is(err, conversation.ErrInvalidTitle), errors.Is(err, conversation.ErrInvalidChatModel):
+	case errors.Is(err, conversation.ErrInvalidConversation), errors.Is(err, conversation.ErrInvalidKnowledgeBase), errors.Is(err, conversation.ErrInvalidTitle), errors.Is(err, conversation.ErrInvalidChatModel), errors.Is(err, conversation.ErrInvalidSearchQuery), errors.Is(err, conversation.ErrInvalidSearchLimit):
 		http.Error(w, `{"error":"invalid conversation request"}`, http.StatusBadRequest)
 	case errors.Is(err, conversation.ErrNotFound):
 		http.Error(w, `{"error":"conversation not found"}`, http.StatusNotFound)

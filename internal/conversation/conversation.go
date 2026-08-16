@@ -22,6 +22,9 @@ const (
 	maxMessageSize            = 64 * 1024
 	maxIdempotencyKeySize     = 128
 	maxChatModelBytes         = 200
+	maxSearchQueryBytes       = 200
+	defaultConversationLimit  = 50
+	maxConversationLimit       = 100
 	conversationLockNamespace = 0x6e327361
 	maxAutoTitleRunes         = 30
 )
@@ -36,6 +39,8 @@ var (
 	ErrIdempotencyUnavailable = errors.New("conversation idempotency is unavailable")
 	ErrNotFound               = errors.New("conversation not found")
 	ErrInvalidChatModel       = errors.New("invalid conversation chat model")
+	ErrInvalidSearchQuery     = errors.New("invalid conversation search query")
+	ErrInvalidSearchLimit     = errors.New("invalid conversation search limit")
 )
 
 type Conversation struct {
@@ -150,6 +155,7 @@ type Store interface {
 	Create(context.Context, CreateInput) (Conversation, error)
 	Get(context.Context, int64) (Conversation, error)
 	List(context.Context, int64) ([]Conversation, error)
+	Search(context.Context, int64, string, int) ([]Conversation, error)
 	ListMessages(context.Context, int64) ([]Message, error)
 	ListMessagesPage(context.Context, int64, int64, int) ([]Message, bool, error)
 	GetSummary(context.Context, int64) (Summary, error)
@@ -238,6 +244,26 @@ func (s *Service) List(ctx context.Context, knowledgeBaseID int64) ([]Conversati
 		return nil, ErrInvalidKnowledgeBase
 	}
 	return s.store.List(ctx, knowledgeBaseID)
+}
+
+// Search returns conversations in one knowledge base whose title or message
+// content contains query. Search stays scoped to the current administrator in
+// the store, just like List, and intentionally uses a bounded result set.
+func (s *Service) Search(ctx context.Context, knowledgeBaseID int64, query string, limit int) ([]Conversation, error) {
+	if knowledgeBaseID <= 0 {
+		return nil, ErrInvalidKnowledgeBase
+	}
+	query = strings.TrimSpace(query)
+	if query == "" || len(query) > maxSearchQueryBytes {
+		return nil, ErrInvalidSearchQuery
+	}
+	if limit <= 0 {
+		limit = defaultConversationLimit
+	}
+	if limit > maxConversationLimit {
+		return nil, ErrInvalidSearchLimit
+	}
+	return s.store.Search(ctx, knowledgeBaseID, query, limit)
 }
 
 // Get returns a conversation owned by the current administrator. Callers
@@ -639,6 +665,41 @@ func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Conv
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate conversations: %w", err)
+	}
+	return results, nil
+}
+
+func (s *PostgresStore) Search(ctx context.Context, knowledgeBaseID int64, query string, limit int) ([]Conversation, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT c.id, c.knowledge_base_id, c.title, c.is_pinned, c.chat_model, c.created_at, c.updated_at
+		FROM conversations c
+		WHERE c.knowledge_base_id = $1
+		  AND c.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
+		  AND (
+			strpos(lower(c.title), lower($2)) > 0
+			OR EXISTS (
+				SELECT 1
+				FROM conversation_messages m
+				WHERE m.conversation_id = c.id
+				  AND strpos(lower(m.content), lower($2)) > 0
+			)
+		  )
+		ORDER BY c.is_pinned DESC, c.updated_at DESC, c.id DESC
+		LIMIT $3`, knowledgeBaseID, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("search conversations: %w", err)
+	}
+	defer rows.Close()
+	results := make([]Conversation, 0)
+	for rows.Next() {
+		var result Conversation
+		if err := rows.Scan(&result.ID, &result.KnowledgeBaseID, &result.Title, &result.IsPinned, &result.ChatModel, &result.CreatedAt, &result.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan searched conversation: %w", err)
+		}
+		results = append(results, result)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate searched conversations: %w", err)
 	}
 	return results, nil
 }

@@ -243,6 +243,8 @@ const selectedChatModel = ref("");
 const thinkingMode = ref<ThinkingMode>("standard");
 const chatAttachments = ref<ChatAttachmentDraft[]>([]);
 const conversationsLoading = ref(false);
+const conversationSearch = ref("");
+let conversationSearchTimer: number | undefined;
 const conversationCreating = ref(false);
 const openConversationMenuId = ref<number | null>(null);
 const copiedConversationID = ref<number | null>(null);
@@ -815,7 +817,7 @@ async function loadConversation() {
   }
   conversationsLoading.value = true;
   try {
-    conversations.value = await requestJSON<Conversation[]>(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations`);
+    conversations.value = await fetchConversationList();
     const latest = conversations.value[0];
     await selectConversation(latest?.id ?? null);
   } catch (error) {
@@ -829,7 +831,7 @@ async function loadConversation() {
 async function refreshConversationList() {
   if (!selectedKnowledgeBaseId.value) return;
   try {
-    conversations.value = await requestJSON<Conversation[]>(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations`);
+    conversations.value = await fetchConversationList();
   } catch {
     // 保持现有列表，问答结果不受影响。
   }
@@ -847,6 +849,21 @@ async function selectConversation(id: number | null) {
   messageCursor.value = { conversationId: id, beforeId: null, hasMore: false };
   if (!id || !selectedKnowledgeBaseId.value) return;
   await loadMessagePage(id, null);
+}
+
+async function fetchConversationList(): Promise<Conversation[]> {
+  if (!selectedKnowledgeBaseId.value) return [];
+  const query = conversationSearch.value.trim();
+  const suffix = query ? `?q=${encodeURIComponent(query)}` : "";
+  return requestJSON<Conversation[]>(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations${suffix}`);
+}
+
+function scheduleConversationSearch() {
+  if (conversationSearchTimer !== undefined) window.clearTimeout(conversationSearchTimer);
+  conversationSearchTimer = window.setTimeout(() => {
+    conversationSearchTimer = undefined;
+    void refreshConversationList();
+  }, 250);
 }
 
 async function persistConversationChatModel(id: number, model: string): Promise<Conversation> {
@@ -1082,6 +1099,8 @@ async function ensureConversation(title: string): Promise<number> {
 
 function selectKnowledgeBase(id: number) {
   if (streaming.value) return;
+	conversationSearch.value = "";
+	if (conversationSearchTimer !== undefined) window.clearTimeout(conversationSearchTimer);
 	selectedKnowledgeBaseId.value = id;
 	selectedDocumentIDs.value = [];
   closeSource();
@@ -2104,6 +2123,7 @@ onUnmounted(() => {
   window.clearInterval(documentPollTimer);
   clearA2APolling();
   window.clearTimeout(copyFeedbackTimer);
+  if (conversationSearchTimer !== undefined) window.clearTimeout(conversationSearchTimer);
   window.removeEventListener("keydown", closeSourceOnEscape);
 });
 </script>
@@ -2282,6 +2302,10 @@ onUnmounted(() => {
                 {{ conversationCreating ? "创建中…" : "+ 新对话" }}
               </button>
             </div>
+            <div class="conversation-search">
+              <input v-model="conversationSearch" type="search" placeholder="搜索会话标题或消息" aria-label="搜索会话标题或消息" @input="scheduleConversationSearch" />
+              <button v-if="conversationSearch" type="button" aria-label="清除会话搜索" @click="conversationSearch = ''; scheduleConversationSearch()">清除</button>
+            </div>
             <div v-if="conversations.length" class="conversation-list" aria-label="会话列表">
                 <template v-for="group in conversationGroups" :key="group.label">
                   <div class="conversation-group-label">{{ group.label }}</div>
@@ -2307,6 +2331,7 @@ onUnmounted(() => {
                   </div>
                 </template>
             </div>
+            <p v-else-if="conversationSearch.trim()" class="conversation-search-empty">没有找到匹配的会话。</p>
           </template>
           <div class="messages" aria-live="polite" @click="onMessagesClick" @scroll.passive="onMessagesScroll">
             <div v-if="loadingOlderMessages" class="messages-loading-older">正在加载更早的消息…</div>

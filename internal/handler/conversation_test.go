@@ -17,6 +17,8 @@ import (
 type conversationStoreStub struct {
 	records      []conversation.Conversation
 	messages     []conversation.Message
+	searchQuery  string
+	searchLimit  int
 	idempotency  map[string]conversation.IdempotentResponse
 	exchangeMeta conversation.MessageMetadata
 }
@@ -35,6 +37,11 @@ func (s *conversationStoreStub) Get(_ context.Context, id int64) (conversation.C
 	return conversation.Conversation{}, conversation.ErrNotFound
 }
 func (s *conversationStoreStub) List(context.Context, int64) ([]conversation.Conversation, error) {
+	return s.records, nil
+}
+func (s *conversationStoreStub) Search(_ context.Context, _ int64, query string, limit int) ([]conversation.Conversation, error) {
+	s.searchQuery = query
+	s.searchLimit = limit
 	return s.records, nil
 }
 func (s *conversationStoreStub) ListMessages(_ context.Context, id int64) ([]conversation.Message, error) {
@@ -163,6 +170,29 @@ func TestConversationHandlerCreatesAndListsConversation(t *testing.T) {
 	endpoint.ServeHTTP(list, request)
 	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"knowledgeBaseId":7`) {
 		t.Fatalf("list response: status=%d body=%s", list.Code, list.Body.String())
+	}
+}
+
+func TestConversationHandlerSearchesConversations(t *testing.T) {
+	store := &conversationStoreStub{records: []conversation.Conversation{{ID: 1, KnowledgeBaseID: 7, Title: "年假规则"}}}
+	endpoint := handler.NewConversations(conversation.NewService(store))
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/7/conversations?q=%E5%B9%B4%E5%81%87&limit=12", nil)
+	request.SetPathValue("id", "7")
+	endpoint.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || store.searchQuery != "年假" || store.searchLimit != 12 {
+		t.Fatalf("search: status=%d query=%q limit=%d", response.Code, store.searchQuery, store.searchLimit)
+	}
+}
+
+func TestConversationHandlerRejectsInvalidSearchLimit(t *testing.T) {
+	endpoint := handler.NewConversations(conversation.NewService(&conversationStoreStub{}))
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/7/conversations?q=test&limit=101", nil)
+	request.SetPathValue("id", "7")
+	endpoint.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
 	}
 }
 

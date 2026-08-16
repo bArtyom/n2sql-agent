@@ -16,6 +16,8 @@ import (
 type storeStub struct {
 	createdInput conversation.CreateInput
 	conversation conversation.Conversation
+	searchQuery string
+	searchLimit int
 	messages     []conversation.Message
 	exchangeUser string
 	exchangeBot  string
@@ -53,6 +55,12 @@ func (s *storeStub) Get(context.Context, int64) (conversation.Conversation, erro
 }
 
 func (s *storeStub) List(context.Context, int64) ([]conversation.Conversation, error) {
+	return []conversation.Conversation{s.conversation}, nil
+}
+
+func (s *storeStub) Search(_ context.Context, _ int64, query string, limit int) ([]conversation.Conversation, error) {
+	s.searchQuery = query
+	s.searchLimit = limit
 	return []conversation.Conversation{s.conversation}, nil
 }
 
@@ -143,6 +151,28 @@ func TestServiceCreatesConversationWithTrimmedTitle(t *testing.T) {
 	}
 	if store.createdInput.KnowledgeBaseID != 7 || store.createdInput.Title != "年假" || created.ID != 9 {
 		t.Fatalf("created = %#v, input = %#v", created, store.createdInput)
+	}
+}
+
+func TestServiceSearchTrimsQueryAndUsesDefaultLimit(t *testing.T) {
+	store := &storeStub{conversation: conversation.Conversation{ID: 9, KnowledgeBaseID: 7}}
+	service := conversation.NewService(store)
+	results, err := service.Search(context.Background(), 7, "  年假  ", 0)
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if store.searchQuery != "年假" || store.searchLimit != 50 || len(results) != 1 {
+		t.Fatalf("search = query %q limit %d results %#v", store.searchQuery, store.searchLimit, results)
+	}
+}
+
+func TestServiceSearchRejectsBlankOrOversizedQuery(t *testing.T) {
+	service := conversation.NewService(&storeStub{})
+	if _, err := service.Search(context.Background(), 7, "   ", 10); !errors.Is(err, conversation.ErrInvalidSearchQuery) {
+		t.Fatalf("blank query error = %v", err)
+	}
+	if _, err := service.Search(context.Background(), 7, strings.Repeat("a", 201), 10); !errors.Is(err, conversation.ErrInvalidSearchQuery) {
+		t.Fatalf("oversized query error = %v", err)
 	}
 }
 
