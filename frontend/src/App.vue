@@ -2050,6 +2050,10 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
       case "approval_resolved":
         if (pendingApproval.value?.runID === answer.runID) pendingApproval.value = null;
         break;
+      case "approval_expired":
+        if (pendingApproval.value?.runID === answer.runID) pendingApproval.value = null;
+        answer.activity = "审批已超时，本轮运行已结束。";
+        break;
       case "reasoning_delta":
         if (!researchMode) {
           const reasoning = dataString("content");

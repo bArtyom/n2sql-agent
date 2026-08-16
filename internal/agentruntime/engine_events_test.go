@@ -193,6 +193,36 @@ func TestEngineRunWithEventsWaitsForApprovalBeforeToolCall(t *testing.T) {
 	}
 }
 
+func TestEngineRunWithEventsEmitsApprovalExpired(t *testing.T) {
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(&toolStub{}); err != nil {
+		t.Fatal(err)
+	}
+	chat := chatStub{call: func(context.Context, []modelclient.ChatMessage, []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+			ID: "call-expired", Type: "function",
+			Function: modelclient.ToolCallFunction{Name: "knowledge_search", Arguments: `{}`},
+		}}}, nil
+	}}
+	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 1, agentruntime.EngineOptions{
+		ApprovalGate: func(context.Context, string, json.RawMessage) (bool, error) {
+			return false, context.DeadlineExceeded
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []agent.Event
+	_, err = engine.RunWithEvents(context.Background(), "run-expired", []modelclient.ChatMessage{{Role: "user", Content: "问题"}}, func(event agent.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RunWithEvents() error = %v, want deadline exceeded", err)
+	}
+	assertEventTypes(t, events, agent.EventRunStarted, agent.EventToolCalled, agent.EventApprovalRequired, agent.EventApprovalExpired)
+}
+
 func TestEngineRunWithEventsEmitsFailureAndCancellation(t *testing.T) {
 	chat := chatStub{call: func(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 		return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{

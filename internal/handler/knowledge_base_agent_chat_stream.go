@@ -18,6 +18,8 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/requestid"
 )
 
+const agentApprovalTimeout = 30 * time.Second
+
 func NewKnowledgeBaseAgentChatStream(answerer agentservice.EventAnswerer) http.Handler {
 	return NewKnowledgeBaseAgentChatStreamWithLimits(answerer, agent.DefaultMaxHistoryBytes)
 }
@@ -153,7 +155,9 @@ func NewKnowledgeBaseAgentChatStreamWithHub(answerer agentservice.EventAnswerer,
 		var response agentservice.Response
 		var conversationSaveErr error
 		executionContext = agentruntime.WithApprovalGate(executionContext, func(ctx context.Context, toolName string, arguments json.RawMessage) (bool, error) {
-			return hub.WaitApproval(ctx, runID, knowledgeBaseID, toolName, arguments)
+			approvalContext, cancelApproval := context.WithTimeout(ctx, agentApprovalTimeout)
+			defer cancelApproval()
+			return hub.WaitApproval(approvalContext, runID, knowledgeBaseID, toolName, arguments)
 		})
 		err = withConversationSummaryLock(executionContext, conversations, knowledgeBaseID, request.ConversationID, func() error {
 			if idempotencyKey != "" {
@@ -319,6 +323,7 @@ func writeAgentSSEEvent(w http.ResponseWriter, flusher http.Flusher, eventType s
 		string(agent.EventMessageDelta),
 		string(agent.EventApprovalRequired),
 		string(agent.EventApprovalResolved),
+		string(agent.EventApprovalExpired),
 		string(agent.EventRunFinished),
 		string(agent.EventRunFailed),
 		string(agent.EventRunCanceled):

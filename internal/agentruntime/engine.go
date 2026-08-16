@@ -246,6 +246,9 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				}
 				approved, approvalErr := approvalGate(ctx, toolCall.Function.Name, arguments)
 				if approvalErr != nil {
+					if errors.Is(approvalErr, context.DeadlineExceeded) {
+						_ = emitter.emit(agent.EventApprovalExpired, len(run.Steps())+1, map[string]any{"tool_name": toolCall.Function.Name})
+					}
 					return result, approvalErr
 				}
 				if !approved {
