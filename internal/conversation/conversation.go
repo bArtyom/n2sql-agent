@@ -62,6 +62,15 @@ type Message struct {
 	CreatedAt      time.Time        `json:"createdAt"`
 }
 
+type MessageSearchResult struct {
+	Conversation  Conversation `json:"conversation"`
+	MessageID     int64        `json:"messageId"`
+	Role          string       `json:"role"`
+	Summary       string       `json:"summary"`
+	MatchPosition int          `json:"matchPosition"`
+	CreatedAt     time.Time    `json:"createdAt"`
+}
+
 // MessageMetadata contains bounded execution information and source snapshots
 // that help the UI restore how an assistant answer was produced. It is
 // optional so old messages and user messages remain source-compatible.
@@ -156,6 +165,7 @@ type Store interface {
 	Get(context.Context, int64) (Conversation, error)
 	List(context.Context, int64) ([]Conversation, error)
 	Search(context.Context, int64, string, int) ([]Conversation, error)
+	SearchMessages(context.Context, int64, string, int) ([]MessageSearchResult, error)
 	ListMessages(context.Context, int64) ([]Message, error)
 	ListMessagesPage(context.Context, int64, int64, int) ([]Message, bool, error)
 	GetSummary(context.Context, int64) (Summary, error)
@@ -246,9 +256,8 @@ func (s *Service) List(ctx context.Context, knowledgeBaseID int64) ([]Conversati
 	return s.store.List(ctx, knowledgeBaseID)
 }
 
-// Search returns conversations in one knowledge base whose title or message
-// content contains query. Search stays scoped to the current administrator in
-// the store, just like List, and intentionally uses a bounded result set.
+// Search returns conversations in one knowledge base whose title contains query.
+// Message content has a separate indexed search endpoint.
 func (s *Service) Search(ctx context.Context, knowledgeBaseID int64, query string, limit int) ([]Conversation, error) {
 	if knowledgeBaseID <= 0 {
 		return nil, ErrInvalidKnowledgeBase
@@ -264,6 +273,23 @@ func (s *Service) Search(ctx context.Context, knowledgeBaseID int64, query strin
 		return nil, ErrInvalidSearchLimit
 	}
 	return s.store.Search(ctx, knowledgeBaseID, query, limit)
+}
+
+func (s *Service) SearchMessages(ctx context.Context, knowledgeBaseID int64, query string, limit int) ([]MessageSearchResult, error) {
+	if knowledgeBaseID <= 0 {
+		return nil, ErrInvalidKnowledgeBase
+	}
+	query = strings.TrimSpace(query)
+	if query == "" || len(query) > maxSearchQueryBytes {
+		return nil, ErrInvalidSearchQuery
+	}
+	if limit <= 0 {
+		limit = defaultConversationLimit
+	}
+	if limit > maxConversationLimit {
+		return nil, ErrInvalidSearchLimit
+	}
+	return s.store.SearchMessages(ctx, knowledgeBaseID, query, limit)
 }
 
 // Get returns a conversation owned by the current administrator. Callers
@@ -675,15 +701,7 @@ func (s *PostgresStore) Search(ctx context.Context, knowledgeBaseID int64, query
 		FROM conversations c
 		WHERE c.knowledge_base_id = $1
 		  AND c.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
-		  AND (
-			strpos(lower(c.title), lower($2)) > 0
-			OR EXISTS (
-				SELECT 1
-				FROM conversation_messages m
-				WHERE m.conversation_id = c.id
-				  AND strpos(lower(m.content), lower($2)) > 0
-			)
-		  )
+		  AND lower(c.title) LIKE '%' || lower($2) || '%'
 		ORDER BY c.is_pinned DESC, c.updated_at DESC, c.id DESC
 		LIMIT $3`, knowledgeBaseID, query, limit)
 	if err != nil {
@@ -700,6 +718,41 @@ func (s *PostgresStore) Search(ctx context.Context, knowledgeBaseID int64, query
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate searched conversations: %w", err)
+	}
+	return results, nil
+}
+
+func (s *PostgresStore) SearchMessages(ctx context.Context, knowledgeBaseID int64, query string, limit int) ([]MessageSearchResult, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT c.id, c.knowledge_base_id, c.title, c.is_pinned, c.chat_model, c.created_at, c.updated_at,
+		       m.id, m.role, LEFT(m.content, 240),
+		       strpos(lower(m.content), lower($2)), m.created_at
+		FROM conversation_messages m
+		JOIN conversations c ON c.id = m.conversation_id
+		WHERE c.knowledge_base_id = $1
+		  AND c.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
+		  AND m.content_search @@ plainto_tsquery('simple', $2)
+		ORDER BY ts_rank_cd(m.content_search, plainto_tsquery('simple', $2)) DESC, m.created_at DESC, m.id DESC
+		LIMIT $3`, knowledgeBaseID, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("search conversation messages: %w", err)
+	}
+	defer rows.Close()
+	results := make([]MessageSearchResult, 0)
+	for rows.Next() {
+		var result MessageSearchResult
+		if err := rows.Scan(
+			&result.Conversation.ID, &result.Conversation.KnowledgeBaseID, &result.Conversation.Title,
+			&result.Conversation.IsPinned, &result.Conversation.ChatModel, &result.Conversation.CreatedAt,
+			&result.Conversation.UpdatedAt, &result.MessageID, &result.Role, &result.Summary,
+			&result.MatchPosition, &result.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan searched conversation message: %w", err)
+		}
+		results = append(results, result)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate searched conversation messages: %w", err)
 	}
 	return results, nil
 }

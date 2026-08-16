@@ -64,6 +64,12 @@ func (s *storeStub) Search(_ context.Context, _ int64, query string, limit int) 
 	return []conversation.Conversation{s.conversation}, nil
 }
 
+func (s *storeStub) SearchMessages(_ context.Context, _ int64, query string, limit int) ([]conversation.MessageSearchResult, error) {
+	s.searchQuery = query
+	s.searchLimit = limit
+	return []conversation.MessageSearchResult{{MessageID: 3, Summary: "匹配内容"}}, nil
+}
+
 func (s *storeStub) ListMessages(context.Context, int64) ([]conversation.Message, error) {
 	return s.messages, nil
 }

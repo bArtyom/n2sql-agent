@@ -129,6 +129,7 @@ type A2ATask = {
   error?: string;
 };
 type Conversation = { id: number; knowledgeBaseId: number; title: string; isPinned: boolean; chatModel?: string; createdAt: string; updatedAt: string };
+type MessageSearchResult = { conversation: Conversation; messageId: number; role: string; summary: string; matchPosition: number; createdAt: string };
 type ConversationMessage = {
   id: number;
   conversationId: number;
@@ -244,6 +245,8 @@ const thinkingMode = ref<ThinkingMode>("standard");
 const chatAttachments = ref<ChatAttachmentDraft[]>([]);
 const conversationsLoading = ref(false);
 const conversationSearch = ref("");
+const messageSearchResults = ref<MessageSearchResult[]>([]);
+const messageSearchLoading = ref(false);
 let conversationSearchTimer: number | undefined;
 const conversationCreating = ref(false);
 const openConversationMenuId = ref<number | null>(null);
@@ -832,6 +835,7 @@ async function refreshConversationList() {
   if (!selectedKnowledgeBaseId.value) return;
   try {
     conversations.value = await fetchConversationList();
+    await fetchMessageSearchResults();
   } catch {
     // 保持现有列表，问答结果不受影响。
   }
@@ -864,6 +868,24 @@ function scheduleConversationSearch() {
     conversationSearchTimer = undefined;
     void refreshConversationList();
   }, 250);
+}
+
+async function fetchMessageSearchResults() {
+  const query = conversationSearch.value.trim();
+  if (!selectedKnowledgeBaseId.value || !query) {
+    messageSearchResults.value = [];
+    return;
+  }
+  messageSearchLoading.value = true;
+  try {
+    messageSearchResults.value = await requestJSON<MessageSearchResult[]>(
+      `/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations/messages/search?q=${encodeURIComponent(query)}`,
+    );
+  } catch {
+    messageSearchResults.value = [];
+  } finally {
+    messageSearchLoading.value = false;
+  }
 }
 
 async function persistConversationChatModel(id: number, model: string): Promise<Conversation> {
@@ -1100,6 +1122,7 @@ async function ensureConversation(title: string): Promise<number> {
 function selectKnowledgeBase(id: number) {
   if (streaming.value) return;
 	conversationSearch.value = "";
+	messageSearchResults.value = [];
 	if (conversationSearchTimer !== undefined) window.clearTimeout(conversationSearchTimer);
 	selectedKnowledgeBaseId.value = id;
 	selectedDocumentIDs.value = [];
@@ -2332,6 +2355,13 @@ onUnmounted(() => {
                 </template>
             </div>
             <p v-else-if="conversationSearch.trim()" class="conversation-search-empty">没有找到匹配的会话。</p>
+            <div v-if="conversationSearch.trim() && messageSearchResults.length" class="message-search-results" aria-label="历史消息搜索结果">
+              <div class="message-search-heading">消息命中{{ messageSearchLoading ? "中…" : "" }}</div>
+              <button v-for="result in messageSearchResults" :key="result.messageId" type="button" class="message-search-result" @click="selectConversation(result.conversation.id)">
+                <strong>{{ result.conversation.title }}</strong>
+                <span>{{ result.summary }}</span>
+              </button>
+            </div>
           </template>
           <div class="messages" aria-live="polite" @click="onMessagesClick" @scroll.passive="onMessagesScroll">
             <div v-if="loadingOlderMessages" class="messages-loading-older">正在加载更早的消息…</div>

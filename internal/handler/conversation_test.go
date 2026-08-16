@@ -44,6 +44,11 @@ func (s *conversationStoreStub) Search(_ context.Context, _ int64, query string,
 	s.searchLimit = limit
 	return s.records, nil
 }
+func (s *conversationStoreStub) SearchMessages(_ context.Context, _ int64, query string, limit int) ([]conversation.MessageSearchResult, error) {
+	s.searchQuery = query
+	s.searchLimit = limit
+	return []conversation.MessageSearchResult{{MessageID: 3, Summary: "匹配内容"}}, nil
+}
 func (s *conversationStoreStub) ListMessages(_ context.Context, id int64) ([]conversation.Message, error) {
 	result := make([]conversation.Message, 0)
 	for _, message := range s.messages {
@@ -193,6 +198,18 @@ func TestConversationHandlerRejectsInvalidSearchLimit(t *testing.T) {
 	endpoint.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+	}
+}
+
+func TestConversationMessageSearchReturnsMatches(t *testing.T) {
+	store := &conversationStoreStub{}
+	endpoint := handler.NewConversationMessageSearch(conversation.NewService(store))
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/7/conversations/messages/search?q=%E5%B9%B4%E5%81%87&limit=8", nil)
+	request.SetPathValue("id", "7")
+	endpoint.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || store.searchQuery != "年假" || store.searchLimit != 8 || !strings.Contains(response.Body.String(), `"messageId":3`) {
+		t.Fatalf("message search: status=%d query=%q limit=%d body=%s", response.Code, store.searchQuery, store.searchLimit, response.Body.String())
 	}
 }
 
