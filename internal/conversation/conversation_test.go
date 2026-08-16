@@ -16,8 +16,8 @@ import (
 type storeStub struct {
 	createdInput conversation.CreateInput
 	conversation conversation.Conversation
-	searchQuery string
-	searchLimit int
+	searchQuery  string
+	searchLimit  int
 	messages     []conversation.Message
 	exchangeUser string
 	exchangeBot  string

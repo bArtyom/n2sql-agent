@@ -24,7 +24,7 @@ const (
 	maxChatModelBytes         = 200
 	maxSearchQueryBytes       = 200
 	defaultConversationLimit  = 50
-	maxConversationLimit       = 100
+	maxConversationLimit      = 100
 	conversationLockNamespace = 0x6e327361
 	maxAutoTitleRunes         = 30
 )
