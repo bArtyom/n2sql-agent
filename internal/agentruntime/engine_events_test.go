@@ -2,9 +2,11 @@ package agentruntime_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
@@ -142,6 +144,52 @@ func TestEngineRunWithEventsEmitsToolLifecycle(t *testing.T) {
 	}
 	if truncated, ok := toolFinished["truncated"].(bool); !ok || !truncated {
 		t.Fatalf("tool_finished data = %#v, want truncated=true", toolFinished)
+	}
+}
+
+func TestEngineRunWithEventsWaitsForApprovalBeforeToolCall(t *testing.T) {
+	tool := &toolStub{}
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(tool); err != nil {
+		t.Fatal(err)
+	}
+	chat := chatStub{call: func(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+			ID:       "call-approval",
+			Type:     "function",
+			Function: modelclient.ToolCallFunction{Name: "knowledge_search", Arguments: `{"query":"审批"}`},
+		}}}, nil
+	}}
+	approvalRequested := make(chan struct{})
+	allow := make(chan bool)
+	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 1, agentruntime.EngineOptions{
+		ApprovalGate: func(context.Context, string, json.RawMessage) (bool, error) {
+			close(approvalRequested)
+			return <-allow, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, runErr := engine.RunWithEvents(context.Background(), "run-approval", []modelclient.ChatMessage{{Role: "user", Content: "问题"}}, func(agent.Event) error { return nil })
+		done <- runErr
+	}()
+	select {
+	case <-approvalRequested:
+	case <-time.After(time.Second):
+		t.Fatal("approval gate was not called")
+	}
+	if tool.args != nil {
+		t.Fatal("tool executed before approval")
+	}
+	allow <- true
+	if err := <-done; err == nil {
+		t.Fatal("RunWithEvents() unexpectedly succeeded with maxSteps=1")
+	}
+	if string(tool.args) != `{"query":"审批"}` {
+		t.Fatalf("tool args = %s, want approval args", tool.args)
 	}
 }
 

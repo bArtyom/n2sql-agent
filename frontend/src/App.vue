@@ -176,6 +176,7 @@ class APIError extends Error {
 // 未完成的 Agent 运行记录：刷新页面后据此尝试从 Hub 重放剩余事件。
 // 只在标准 Agent 模式使用；run 结束或恢复失败后清除。
 type PendingAgentRun = { knowledgeBaseId: number; runID: string; conversationId?: number | null };
+type PendingApproval = { knowledgeBaseId: number; runID: string; toolName: string; arguments: string };
 const PENDING_RUN_KEY = "n2sql-pending-agent-run";
 
 function savePendingRun(run: PendingAgentRun) {
@@ -258,6 +259,8 @@ const copiedConversationID = ref<number | null>(null);
 const messageCursor = ref<{ conversationId: number | null; beforeId: number | null; hasMore: boolean }>({ conversationId: null, beforeId: null, hasMore: false });
 const loadingOlderMessages = ref(false);
 const chatMode = ref<ChatMode>("agent");
+const pendingApproval = ref<PendingApproval | null>(null);
+const approvalBusy = ref(false);
 const topK = ref(5);
 const similarityThreshold = ref(0.65);
 const queryRewrite = ref(false);
@@ -1893,6 +1896,28 @@ function toggleAgentTrace(message: ChatMessage, trace: AgentEvent, index: number
   message.expandedAgentEvents = expanded;
 }
 
+async function resolveApproval(approved: boolean) {
+  const pending = pendingApproval.value;
+  if (!pending || approvalBusy.value) return;
+  approvalBusy.value = true;
+  try {
+    const response = await fetch(`/api/knowledge-bases/${pending.knowledgeBaseId}/agent-runs/${encodeURIComponent(pending.runID)}/approval`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved }),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      throw new Error(payload?.error || "审批请求失败");
+    }
+    pendingApproval.value = null;
+  } catch (error) {
+    showError(error);
+  } finally {
+    approvalBusy.value = false;
+  }
+}
+
 function reasoningStatus(message: ChatMessage) {
   if (message.status === "streaming") return "思考中";
   if (message.status === "stopped") return "已停止";
@@ -2011,6 +2036,20 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         }
         answer.activity = "资料查找完成，正在组织答案…";
         break;
+      case "approval_required":
+        if (!researchMode && answer.runID && selectedKnowledgeBaseId.value) {
+          pendingApproval.value = {
+            knowledgeBaseId: selectedKnowledgeBaseId.value,
+            runID: answer.runID,
+            toolName: dataString("tool_name") || "未知工具",
+            arguments: dataString("arguments"),
+          };
+          answer.activity = "等待你的确认后继续执行…";
+        }
+        break;
+      case "approval_resolved":
+        if (pendingApproval.value?.runID === answer.runID) pendingApproval.value = null;
+        break;
       case "reasoning_delta":
         if (!researchMode) {
           const reasoning = dataString("content");
@@ -2028,6 +2067,7 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         answer.activity = "正在组织答案…";
         break;
       case "run_finished":
+        if (pendingApproval.value?.runID === answer.runID) pendingApproval.value = null;
         clearPendingRun();
         if (!researchMode) {
           for (const agentEvent of answer.agentEvents ?? []) {
@@ -2100,6 +2140,7 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         break;
       case "run_failed":
       case "error":
+        if (pendingApproval.value?.runID === answer.runID) pendingApproval.value = null;
         // 用户主动停止后引擎已发 run_canceled；后续通用 error 事件不应覆盖已停止状态。
         if (answer.status === "stopped") break;
         clearPendingRun();
@@ -2115,6 +2156,7 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         answer.content = dataString("error") || payload.error || "问答失败。";
         break;
       case "run_canceled":
+        if (pendingApproval.value?.runID === answer.runID) pendingApproval.value = null;
         clearPendingRun();
         if (!researchMode) {
           for (const agentEvent of answer.agentEvents ?? []) {
@@ -2568,6 +2610,17 @@ onUnmounted(() => {
               </div>
             </article>
           </div>
+          <section v-if="pendingApproval" class="approval-card" aria-live="polite">
+            <div class="approval-card-copy">
+              <strong>Agent 请求执行工具</strong>
+              <span>{{ pendingApproval.toolName }} · 请确认后继续</span>
+              <code v-if="pendingApproval.arguments">{{ pendingApproval.arguments }}</code>
+            </div>
+            <div class="approval-card-actions">
+              <button type="button" :disabled="approvalBusy" @click="resolveApproval(false)">拒绝</button>
+              <button type="button" class="approval-approve" :disabled="approvalBusy" @click="resolveApproval(true)">{{ approvalBusy ? "处理中…" : "允许执行" }}</button>
+            </div>
+          </section>
           <form class="composer" @submit.prevent="askQuestion">
             <textarea v-model="question" rows="2" :disabled="!selectedKnowledgeBase || streaming" placeholder="问问这套资料…" @keydown.enter.exact.prevent="askQuestion" />
             <div v-if="chatMode === 'agent' && chatAttachments.length" class="attachment-draft-list" aria-label="待发送附件">

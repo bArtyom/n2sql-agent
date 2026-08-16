@@ -124,6 +124,7 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("POST /api/knowledge-bases/{id}/agent-chat/stream", handler.NewKnowledgeBaseAgentChatStreamWithHub(dependencies.AgentStreamingAnswers, dependencies.Conversations, dependencies.AgentMaxHistoryBytes, registry, hub))
 		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}/stream", handler.NewAgentRunStream(hub))
 		mux.Handle("POST /api/knowledge-bases/{id}/agent-runs/{runID}/stop", handler.NewAgentRunStop(hub))
+		mux.Handle("POST /api/knowledge-bases/{id}/agent-runs/{runID}/approval", handler.NewAgentRunApproval(hub))
 	}
 	if dependencies.MultiAgentAnswers != nil {
 		mux.Handle("POST /api/knowledge-bases/{id}/multi-agent-chat", handler.NewMultiAgentChat(dependencies.MultiAgentAnswers))

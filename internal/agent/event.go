@@ -15,6 +15,8 @@ const (
 	EventStepStarted    EventType = "step_started"
 	EventToolCalled     EventType = "tool_called"
 	EventToolFinished   EventType = "tool_finished"
+	EventApprovalRequired EventType = "approval_required"
+	EventApprovalResolved EventType = "approval_resolved"
 	EventReasoningDelta EventType = "reasoning_delta"
 	EventMessageDelta   EventType = "message_delta"
 	EventRunFinished    EventType = "run_finished"
@@ -57,6 +59,8 @@ func validEventType(eventType EventType) bool {
 		EventStepStarted,
 		EventToolCalled,
 		EventToolFinished,
+		EventApprovalRequired,
+		EventApprovalResolved,
 		EventReasoningDelta,
 		EventMessageDelta,
 		EventRunFinished,

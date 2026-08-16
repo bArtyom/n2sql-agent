@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
+	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/agentstream"
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
@@ -150,6 +152,9 @@ func NewKnowledgeBaseAgentChatStreamWithHub(answerer agentservice.EventAnswerer,
 		}
 		var response agentservice.Response
 		var conversationSaveErr error
+		executionContext = agentruntime.WithApprovalGate(executionContext, func(ctx context.Context, toolName string, arguments json.RawMessage) (bool, error) {
+			return hub.WaitApproval(ctx, runID, knowledgeBaseID, toolName, arguments)
+		})
 		err = withConversationSummaryLock(executionContext, conversations, knowledgeBaseID, request.ConversationID, func() error {
 			if idempotencyKey != "" {
 				if preloaded {
@@ -312,6 +317,8 @@ func writeAgentSSEEvent(w http.ResponseWriter, flusher http.Flusher, eventType s
 		string(agent.EventToolFinished),
 		string(agent.EventReasoningDelta),
 		string(agent.EventMessageDelta),
+		string(agent.EventApprovalRequired),
+		string(agent.EventApprovalResolved),
 		string(agent.EventRunFinished),
 		string(agent.EventRunFailed),
 		string(agent.EventRunCanceled):

@@ -3,6 +3,7 @@
 package agentstream
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -13,8 +14,10 @@ import (
 )
 
 var (
-	ErrRunNotFound       = errors.New("agent run not found")
-	ErrRunAlreadyStarted = errors.New("agent run already started")
+	ErrRunNotFound            = errors.New("agent run not found")
+	ErrRunAlreadyStarted      = errors.New("agent run already started")
+	ErrApprovalNotFound       = errors.New("agent approval not found")
+	ErrApprovalAlreadyPending = errors.New("agent approval already pending")
 )
 
 const (
@@ -39,12 +42,19 @@ type run struct {
 	// cancel stops the underlying Agent execution context. It is registered by
 	// the HTTP handler after Start and invoked exactly once by Cancel; a nil
 	// value means the run is finished or no cancel was registered.
-	cancel          func()
-	events          []Event
-	subscribers     map[chan Event]struct{}
-	done            bool
-	expiresAt       time.Time
-	nextEventID     uint64
+	cancel      func()
+	events      []Event
+	subscribers map[chan Event]struct{}
+	done        bool
+	expiresAt   time.Time
+	nextEventID uint64
+	approval    *pendingApproval
+}
+
+type pendingApproval struct {
+	toolName  string
+	arguments string
+	decision  chan bool
 }
 
 // Hub is an in-process, bounded event replay store. It is deliberately not a
@@ -200,11 +210,66 @@ func (h *Hub) Finish(runID string) error {
 		return nil
 	}
 	run.done = true
+	if run.approval != nil {
+		run.approval.decision <- false
+		run.approval = nil
+	}
 	run.expiresAt = time.Now().Add(h.ttl)
 	for subscriber := range run.subscribers {
 		close(subscriber)
 		delete(run.subscribers, subscriber)
 	}
+	return nil
+}
+
+// WaitApproval blocks the Agent run until ResolveApproval is called or the
+// run context is canceled. Only one tool approval may be pending per run.
+func (h *Hub) WaitApproval(ctx context.Context, runID string, knowledgeBaseID int64, toolName string, arguments []byte) (bool, error) {
+	if h == nil || ctx == nil || runID == "" || knowledgeBaseID <= 0 || toolName == "" {
+		return false, ErrApprovalNotFound
+	}
+	approval := &pendingApproval{toolName: toolName, arguments: string(arguments), decision: make(chan bool, 1)}
+	h.mu.Lock()
+	run, ok := h.runs[runID]
+	if !ok || run.knowledgeBaseID != knowledgeBaseID || run.done {
+		h.mu.Unlock()
+		return false, ErrApprovalNotFound
+	}
+	if run.approval != nil {
+		h.mu.Unlock()
+		return false, ErrApprovalAlreadyPending
+	}
+	run.approval = approval
+	h.mu.Unlock()
+
+	select {
+	case approved := <-approval.decision:
+		return approved, nil
+	case <-ctx.Done():
+		h.mu.Lock()
+		if run.approval == approval {
+			run.approval = nil
+		}
+		h.mu.Unlock()
+		return false, ctx.Err()
+	}
+}
+
+// ResolveApproval applies a user's decision to the current pending tool.
+func (h *Hub) ResolveApproval(runID string, knowledgeBaseID int64, approved bool) error {
+	if h == nil || runID == "" || knowledgeBaseID <= 0 {
+		return ErrApprovalNotFound
+	}
+	h.mu.Lock()
+	run, ok := h.runs[runID]
+	if !ok || run.knowledgeBaseID != knowledgeBaseID || run.approval == nil {
+		h.mu.Unlock()
+		return ErrApprovalNotFound
+	}
+	approval := run.approval
+	run.approval = nil
+	h.mu.Unlock()
+	approval.decision <- approved
 	return nil
 }
 

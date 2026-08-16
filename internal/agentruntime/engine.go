@@ -44,6 +44,7 @@ type Engine struct {
 	registry                *agent.ToolRegistry
 	maxSteps                int
 	continueAfterNoRelevant bool
+	approvalGate            func(context.Context, string, json.RawMessage) (bool, error)
 }
 
 // EngineOptions controls bounded loop behavior without changing the default
@@ -52,6 +53,30 @@ type EngineOptions struct {
 	// ContinueAfterNoRelevant lets a caller such as a research Agent ask the
 	// model for another query after a search returns no relevant evidence.
 	ContinueAfterNoRelevant bool
+	// ApprovalGate pauses before executing a tool when it returns true.
+	// The gate must resolve only after the caller has received approval_required.
+	ApprovalGate ApprovalGate
+}
+
+// ApprovalGate is called immediately before a tool is executed. Returning
+// false rejects the tool call; returning an error aborts the run.
+type ApprovalGate func(context.Context, string, json.RawMessage) (bool, error)
+
+type approvalGateContextKey struct{}
+
+// WithApprovalGate attaches a request-scoped approval gate to an Agent run.
+// It is useful for streaming transports whose gate is created after the
+// Engine itself has been constructed.
+func WithApprovalGate(ctx context.Context, gate ApprovalGate) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, approvalGateContextKey{}, gate)
+}
+
+func approvalGateFromContext(ctx context.Context) ApprovalGate {
+	gate, _ := ctx.Value(approvalGateContextKey{}).(ApprovalGate)
+	return gate
 }
 
 // EventSink receives lifecycle events emitted while an Agent run executes.
@@ -85,6 +110,7 @@ func NewEngineWithOptions(chat modelruntime.ToolChatRunner, registry *agent.Tool
 		registry:                registry,
 		maxSteps:                maxSteps,
 		continueAfterNoRelevant: options.ContinueAfterNoRelevant,
+		approvalGate:            options.ApprovalGate,
 	}, nil
 }
 
@@ -112,6 +138,10 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 	run, err := agent.NewAgentRun(runID)
 	if err != nil {
 		return Result{}, err
+	}
+	approvalGate := e.approvalGate
+	if approvalGate == nil {
+		approvalGate = approvalGateFromContext(ctx)
 	}
 	if err := run.Start(); err != nil {
 		return Result{Run: run}, err
@@ -209,7 +239,23 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			if err != nil {
 				return addToolFailureWithEvents(result, toolCall.Function.Name, err, emitter)
 			}
-			toolResult, err := tool.Call(ctx, json.RawMessage(toolCall.Function.Arguments))
+			arguments := json.RawMessage(toolCall.Function.Arguments)
+			if approvalGate != nil {
+				if err := emitter.emit(agent.EventApprovalRequired, len(run.Steps())+1, map[string]any{"tool_name": toolCall.Function.Name, "arguments": boundedEventText(toolCall.Function.Arguments)}); err != nil {
+					return result, err
+				}
+				approved, approvalErr := approvalGate(ctx, toolCall.Function.Name, arguments)
+				if approvalErr != nil {
+					return result, approvalErr
+				}
+				if !approved {
+					return result, fmt.Errorf("tool approval rejected: %s", toolCall.Function.Name)
+				}
+				if err := emitter.emit(agent.EventApprovalResolved, len(run.Steps())+1, map[string]any{"tool_name": toolCall.Function.Name, "approved": true}); err != nil {
+					return result, err
+				}
+			}
+			toolResult, err := tool.Call(ctx, arguments)
 			if err != nil {
 				return addToolFailureWithEvents(result, toolCall.Function.Name, fmt.Errorf("execute tool: %w", err), emitter)
 			}
