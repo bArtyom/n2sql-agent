@@ -220,7 +220,9 @@ func decodeKnowledgeBaseAgentChatRequest(w http.ResponseWriter, r *http.Request,
 		http.Error(w, `{"error":"invalid thinking mode"}`, http.StatusBadRequest)
 		return 0, agentservice.ChatRequest{}, false
 	}
-	request.ThinkingMode = thinkingMode
+	if request.ThinkingMode != "" {
+		request.ThinkingMode = thinkingMode
+	}
 	if err := agentservice.ValidateAttachments(request.Attachments); err != nil {
 		if errors.Is(err, agentservice.ErrAttachmentTooLarge) {
 			http.Error(w, `{"error":"chat attachment is too large"}`, http.StatusRequestEntityTooLarge)
