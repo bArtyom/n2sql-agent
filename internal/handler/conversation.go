@@ -24,32 +24,6 @@ func NewConversations(service *conversation.Service) http.Handler {
 	return NewConversationsWithModelProvider(service, nil)
 }
 
-func NewConversationMessageSearch(service *conversation.Service) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		knowledgeBaseID, err := parsePositiveID(r.PathValue("id"))
-		if err != nil {
-			http.Error(w, `{"error":"invalid knowledge base ID"}`, http.StatusBadRequest)
-			return
-		}
-		if r.Method != http.MethodGet {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		query := strings.TrimSpace(r.URL.Query().Get("q"))
-		limit, err := decodeConversationSearchLimit(r)
-		if err != nil || query == "" {
-			http.Error(w, `{"error":"invalid conversation message search"}`, http.StatusBadRequest)
-			return
-		}
-		results, err := service.SearchMessages(r.Context(), knowledgeBaseID, query, limit)
-		if err != nil {
-			writeConversationError(w, err)
-			return
-		}
-		writeJSON(w, results)
-	})
-}
-
 // NewConversationsWithModelProvider additionally validates chat model changes
 // against the server-side Provider allowlist. The nil form preserves the
 // lightweight constructor used by isolated conversation tests.

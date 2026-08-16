@@ -38,7 +38,7 @@
 - 最新深度思考展示切片：解析 OpenAI-compatible `reasoning_content`，标准 Agent 在 SSE 中发出有界、脱敏的 `reasoning_delta`；前端显示默认折叠的“深度思考”卡片，内容只保留在当前页面，不写入会话历史。协作研究模式不受影响。
 - 最新可控思考与聊天附件切片：标准 Agent 支持 `fast/standard/deep` 思考级别，显式映射为 `reasoning_effort`；输入区支持 PNG/JPEG/WEBP 图片和 TXT/Markdown 文本附件，服务端做数量、大小、base64、UTF-8 和图片签名校验，附件只参与当前一轮模型请求，不写入历史或知识库。
 - 最新会话搜索切片：`GET /api/knowledge-bases/{id}/conversations?q=...&limit=...` 搜索当前知识库内会话标题和消息内容；服务端沿用管理员隔离并限制查询长度/返回条数，前端会话栏提供 250ms 防抖搜索和无结果提示。
-- 最新会话消息搜索优化：会话列表搜索收敛为标题搜索；新增 `GET /api/knowledge-bases/{id}/conversations/messages/search`，通过 `conversation_messages.content_search` 的 `tsvector + GIN` 索引返回会话、消息摘要、消息 ID 和首次命中位置；前端在搜索框下展示历史消息命中结果。
+- 当前会话搜索范围：暂时只保留会话标题搜索，使用标题索引；历史消息跨会话搜索先搁置，避免当前版本引入较慢的消息查询链路。
 
 ## 明确后置或不做
 
