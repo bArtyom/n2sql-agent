@@ -14,14 +14,14 @@ func TestHubWaitApprovalResolvesDecision(t *testing.T) {
 	}
 	result := make(chan bool, 1)
 	go func() {
-		decision, err := hub.WaitApproval(context.Background(), "run-approval", 7, "knowledge_search", []byte(`{"q":"go"}`))
+		approved, err := hub.WaitApproval(context.Background(), "run-approval", 7, "knowledge_search", []byte(`{"q":"go"}`))
 		if err != nil {
 			t.Errorf("WaitApproval() error = %v", err)
 		}
-		result <- decision.Approved
+		result <- approved
 	}()
 	time.Sleep(10 * time.Millisecond)
-	if err := hub.ResolveApproval("run-approval", 7, true, nil); err != nil {
+	if err := hub.ResolveApproval("run-approval", 7, true); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -52,7 +52,7 @@ func TestHubWaitApprovalCancellationClearsPendingState(t *testing.T) {
 		resolved <- err
 	}()
 	time.Sleep(10 * time.Millisecond)
-	if err := hub.ResolveApproval("run-cancel", 7, false, nil); err != nil {
+	if err := hub.ResolveApproval("run-cancel", 7, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-resolved; err != nil {

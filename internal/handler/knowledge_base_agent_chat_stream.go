@@ -154,11 +154,10 @@ func NewKnowledgeBaseAgentChatStreamWithHub(answerer agentservice.EventAnswerer,
 		}
 		var response agentservice.Response
 		var conversationSaveErr error
-		executionContext = agentruntime.WithApprovalGate(executionContext, func(ctx context.Context, toolName string, arguments json.RawMessage) (agentruntime.ApprovalDecision, error) {
+		executionContext = agentruntime.WithApprovalGate(executionContext, func(ctx context.Context, toolName string, arguments json.RawMessage) (bool, error) {
 			approvalContext, cancelApproval := context.WithTimeout(ctx, agentApprovalTimeout)
 			defer cancelApproval()
-			decision, err := hub.WaitApproval(approvalContext, runID, knowledgeBaseID, toolName, arguments)
-			return agentruntime.ApprovalDecision{Approved: decision.Approved, Arguments: decision.Arguments}, err
+			return hub.WaitApproval(approvalContext, runID, knowledgeBaseID, toolName, arguments)
 		})
 		err = withConversationSummaryLock(executionContext, conversations, knowledgeBaseID, request.ConversationID, func() error {
 			if idempotencyKey != "" {

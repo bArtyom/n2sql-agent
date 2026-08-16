@@ -44,7 +44,7 @@ type Engine struct {
 	registry                *agent.ToolRegistry
 	maxSteps                int
 	continueAfterNoRelevant bool
-	approvalGate            ApprovalGate
+	approvalGate            func(context.Context, string, json.RawMessage) (bool, error)
 }
 
 // EngineOptions controls bounded loop behavior without changing the default
@@ -58,17 +58,9 @@ type EngineOptions struct {
 	ApprovalGate ApprovalGate
 }
 
-// ApprovalDecision is the result of a tool approval. Arguments may contain a
-// user-edited JSON payload; an empty value means the original arguments stay
-// unchanged.
-type ApprovalDecision struct {
-	Approved  bool
-	Arguments json.RawMessage
-}
-
-// ApprovalGate is called immediately before a tool is executed. Returning an
-// error aborts the run.
-type ApprovalGate func(context.Context, string, json.RawMessage) (ApprovalDecision, error)
+// ApprovalGate is called immediately before a tool is executed. Returning
+// false rejects the tool call; returning an error aborts the run.
+type ApprovalGate func(context.Context, string, json.RawMessage) (bool, error)
 
 type approvalGateContextKey struct{}
 
@@ -248,31 +240,23 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				return addToolFailureWithEvents(result, toolCall.Function.Name, err, emitter)
 			}
 			arguments := json.RawMessage(toolCall.Function.Arguments)
-			approval := ApprovalDecision{Approved: true}
 			if approvalGate != nil {
 				if err := emitter.emit(agent.EventApprovalRequired, len(run.Steps())+1, map[string]any{"tool_name": toolCall.Function.Name, "arguments": boundedEventText(toolCall.Function.Arguments)}); err != nil {
 					return result, err
 				}
-				var approvalErr error
-				approval, approvalErr = approvalGate(ctx, toolCall.Function.Name, arguments)
+				approved, approvalErr := approvalGate(ctx, toolCall.Function.Name, arguments)
 				if approvalErr != nil {
 					if errors.Is(approvalErr, context.DeadlineExceeded) {
 						_ = emitter.emit(agent.EventApprovalExpired, len(run.Steps())+1, map[string]any{"tool_name": toolCall.Function.Name})
 					}
 					return result, approvalErr
 				}
-				if !approval.Approved {
+				if !approved {
 					return result, fmt.Errorf("tool approval rejected: %s", toolCall.Function.Name)
 				}
 				if err := emitter.emit(agent.EventApprovalResolved, len(run.Steps())+1, map[string]any{"tool_name": toolCall.Function.Name, "approved": true}); err != nil {
 					return result, err
 				}
-			}
-			if len(approval.Arguments) > 0 {
-				if len(approval.Arguments) > 32<<10 || !json.Valid(approval.Arguments) {
-					return addToolFailureWithEvents(result, toolCall.Function.Name, ErrInvalidToolCall, emitter)
-				}
-				arguments = append(json.RawMessage(nil), approval.Arguments...)
 			}
 			toolResult, err := tool.Call(ctx, arguments)
 			if err != nil {
