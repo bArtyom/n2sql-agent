@@ -41,6 +41,14 @@ func NewConversationsWithModelProvider(service *conversation.Service, providers 
 				http.Error(w, `{"error":"invalid conversation ID"}`, http.StatusBadRequest)
 				return
 			}
+			if r.PathValue("feedback") == "feedback" {
+				if r.Method != http.MethodPost {
+					w.WriteHeader(http.StatusMethodNotAllowed)
+					return
+				}
+				saveMessageFeedback(w, r, service, conversationID, knowledgeBaseID)
+				return
+			}
 			if r.PathValue("messages") == "messages" {
 				if r.Method != http.MethodDelete {
 					w.WriteHeader(http.StatusMethodNotAllowed)
@@ -114,6 +122,29 @@ func NewConversationsWithModelProvider(service *conversation.Service, providers 
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
 	})
+}
+
+func saveMessageFeedback(w http.ResponseWriter, r *http.Request, service *conversation.Service, conversationID, knowledgeBaseID int64) {
+	messageID, err := parsePositiveID(r.PathValue("messageId"))
+	if err != nil {
+		http.Error(w, `{"error":"invalid message ID"}`, http.StatusBadRequest)
+		return
+	}
+	var request struct {
+		Rating int `json:"rating"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxConversationRequestBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil || (request.Rating != -1 && request.Rating != 1) {
+		http.Error(w, `{"error":"rating must be -1 or 1"}`, http.StatusBadRequest)
+		return
+	}
+	feedback, err := service.SaveFeedback(r.Context(), conversationID, knowledgeBaseID, messageID, request.Rating)
+	if err != nil {
+		writeConversationError(w, err)
+		return
+	}
+	writeJSON(w, feedback)
 }
 
 func deleteConversations(w http.ResponseWriter, r *http.Request, service *conversation.Service, knowledgeBaseID int64) {
@@ -292,7 +323,7 @@ func decodeMessagesPage(r *http.Request) (beforeID int64, limit int, err error) 
 
 func writeConversationError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, conversation.ErrInvalidConversation), errors.Is(err, conversation.ErrInvalidKnowledgeBase), errors.Is(err, conversation.ErrInvalidTitle), errors.Is(err, conversation.ErrInvalidChatModel), errors.Is(err, conversation.ErrInvalidSearchQuery), errors.Is(err, conversation.ErrInvalidSearchLimit):
+	case errors.Is(err, conversation.ErrInvalidConversation), errors.Is(err, conversation.ErrInvalidKnowledgeBase), errors.Is(err, conversation.ErrInvalidTitle), errors.Is(err, conversation.ErrInvalidChatModel), errors.Is(err, conversation.ErrInvalidSearchQuery), errors.Is(err, conversation.ErrInvalidSearchLimit), errors.Is(err, conversation.ErrInvalidFeedback):
 		http.Error(w, `{"error":"invalid conversation request"}`, http.StatusBadRequest)
 	case errors.Is(err, conversation.ErrNotFound):
 		http.Error(w, `{"error":"conversation not found"}`, http.StatusNotFound)

@@ -41,6 +41,8 @@ var (
 	ErrInvalidChatModel       = errors.New("invalid conversation chat model")
 	ErrInvalidSearchQuery     = errors.New("invalid conversation search query")
 	ErrInvalidSearchLimit     = errors.New("invalid conversation search limit")
+	ErrInvalidFeedback        = errors.New("invalid conversation feedback")
+	ErrFeedbackUnavailable    = errors.New("conversation feedback is unavailable")
 )
 
 type Conversation struct {
@@ -60,6 +62,15 @@ type Message struct {
 	Content        string           `json:"content"`
 	Metadata       *MessageMetadata `json:"metadata,omitempty"`
 	CreatedAt      time.Time        `json:"createdAt"`
+}
+
+type Feedback struct {
+	ID             int64     `json:"id"`
+	ConversationID int64     `json:"conversationId"`
+	MessageID      int64     `json:"messageId"`
+	Rating         int       `json:"rating"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 // MessageMetadata contains bounded execution information and source snapshots
@@ -187,6 +198,10 @@ type messageMetadataStore interface {
 	AppendExchangeWithMetadata(context.Context, int64, string, string, MessageMetadata) error
 }
 
+type feedbackStore interface {
+	SaveFeedback(context.Context, int64, int64, int64, int) (Feedback, error)
+}
+
 type distributedConversationLocker interface {
 	WithConversationLock(context.Context, int64, func() error) error
 }
@@ -202,6 +217,17 @@ type Service struct {
 }
 
 func NewService(store Store) *Service { return &Service{store: store} }
+
+func (s *Service) SaveFeedback(ctx context.Context, conversationID, knowledgeBaseID, messageID int64, rating int) (Feedback, error) {
+	if conversationID <= 0 || knowledgeBaseID <= 0 || messageID <= 0 || (rating != -1 && rating != 1) {
+		return Feedback{}, ErrInvalidFeedback
+	}
+	store, ok := s.store.(feedbackStore)
+	if !ok {
+		return Feedback{}, ErrFeedbackUnavailable
+	}
+	return store.SaveFeedback(ctx, conversationID, knowledgeBaseID, messageID, rating)
+}
 
 // WithSummaryLock serializes all work that reads or writes conversation context.
 // The historical name is kept for callers; PostgreSQL-backed stores also add a
@@ -923,6 +949,31 @@ func (s *PostgresStore) ClearMessages(ctx context.Context, conversationID int64)
 		return fmt.Errorf("commit clear conversation messages: %w", err)
 	}
 	return nil
+}
+
+func (s *PostgresStore) SaveFeedback(ctx context.Context, conversationID, knowledgeBaseID, messageID int64, rating int) (Feedback, error) {
+	var result Feedback
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO conversation_message_feedback (administrator_id, conversation_id, message_id, rating)
+		SELECT c.administrator_id, c.id, m.id, $4
+		FROM conversations c
+		JOIN conversation_messages m ON m.conversation_id = c.id
+		WHERE c.id = $1
+		  AND c.knowledge_base_id = $2
+		  AND m.id = $3
+		  AND m.role = 'assistant'
+		  AND c.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
+		ON CONFLICT (administrator_id, message_id) DO UPDATE
+		SET rating = EXCLUDED.rating, updated_at = CURRENT_TIMESTAMP
+		RETURNING id, conversation_id, message_id, rating, created_at, updated_at`, conversationID, knowledgeBaseID, messageID, rating).
+		Scan(&result.ID, &result.ConversationID, &result.MessageID, &result.Rating, &result.CreatedAt, &result.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Feedback{}, ErrNotFound
+	}
+	if err != nil {
+		return Feedback{}, fmt.Errorf("save conversation feedback: %w", err)
+	}
+	return result, nil
 }
 
 func (s *PostgresStore) ListMessages(ctx context.Context, conversationID int64) ([]Message, error) {

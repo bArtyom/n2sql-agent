@@ -36,6 +36,7 @@ type Source = {
   rerankScore?: number;
 };
 type ChatMessage = {
+  id?: number;
   role: "user" | "assistant";
   content: string;
   sources?: Source[];
@@ -60,6 +61,8 @@ type ChatMessage = {
   followUpLoading?: boolean;
   // 只用于当前页面：已向后端请求停止本次生成。
   stopRequested?: boolean;
+  feedback?: -1 | 1 | null;
+  feedbackSubmitting?: boolean;
   attachments?: ChatAttachmentPreview[];
 };
 type ThinkingMode = "fast" | "standard" | "deep";
@@ -972,6 +975,7 @@ async function updateConversationChatModel() {
 // 把后端消息记录转换为页面上的聊天消息。
 function toChatMessage(message: ConversationMessage): ChatMessage {
   return {
+    id: message.id,
     role: message.role,
     content: message.content,
     status: "done",
@@ -983,6 +987,23 @@ function toChatMessage(message: ConversationMessage): ChatMessage {
     runID: message.metadata?.agent_trace?.run_id,
     mode: message.role === "assistant" ? "agent" : undefined,
   };
+}
+
+async function submitAnswerFeedback(message: ChatMessage, rating: -1 | 1) {
+  if (!selectedKnowledgeBaseId.value || !conversationId.value || !message.id || message.feedbackSubmitting) return;
+  message.feedbackSubmitting = true;
+  try {
+    await requestJSON(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/conversations/${conversationId.value}/messages/${message.id}/feedback`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rating }),
+    });
+    message.feedback = rating;
+  } catch (error) {
+    showError(error);
+  } finally {
+    message.feedbackSubmitting = false;
+  }
 }
 
 // 加载一页历史消息并更新游标。beforeId 为空加载最新一页。
@@ -2595,6 +2616,10 @@ onUnmounted(() => {
               <div v-if="message.role === 'assistant' && message.content && message.status !== 'streaming'" class="message-actions">
                 <button type="button" @click="copyAnswer(message, index)">{{ copiedMessageIndex === index ? "已复制回答" : "复制回答" }}</button>
                 <button v-if="message.retryable && message.mode === 'agent'" type="button" @click="retryAnswer(message, index)">重新生成</button>
+                <span v-if="message.id" class="feedback-actions" aria-label="回答反馈">
+                  <button type="button" :class="{ 'feedback-active': message.feedback === 1 }" :disabled="message.feedbackSubmitting" @click="submitAnswerFeedback(message, 1)">有帮助</button>
+                  <button type="button" :class="{ 'feedback-active': message.feedback === -1 }" :disabled="message.feedbackSubmitting" @click="submitAnswerFeedback(message, -1)">需改进</button>
+                </span>
               </div>
               <div v-if="shouldShowFollowUps(message, index)" class="follow-up-suggestions" aria-label="继续追问">
                 <span>继续追问</span>

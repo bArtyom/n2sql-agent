@@ -41,6 +41,7 @@
 - 当前会话搜索范围：暂时只保留会话标题搜索，使用标题索引；历史消息跨会话搜索先搁置，避免当前版本引入较慢的消息查询链路。
 - 最新会话列表分页：会话列表接口返回 `items/has_more/offset/limit`，默认前端每页加载 30 条；标题搜索和普通列表共用分页查询，前端支持“加载更多”。
 - 最新工具审批切片：审批采用工具策略控制；当前只读 RAG 工具默认不弹确认，未来有写入或外部副作用的工具实现 `RequiresApproval() bool` 后才进入审批；进入审批的标准 Agent 会发送 `approval_required`，前端调用 `POST /api/knowledge-bases/{id}/agent-runs/{runID}/approval` 恢复或拒绝运行；审批状态按知识库 ID 和运行 ID 隔离，取消/结束时释放；默认 30 秒未确认会发送 `approval_expired` 并结束本轮；当前为进程内 Hub，Redis/持久化审批后置。
+- 最新答案反馈切片：新增 `conversation_message_feedback` 表和消息级 `POST /api/knowledge-bases/{id}/conversations/{conversationId}/messages/{messageId}/feedback` 接口，支持 `rating=1/-1` 并按管理员与消息幂等更新；后端校验会话、知识库、消息归属及 assistant 角色；前端历史 assistant 消息显示“有帮助/需改进”。
 
 ## 明确后置或不做
 
