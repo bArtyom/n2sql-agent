@@ -107,6 +107,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	agentAnswerService.SetMemoryStore(memoryStore)
 	knowledgeResearcher, err := multiagent.NewAutonomousKnowledgeSearchResearcher(chatService, searchService, cfg.AgentMaxSteps, cfg.AgentMaxToolResultBytes)
 	if err != nil {
 		log.Fatal(err)

@@ -54,9 +54,18 @@ func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Memory, 
 	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO agent_memories (knowledge_base_id, content, source)
 		VALUES ($1, $2, 'explicit')
+		ON CONFLICT DO NOTHING
 		RETURNING id, knowledge_base_id, content, source, created_at, updated_at`, input.KnowledgeBaseID, content).Scan(
 		&result.ID, &result.KnowledgeBaseID, &result.Content, &result.Source, &result.CreatedAt, &result.UpdatedAt,
 	)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = s.db.QueryRowContext(ctx, `
+			SELECT id, knowledge_base_id, content, source, created_at, updated_at
+			FROM agent_memories
+			WHERE knowledge_base_id = $1 AND lower(content) = lower($2)`, input.KnowledgeBaseID, content).Scan(
+			&result.ID, &result.KnowledgeBaseID, &result.Content, &result.Source, &result.CreatedAt, &result.UpdatedAt,
+		)
+	}
 	if err != nil {
 		return Memory{}, fmt.Errorf("create memory: %w", err)
 	}
