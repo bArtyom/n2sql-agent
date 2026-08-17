@@ -166,6 +166,32 @@ func TestEngineStopsRepeatedIdenticalToolCall(t *testing.T) {
 	}
 }
 
+func TestEngineCompactsOversizedConversationBeforeModelCall(t *testing.T) {
+	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		if len(messages) != 3 || !strings.Contains(messages[1].Content, "较早的 Agent 上下文") {
+			t.Fatalf("messages were not compacted: count=%d, messages=%#v", len(messages), messages)
+		}
+		if messages[len(messages)-1].Content != "当前问题" {
+			t.Fatalf("current question was not preserved: %#v", messages)
+		}
+		return modelclient.ChatResponse{Message: "最终答案"}, nil
+	}}
+	engine, err := agentruntime.NewEngine(chat, agent.NewToolRegistry(), 1)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	history := strings.Repeat("旧历史 ", 20_000)
+	messages := []modelclient.ChatMessage{
+		{Role: "system", Content: "系统提示"},
+		{Role: "user", Content: history},
+		{Role: "assistant", Content: history},
+		{Role: "user", Content: "当前问题"},
+	}
+	if _, err := engine.Run(context.Background(), "run-context-compaction", messages); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
 func TestEngineReturnsModelAnswerWithoutToolCall(t *testing.T) {
 	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, definitions []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 		if len(messages) != 1 || messages[0].Content != "年假怎么计算？" {

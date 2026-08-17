@@ -32,6 +32,7 @@ const untrustedToolResultPrefix = "UNTRUSTED_TOOL_RESULT\n"
 const (
 	maxToolArgumentsEventBytes = 1024
 	maxReasoningEventBytes     = 12 * 1024
+	maxAgentConversationBytes  = 64 * 1024
 )
 
 type untrustedToolResultEnvelope struct {
@@ -166,6 +167,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 		if err := ctx.Err(); err != nil {
 			return finishErrorWithEvents(result, err, emitter)
 		}
+		conversation = compactConversation(conversation, maxAgentConversationBytes)
 
 		if err := run.RecordModelCall(); err != nil {
 			return finishErrorWithEvents(result, err, emitter)
@@ -344,6 +346,57 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 	}
 
 	return finishErrorWithCategory(result, ErrMaxStepsExceeded, agent.FailureStepLimit, emitter)
+}
+
+// compactConversation protects the model context during one Agent run. The
+// current user turn and the newest tool observations are more useful than an
+// unbounded list of old tool payloads, so older messages are omitted once the
+// byte budget is exceeded.
+func compactConversation(messages []modelclient.ChatMessage, maxBytes int) []modelclient.ChatMessage {
+	if maxBytes <= 0 || messageBytes(messages) <= maxBytes || len(messages) <= 2 {
+		return messages
+	}
+	system := messages[0]
+	currentUser := -1
+	for index := len(messages) - 1; index >= 1; index-- {
+		if messages[index].Role == "user" {
+			currentUser = index
+			break
+		}
+	}
+	if currentUser < 0 {
+		currentUser = 1
+	}
+	result := []modelclient.ChatMessage{system}
+	if currentUser > 1 {
+		result = append(result, modelclient.ChatMessage{Role: "system", Content: "较早的 Agent 上下文因长度限制已省略，只保留当前问题和最近工具结果。"})
+	}
+	result = append(result, messages[currentUser])
+	kept := make([]modelclient.ChatMessage, 0, len(messages)-currentUser-1)
+	used := messageBytes(result)
+	for index := len(messages) - 1; index > currentUser; index-- {
+		candidate := messageBytes([]modelclient.ChatMessage{messages[index]})
+		if used+candidate > maxBytes {
+			break
+		}
+		kept = append(kept, messages[index])
+		used += candidate
+	}
+	for index := len(kept) - 1; index >= 0; index-- {
+		result = append(result, kept[index])
+	}
+	return result
+}
+
+func messageBytes(messages []modelclient.ChatMessage) int {
+	total := 0
+	for _, message := range messages {
+		total += len(message.Content)
+		for _, part := range message.ContentParts {
+			total += len(part.Text)
+		}
+	}
+	return total
 }
 
 func boundedEventText(value string) string {
