@@ -56,6 +56,8 @@ npm run dev
 
 修改 `.env`（例如 API Key）后，只需要停止并重新启动 `go run ./cmd/server`；前端和数据库通常不需要重启。修改数据库迁移文件或首次初始化数据库时，先执行 `go run ./cmd/migrate`。停止后端/前端可在对应终端按 `Ctrl+C`，停止 PostgreSQL 使用 `docker compose down`。
 
+模型服务设置面板填写过程中不会因点击外部遮罩而关闭；需要点击右上角关闭按钮或按 `Esc` 退出。
+
 ```sh
 cp .env.example .env
 set -a

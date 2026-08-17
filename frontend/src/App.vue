@@ -659,6 +659,7 @@ function closeSourceOnEscape(event: KeyboardEvent) {
   if (event.key === "Escape") {
     closeSource();
     closeDocumentPreview();
+    closeProviderSettings();
   }
 }
 
@@ -2764,7 +2765,7 @@ onUnmounted(() => {
       </section>
     </main>
 
-    <div v-if="providerSettingsOpen" class="settings-backdrop" @click.self="closeProviderSettings">
+    <div v-if="providerSettingsOpen" class="settings-backdrop">
       <section class="settings-panel" role="dialog" aria-modal="true" aria-labelledby="provider-settings-title">
         <header class="settings-header">
           <div>
