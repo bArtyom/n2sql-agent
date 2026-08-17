@@ -64,6 +64,7 @@ type ChatMessage = {
   feedback?: -1 | 1 | null;
   feedbackSubmitting?: boolean;
   attachments?: ChatAttachmentPreview[];
+  summaryTask?: { knowledgeBaseId: number; documentId: number; taskId?: string; status: string };
 };
 type ThinkingMode = "fast" | "standard" | "deep";
 type ChatAttachmentPreview = {
@@ -308,6 +309,7 @@ const copiedSourceKey = ref<string | null>(null);
 let copyFeedbackTimer: number | undefined;
 let documentPollTimer: number | undefined;
 let a2aPollingTimer: number | undefined;
+const summaryPollingTimers = new Map<number, number>();
 
 const selectedKnowledgeBase = computed(() =>
   knowledgeBases.value.find((item) => item.id === selectedKnowledgeBaseId.value) ?? null,
@@ -1943,6 +1945,57 @@ function finishLastAgentToolEvent(
   }
 }
 
+function stopSummaryPolling(answerIndex: number) {
+  const timer = summaryPollingTimers.get(answerIndex);
+  if (timer !== undefined) window.clearTimeout(timer);
+  summaryPollingTimers.delete(answerIndex);
+}
+
+function startDocumentSummaryPolling(answer: ChatMessage, answerIndex: number) {
+  if (!answer.summaryTask || summaryPollingTimers.has(answerIndex)) return;
+  const task = answer.summaryTask;
+  const startedAt = Date.now();
+  const poll = async () => {
+    summaryPollingTimers.delete(answerIndex);
+    if (!selectedKnowledgeBaseId.value || selectedKnowledgeBaseId.value !== task.knowledgeBaseId) return;
+    try {
+      const status = await requestJSON<{ status: string; error?: string }>(
+        `/api/knowledge-bases/${task.knowledgeBaseId}/documents/${task.documentId}/summary`,
+      );
+      task.status = status.status;
+      if (status.status === "succeeded") {
+        answer.activity = "文档摘要已生成，请再次提问以使用缓存摘要。";
+        const event = [...(answer.agentEvents ?? [])].reverse().find((item) => item.taskID === task.taskId);
+        if (event) event.detail = "后台摘要已生成";
+        return;
+      }
+      if (status.status === "failed") {
+        answer.activity = status.error ? `文档摘要生成失败：${status.error}` : "文档摘要生成失败，请稍后重试。";
+        return;
+      }
+    } catch {
+      // 短暂网络错误不终止任务跟踪，下一轮继续查询。
+    }
+    if (Date.now() - startedAt < 20 * 60 * 1000) {
+      summaryPollingTimers.set(answerIndex, window.setTimeout(() => void poll(), 2500));
+    } else {
+      answer.activity = "文档摘要仍在后台生成，可稍后再次提问查看结果。";
+    }
+  };
+  void poll();
+}
+
+function documentIDFromToolArguments(answer: ChatMessage): number | null {
+  const event = [...(answer.agentEvents ?? [])].reverse().find((item) => item.type === "tool_called" && item.arguments);
+  if (!event?.arguments) return null;
+  try {
+    const parsed = JSON.parse(event.arguments) as { document_id?: unknown };
+    return typeof parsed.document_id === "number" && parsed.document_id > 0 ? parsed.document_id : null;
+  } catch {
+    return null;
+  }
+}
+
 function toolFinishedLabel(toolName: string): string {
   switch (toolName) {
     case "knowledge_search": return "知识库检索完成";
@@ -2127,6 +2180,14 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
             pending: eventData.pending === true,
             taskID: dataString("task_id") || undefined,
           });
+          if (toolName === "document_summary" && eventData.pending === true && selectedKnowledgeBaseId.value) {
+            const documentID = documentIDFromToolArguments(answer);
+            const taskID = dataString("task_id") || undefined;
+            if (documentID) {
+              answer.summaryTask = { knowledgeBaseId: selectedKnowledgeBaseId.value, documentId: documentID, taskId: taskID, status: "processing" };
+              startDocumentSummaryPolling(answer, answerIndex);
+            }
+          }
         }
         if (Object.prototype.hasOwnProperty.call(eventData, "sources")) {
           answer.sources = mergeSources(answer.sources ?? [], parseSources(eventData.sources));
@@ -2339,6 +2400,7 @@ onMounted(() => {
 });
 onUnmounted(() => {
   window.clearInterval(documentPollTimer);
+  for (const answerIndex of summaryPollingTimers.keys()) stopSummaryPolling(answerIndex);
   clearA2APolling();
   window.clearTimeout(copyFeedbackTimer);
   if (conversationSearchTimer !== undefined) window.clearTimeout(conversationSearchTimer);
