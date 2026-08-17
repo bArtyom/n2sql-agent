@@ -10,6 +10,52 @@
 
 准备环境：Go 1.22+、Node.js 20+、Docker Compose。
 
+### Windows PowerShell 启动流程
+
+在项目根目录 `C:\Project\agentProject\n2sql-agent` 执行：
+
+```powershell
+cd C:\Project\agentProject\n2sql-agent
+
+# 首次启动前准备配置文件
+if (!(Test-Path .env)) { Copy-Item .env.example .env }
+
+# 启动 PostgreSQL
+docker compose up -d
+docker compose ps
+```
+
+确认 PostgreSQL 显示 `Up ... (healthy)` 后，加载 `.env` 并启动 Go 后端：
+
+```powershell
+Get-Content .env | ForEach-Object {
+  if ($_ -match '^\s*([^#=]+)=(.*)$') {
+    Set-Item -Path "Env:$($matches[1].Trim())" -Value $matches[2].Trim()
+  }
+}
+
+$env:Path="C:\Program Files\Go\bin;$env:Path"
+
+# 首次初始化数据库，或迁移文件发生变化时执行
+go run ./cmd/migrate
+
+# 启动后端
+go run ./cmd/server
+```
+
+后端启动后保持这个终端运行。另开一个 PowerShell 窗口启动前端：
+
+```powershell
+cd C:\Project\agentProject\n2sql-agent\frontend
+$env:Path="C:\Users\lsp24\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin;$env:Path"
+npm install       # 依赖未安装时执行一次即可
+npm run dev
+```
+
+启动完成后访问 `http://localhost:5173`，后端健康检查地址是 `http://localhost:8080/health`。
+
+修改 `.env`（例如 API Key）后，只需要停止并重新启动 `go run ./cmd/server`；前端和数据库通常不需要重启。修改数据库迁移文件或首次初始化数据库时，先执行 `go run ./cmd/migrate`。停止后端/前端可在对应终端按 `Ctrl+C`，停止 PostgreSQL 使用 `docker compose down`。
+
 ```sh
 cp .env.example .env
 set -a
