@@ -146,6 +146,26 @@ func TestDocumentReadToolReturnsBoundedChunks(t *testing.T) {
 	}
 }
 
+func TestDocumentReadToolClampsModelLimitToRuntimeBound(t *testing.T) {
+	reader := &documentChunkReaderStub{chunks: map[int]documentchunk.SearchResult{
+		0: {DocumentID: 8, OriginalFilename: "guide.md", Position: 0, Content: "第一段"},
+		1: {DocumentID: 8, OriginalFilename: "guide.md", Position: 1, Content: "第二段"},
+	}}
+	tool, err := agent.NewDocumentReadToolForKnowledgeBase(reader, 7, 4096, 1)
+	if err != nil {
+		t.Fatalf("NewDocumentReadToolForKnowledgeBase() error = %v", err)
+	}
+
+	result, err := tool.Call(context.Background(), []byte(`{"document_id":8,"limit":8}`))
+	if err != nil {
+		t.Fatalf("Call() error = %v, want oversized model limit to be clamped", err)
+	}
+	sources, ok := result.Metadata["sources"].([]retrieval.Result)
+	if !ok || len(sources) != 1 || sources[0].Content != "第一段" {
+		t.Fatalf("sources = %#v, want one bounded chunk", result.Metadata["sources"])
+	}
+}
+
 func TestDocumentReadToolRejectsInvalidInputAndReaderFailure(t *testing.T) {
 	tool, err := agent.NewDocumentReadToolForKnowledgeBase(&documentChunkReaderStub{}, 7, 4096, 4)
 	if err != nil {

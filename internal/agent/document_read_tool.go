@@ -113,8 +113,15 @@ func (t *DocumentReadTool) Call(ctx context.Context, raw json.RawMessage) (ToolR
 	if input.Limit == 0 {
 		input.Limit = t.maxChunks
 	}
-	if input.Limit < 1 || input.Limit > t.maxChunks {
+	if input.Limit < 1 {
 		return ToolResult{}, ErrInvalidDocumentReadInput
+	}
+	// The schema advertises the global maximum of eight chunks, while the
+	// runtime may apply a smaller per-request bound (for example top_k=5).
+	// Clamp an oversized model request to that safe bound instead of failing
+	// the entire Agent run.
+	if input.Limit > t.maxChunks {
+		input.Limit = t.maxChunks
 	}
 
 	result, err := readDocumentChunks(ctx, t.reader, t.knowledgeBaseID, input.DocumentID, input.StartPosition, input.Limit, t.maxResultBytes)
