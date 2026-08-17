@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/a2a"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
@@ -49,7 +48,7 @@ func main() {
 	conversationService := conversation.NewService(conversation.NewPostgresStore(db))
 	knowledgeBaseStore := knowledgebase.NewPostgresStore(db)
 	documentStore := document.NewPostgresStore(db)
-	modelClient := modelclient.NewHTTPClient(&http.Client{Timeout: 10 * time.Second}, cfg.ModelProviderAllowedHosts)
+	modelClient := modelclient.NewHTTPClient(&http.Client{Timeout: cfg.ModelProviderTimeout}, cfg.ModelProviderAllowedHosts)
 	embeddingService := modelruntime.NewEmbeddingServiceWithLocalFallback(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv, cfg.LocalEmbeddingBaseURL, cfg.LocalEmbeddingModel, cfg.LocalEmbeddingAPIKey)
 	chatService := modelruntime.NewChatService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
 	chunkStore := documentchunk.NewPostgresStore(db)
@@ -83,7 +82,7 @@ func main() {
 	knowledgeBaseService := knowledgebase.NewServiceWithInvalidator(knowledgeBaseStore, fileStore, searchService)
 	runner := worker.NewRunnerWithMetricsAndInvalidator(worker.NewPostgresStore(db), processor, metricsRegistry, searchService)
 	answerService := rag.NewService(searchService, chatService)
-	documentSummaryService := documentsummary.NewService(chunkStore, documentStore, chatService, 12000)
+	documentSummaryService := documentsummary.NewService(chunkStore, documentStore, chatService, cfg.DocumentSummaryInputChars)
 	var historySummarizer agentservice.HistorySummarizer
 	if cfg.AgentHistorySummaryEnabled {
 		historySummarizer = agentservice.NewModelHistorySummarizerWithTimeout(chatService, cfg.AgentHistorySummaryTimeout)
