@@ -299,6 +299,46 @@ func TestEngineSummarizesOlderToolResultsIntoShortMemory(t *testing.T) {
 	}
 }
 
+func TestEngineSummarizesOlderToolResultsWithinCurrentTurn(t *testing.T) {
+	summarizer := &contextSummarizerStub{message: "A 文档的旧检索结果短记忆。"}
+	var received []modelclient.ChatMessage
+	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		received = append([]modelclient.ChatMessage(nil), messages...)
+		return modelclient.ChatResponse{Message: "最终答案"}, nil
+	}}
+	engine, err := agentruntime.NewEngineWithOptions(chat, agent.NewToolRegistry(), 1, agentruntime.EngineOptions{
+		ContextSummarizer: summarizer,
+	})
+	if err != nil {
+		t.Fatalf("NewEngineWithOptions() error = %v", err)
+	}
+	largeResult := func(label string) string {
+		payload, _ := json.Marshal(map[string]any{
+			"trusted": false,
+			"content": label + strings.Repeat(" 大段工具结果", 20_000),
+		})
+		return "UNTRUSTED_TOOL_RESULT\n" + string(payload)
+	}
+	messages := []modelclient.ChatMessage{
+		{Role: "system", Content: "系统提示"},
+		{Role: "user", Content: "查 A 和 B 文档"},
+		{Role: "tool", ToolCallID: "call-a", Content: largeResult("A 文档")},
+		{Role: "tool", ToolCallID: "call-b", Content: largeResult("B 文档")},
+	}
+	if _, err := engine.Run(context.Background(), "run-current-turn-summary", messages); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !summarizer.called || !strings.Contains(summarizer.input[1].Content, "A 文档") {
+		t.Fatalf("summarizer input = %#v, want older A result", summarizer.input)
+	}
+	if len(received) < 3 || !strings.Contains(received[1].Content, summarizer.message) {
+		t.Fatalf("model context = %#v, want short memory", received)
+	}
+	if !strings.Contains(received[len(received)-1].Content, "B 文档") {
+		t.Fatalf("recent B result was not retained: %#v", received)
+	}
+}
+
 func messageBytesForTest(messages []modelclient.ChatMessage) int {
 	total := 0
 	for _, message := range messages {

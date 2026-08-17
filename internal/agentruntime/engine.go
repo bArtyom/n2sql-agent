@@ -384,12 +384,11 @@ func compactConversationWithSummarizer(ctx context.Context, messages []modelclie
 		currentUser = 1
 	}
 	result := []modelclient.ChatMessage{system}
+	olderMessages := append([]modelclient.ChatMessage(nil), messages[1:currentUser]...)
 	if currentUser > 1 {
-		memory := "较早的 Agent 上下文因长度限制已省略，只保留当前问题和最近工具结果。"
-		if summary := summarizeOlderMessages(ctx, messages[1:currentUser], summarizer); summary != "" {
-			memory = "Agent 短记忆（较早工具结果摘要）：\n" + summary
-		}
-		result = append(result, modelclient.ChatMessage{Role: "system", Content: memory})
+		result = append(result, modelclient.ChatMessage{Role: "system", Content: "较早的 Agent 上下文因长度限制已省略，只保留当前问题和最近工具结果。"})
+	} else {
+		result = append(result, modelclient.ChatMessage{Role: "system", Content: "较早的 Agent 上下文因长度限制已省略，只保留当前问题和最近工具结果。"})
 	}
 	result = append(result, messages[currentUser])
 	kept := make([]modelclient.ChatMessage, 0, len(messages)-currentUser-1)
@@ -397,6 +396,11 @@ func compactConversationWithSummarizer(ctx context.Context, messages []modelclie
 	for index := len(messages) - 1; index > currentUser; index-- {
 		candidate := messageBytes([]modelclient.ChatMessage{messages[index]})
 		if used+candidate > maxBytes {
+			if index == currentUser+1 {
+				olderMessages = append(olderMessages, messages[index])
+			} else {
+				olderMessages = append(olderMessages, messages[currentUser+1:index]...)
+			}
 			if remaining := maxBytes - used; messages[index].Role == "tool" {
 				if fitted, ok := truncateToolMessage(messages[index], remaining); ok {
 					kept = append(kept, fitted)
@@ -410,6 +414,14 @@ func compactConversationWithSummarizer(ctx context.Context, messages []modelclie
 	}
 	for index := len(kept) - 1; index >= 0; index-- {
 		result = append(result, kept[index])
+	}
+	if summary := summarizeOlderMessages(ctx, olderMessages, summarizer); summary != "" {
+		memory := "Agent 短记忆（较早工具结果摘要）：\n" + summary
+		result[1].Content = memory
+		if messageBytes(result) > maxBytes {
+			remaining := maxBytes - messageBytes(result[0:1]) - messageBytes(result[2:])
+			result[1].Content = truncateUTF8(memory, remaining)
+		}
 	}
 	return result
 }
