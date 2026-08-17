@@ -45,10 +45,11 @@ func (e *Extractor) Extract(ctx context.Context, storagePath, contentType string
 	if contentType != "text/plain" && contentType != "text/markdown" && contentType != "application/pdf" {
 		return "", ErrUnsupportedType
 	}
-	if filepath.IsAbs(storagePath) || filepath.Clean(storagePath) != storagePath || filepath.Dir(storagePath) != "documents" {
+	normalizedPath := filepath.FromSlash(storagePath)
+	if filepath.IsAbs(normalizedPath) || filepath.Clean(normalizedPath) != normalizedPath || filepath.Dir(normalizedPath) != "documents" {
 		return "", ErrInvalidStoragePath
 	}
-	file, err := os.Open(filepath.Join(e.root, storagePath))
+	file, err := os.Open(filepath.Join(e.root, normalizedPath))
 	if err != nil {
 		return "", fmt.Errorf("open document: %w", err)
 	}

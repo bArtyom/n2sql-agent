@@ -36,6 +36,9 @@ type Config struct {
 	DatabaseURL                string
 	ModelProviderAPIKeyEnvVar  string
 	ModelProviderAllowedHosts  []string
+	LocalEmbeddingBaseURL      string
+	LocalEmbeddingModel        string
+	LocalEmbeddingAPIKey       string
 	UploadDir                  string
 	WorkerPollInterval         time.Duration
 	PprofAddress               string
@@ -77,6 +80,9 @@ func Load() Config {
 		DatabaseURL:                os.Getenv("DATABASE_URL"),
 		ModelProviderAPIKeyEnvVar:  apiKeyEnvVar,
 		ModelProviderAllowedHosts:  allowedHosts,
+		LocalEmbeddingBaseURL:      strings.TrimSpace(os.Getenv("LOCAL_EMBEDDING_BASE_URL")),
+		LocalEmbeddingModel:        strings.TrimSpace(os.Getenv("LOCAL_EMBEDDING_MODEL")),
+		LocalEmbeddingAPIKey:       strings.TrimSpace(os.Getenv("LOCAL_EMBEDDING_API_KEY")),
 		UploadDir:                  uploadDir(),
 		WorkerPollInterval:         workerPollInterval(),
 		PprofAddress:               strings.TrimSpace(os.Getenv("PPROF_ADDRESS")),

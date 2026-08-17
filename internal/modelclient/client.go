@@ -723,7 +723,7 @@ func apiEndpoint(baseURL, resource string, allowedHosts map[string]struct{}) (st
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return "", fmt.Errorf("invalid model provider base URL")
 	}
-	if parsed.Scheme != "https" {
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
 		return "", fmt.Errorf("model provider base URL must use HTTPS")
 	}
 	if _, allowed := allowedHosts[strings.ToLower(parsed.Hostname())]; !allowed {
@@ -733,4 +733,9 @@ func apiEndpoint(baseURL, resource string, allowedHosts map[string]struct{}) (st
 	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/" + resource
 	parsed.RawQuery = ""
 	return parsed.String(), nil
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }

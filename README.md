@@ -58,6 +58,27 @@ npm run dev
 
 模型服务设置面板填写过程中不会因点击外部遮罩而关闭；需要点击右上角关闭按钮或按 `Esc` 退出。
 
+### 可选本地 Embedding（Ollama）
+
+项目支持用本地 OpenAI-compatible Embedding 服务替代远程 Embedding。聊天模型仍使用模型服务设置页中的 Provider；只有文档切块和查询向量化会走本地服务。以 Ollama 的 `qwen3-embedding:0.6b` 为例：
+
+```powershell
+ollama pull qwen3-embedding:0.6b
+```
+
+在 `.env` 中配置：
+
+```env
+LOCAL_EMBEDDING_BASE_URL=http://127.0.0.1:11434/v1
+LOCAL_EMBEDDING_MODEL=qwen3-embedding:0.6b
+LOCAL_EMBEDDING_API_KEY=ollama
+
+# 如果聊天走 DeepSeek，同时把本地地址加入允许主机名
+MODEL_PROVIDER_ALLOWED_HOSTS=api.deepseek.com,127.0.0.1
+```
+
+留空这三个变量时，项目继续使用模型服务设置页配置的远程 Embedding。切换 Embedding 模型后，需要重新上传文档或重新建立索引；不同 Embedding 模型的向量不能混用。
+
 ```sh
 cp .env.example .env
 set -a

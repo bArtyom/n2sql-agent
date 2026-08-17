@@ -117,3 +117,22 @@ func TestEmbeddingServiceUsesConfiguredProviderAndEnvironmentKey(t *testing.T) {
 		t.Fatalf("model = %q, want %q", embedder.request.Model, store.provider.EmbeddingModel)
 	}
 }
+
+func TestEmbeddingServiceUsesOptionalLocalProvider(t *testing.T) {
+	embedder := &embedderStub{}
+	service := modelruntime.NewEmbeddingServiceWithLocalFallback(
+		providerStoreStub{err: modelprovider.ErrNotFound},
+		embedder,
+		"TEST_MODEL_PROVIDER_API_KEY",
+		func(string) (string, bool) { return "", false },
+		"http://127.0.0.1:11434/v1",
+		"qwen3-embedding:0.6b",
+		"ollama",
+	)
+	if _, err := service.Embed(context.Background(), []string{"本地向量测试"}); err != nil {
+		t.Fatalf("Embed() error = %v", err)
+	}
+	if embedder.baseURL != "http://127.0.0.1:11434/v1" || embedder.apiKey != "ollama" || embedder.request.Model != "qwen3-embedding:0.6b" {
+		t.Fatalf("local embedding request = %#v, baseURL=%q, apiKey=%q", embedder.request, embedder.baseURL, embedder.apiKey)
+	}
+}

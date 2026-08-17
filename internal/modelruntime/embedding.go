@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
@@ -33,6 +34,9 @@ type EmbeddingService struct {
 	embedder     modelclient.Embedder
 	apiKeyEnvVar string
 	lookupAPIKey APIKeyLookup
+	localBaseURL string
+	localModel   string
+	localAPIKey  string
 }
 
 func NewEmbeddingService(providers modelprovider.Store, embedder modelclient.Embedder, apiKeyEnvVar string, lookupAPIKey APIKeyLookup) *EmbeddingService {
@@ -44,7 +48,27 @@ func NewEmbeddingService(providers modelprovider.Store, embedder modelclient.Emb
 	}
 }
 
+// NewEmbeddingServiceWithLocalFallback keeps chat on the configured provider
+// while optionally routing embeddings to a local OpenAI-compatible server.
+func NewEmbeddingServiceWithLocalFallback(providers modelprovider.Store, embedder modelclient.Embedder, apiKeyEnvVar string, lookupAPIKey APIKeyLookup, localBaseURL, localModel, localAPIKey string) *EmbeddingService {
+	service := NewEmbeddingService(providers, embedder, apiKeyEnvVar, lookupAPIKey)
+	service.localBaseURL = strings.TrimRight(strings.TrimSpace(localBaseURL), "/")
+	service.localModel = strings.TrimSpace(localModel)
+	service.localAPIKey = strings.TrimSpace(localAPIKey)
+	if service.localAPIKey == "" {
+		service.localAPIKey = "ollama"
+	}
+	return service
+}
+
 func (s *EmbeddingService) Embed(ctx context.Context, input []string) (modelclient.EmbeddingResponse, error) {
+	if s.localBaseURL != "" && s.localModel != "" {
+		response, err := s.embedder.Embed(ctx, s.localBaseURL, s.localAPIKey, modelclient.EmbeddingRequest{Model: s.localModel, Input: input})
+		if err != nil {
+			return modelclient.EmbeddingResponse{}, &EmbeddingCallError{Err: fmt.Errorf("embed with local model: %w", err)}
+		}
+		return response, nil
+	}
 	provider, err := s.providers.Current(ctx)
 	if err != nil {
 		return modelclient.EmbeddingResponse{}, err
