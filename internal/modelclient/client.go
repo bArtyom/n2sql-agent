@@ -128,11 +128,12 @@ func (m ChatMessage) MarshalJSON() ([]byte, error) {
 }
 
 type ChatRequest struct {
-	Model           string           `json:"model"`
-	Messages        []ChatMessage    `json:"messages"`
-	Stream          bool             `json:"stream"`
-	ReasoningEffort string           `json:"reasoning_effort,omitempty"`
-	Tools           []ToolDefinition `json:"tools,omitempty"`
+	Model               string           `json:"model"`
+	Messages            []ChatMessage    `json:"messages"`
+	Stream              bool             `json:"stream"`
+	ReasoningEffort     string           `json:"reasoning_effort,omitempty"`
+	MaxCompletionTokens int              `json:"max_completion_tokens,omitempty"`
+	Tools               []ToolDefinition `json:"tools,omitempty"`
 }
 
 type ChatResponse struct {
@@ -644,6 +645,9 @@ func (c *HTTPClient) ChatStream(ctx context.Context, baseURL, apiKey string, cha
 func validateChatRequest(chatRequest ChatRequest) error {
 	if chatRequest.Model == "" || len(chatRequest.Messages) == 0 {
 		return fmt.Errorf("chat model and messages are required")
+	}
+	if chatRequest.MaxCompletionTokens < 0 {
+		return fmt.Errorf("max completion tokens must not be negative")
 	}
 	for _, message := range chatRequest.Messages {
 		if strings.TrimSpace(message.Role) == "" {

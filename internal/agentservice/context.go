@@ -29,6 +29,7 @@ type ChatRequest struct {
 	TopK                int                   `json:"top_k,omitempty"`
 	ChatModel           string                `json:"chat_model,omitempty"`
 	ThinkingMode        string                `json:"thinking_mode,omitempty"`
+	MaxCompletionTokens int                   `json:"max_completion_tokens,omitempty"`
 	Attachments         []ChatAttachment      `json:"attachments,omitempty"`
 	SimilarityThreshold float64               `json:"similarity_threshold,omitempty"`
 	KeywordThreshold    float64               `json:"keyword_threshold,omitempty"`

@@ -240,8 +240,9 @@ func TestHTTPClientParsesReasoningContent(t *testing.T) {
 func TestHTTPClientMarshalsReasoningEffortAndMultimodalParts(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
-			ReasoningEffort string `json:"reasoning_effort"`
-			Messages        []struct {
+			ReasoningEffort     string `json:"reasoning_effort"`
+			MaxCompletionTokens int    `json:"max_completion_tokens"`
+			Messages            []struct {
 				Content []struct {
 					Type     string `json:"type"`
 					Text     string `json:"text"`
@@ -256,6 +257,9 @@ func TestHTTPClientMarshalsReasoningEffortAndMultimodalParts(t *testing.T) {
 		}
 		if request.ReasoningEffort != "high" {
 			t.Fatalf("reasoning_effort = %q, want high", request.ReasoningEffort)
+		}
+		if request.MaxCompletionTokens != 321 {
+			t.Fatalf("max_completion_tokens = %d, want 321", request.MaxCompletionTokens)
 		}
 		if len(request.Messages) != 1 || len(request.Messages[0].Content) != 2 {
 			t.Fatalf("messages = %#v, want two content parts", request.Messages)
@@ -273,8 +277,9 @@ func TestHTTPClientMarshalsReasoningEffortAndMultimodalParts(t *testing.T) {
 
 	client := modelclient.NewHTTPClient(server.Client(), []string{serverHost(t, server.URL)})
 	_, err := client.Chat(context.Background(), server.URL+"/v1", "test-secret", modelclient.ChatRequest{
-		Model:           "test-chat-model",
-		ReasoningEffort: "high",
+		Model:               "test-chat-model",
+		ReasoningEffort:     "high",
+		MaxCompletionTokens: 321,
 		Messages: []modelclient.ChatMessage{{
 			Role:    "user",
 			Content: "看图",

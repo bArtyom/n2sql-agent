@@ -186,6 +186,25 @@ func TestChatServiceForwardsReasoningEffortFromContext(t *testing.T) {
 	}
 }
 
+func TestChatServiceForwardsCompletionTokenLimitFromContext(t *testing.T) {
+	store := providerStoreStub{provider: modelprovider.Provider{
+		BaseURL:      "https://api.example.com/v1",
+		APIKeyEnvVar: "TEST_MODEL_PROVIDER_API_KEY",
+		ChatModel:    "chat-default",
+	}}
+	completer := &chatCompleterStub{}
+	service := modelruntime.NewChatService(store, completer, "TEST_MODEL_PROVIDER_API_KEY", func(string) (string, bool) {
+		return "test-secret", true
+	})
+	ctx := modelruntime.WithMaxCompletionTokens(context.Background(), 321)
+	if _, err := service.ChatMessagesWithTools(ctx, []modelclient.ChatMessage{{Role: "user", Content: "问题"}}, nil); err != nil {
+		t.Fatalf("ChatMessagesWithTools() error = %v", err)
+	}
+	if completer.request.MaxCompletionTokens != 321 {
+		t.Fatalf("max completion tokens = %d, want 321", completer.request.MaxCompletionTokens)
+	}
+}
+
 func TestChatServiceRejectsUnconfiguredChatModel(t *testing.T) {
 	store := providerStoreStub{provider: modelprovider.Provider{
 		BaseURL:      "https://api.example.com/v1",

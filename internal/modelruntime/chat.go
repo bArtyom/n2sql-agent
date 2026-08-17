@@ -11,6 +11,7 @@ import (
 )
 
 type reasoningEffortContextKey struct{}
+type maxCompletionTokensContextKey struct{}
 
 // WithReasoningEffort carries a provider-neutral reasoning effort to the
 // model boundary without expanding every Agent runner interface. The value is
@@ -21,6 +22,17 @@ func WithReasoningEffort(ctx context.Context, effort string) context.Context {
 
 func reasoningEffort(ctx context.Context) string {
 	value, _ := ctx.Value(reasoningEffortContextKey{}).(string)
+	return value
+}
+
+// WithMaxCompletionTokens carries an optional provider-neutral output budget
+// to the model boundary. A zero value means the provider default is used.
+func WithMaxCompletionTokens(ctx context.Context, tokens int) context.Context {
+	return context.WithValue(ctx, maxCompletionTokensContextKey{}, tokens)
+}
+
+func maxCompletionTokens(ctx context.Context) int {
+	value, _ := ctx.Value(maxCompletionTokensContextKey{}).(int)
 	return value
 }
 
@@ -91,9 +103,10 @@ func (s *ChatService) ChatMessages(ctx context.Context, messages []modelclient.C
 		return modelclient.ChatResponse{}, err
 	}
 	response, err := s.completer.Chat(ctx, provider.BaseURL, apiKey, modelclient.ChatRequest{
-		Model:    provider.ChatModel,
-		Messages: messages,
-		Stream:   false,
+		Model:               provider.ChatModel,
+		Messages:            messages,
+		MaxCompletionTokens: maxCompletionTokens(ctx),
+		Stream:              false,
 	})
 	if err != nil {
 		return modelclient.ChatResponse{}, &ChatCallError{Err: fmt.Errorf("complete chat: %w", err)}
@@ -115,11 +128,12 @@ func (s *ChatService) ChatMessagesWithToolsForModel(ctx context.Context, request
 		return modelclient.ChatResponse{}, err
 	}
 	response, err := s.completer.Chat(ctx, provider.BaseURL, apiKey, modelclient.ChatRequest{
-		Model:           model,
-		Messages:        messages,
-		Tools:           modelToolDefinitions(definitions),
-		ReasoningEffort: reasoningEffort(ctx),
-		Stream:          false,
+		Model:               model,
+		Messages:            messages,
+		Tools:               modelToolDefinitions(definitions),
+		ReasoningEffort:     reasoningEffort(ctx),
+		MaxCompletionTokens: maxCompletionTokens(ctx),
+		Stream:              false,
 	})
 	if err != nil {
 		return modelclient.ChatResponse{}, &ChatCallError{Err: fmt.Errorf("complete chat with tools: %w", err)}
@@ -163,9 +177,10 @@ func (s *ChatService) StreamMessages(ctx context.Context, messages []modelclient
 		return err
 	}
 	if err := s.streamer.ChatStream(ctx, provider.BaseURL, apiKey, modelclient.ChatRequest{
-		Model:    provider.ChatModel,
-		Messages: messages,
-		Stream:   true,
+		Model:               provider.ChatModel,
+		Messages:            messages,
+		MaxCompletionTokens: maxCompletionTokens(ctx),
+		Stream:              true,
 	}, onDelta); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err

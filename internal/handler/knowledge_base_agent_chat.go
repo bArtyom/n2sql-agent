@@ -170,18 +170,19 @@ func decodeIdempotencyKey(w http.ResponseWriter, r *http.Request, conversationID
 
 func idempotencyRequestHash(knowledgeBaseID int64, request agentservice.ChatRequest) (string, error) {
 	payload, err := json.Marshal(struct {
-		KnowledgeBaseID  int64                         `json:"knowledge_base_id"`
-		ConversationID   int64                         `json:"conversation_id"`
-		Message          string                        `json:"message"`
-		ChatModel        string                        `json:"chat_model"`
-		ThinkingMode     string                        `json:"thinking_mode"`
-		Attachments      []agentservice.ChatAttachment `json:"attachments"`
-		TopK             int                           `json:"top_k"`
-		Threshold        float64                       `json:"similarity_threshold"`
-		KeywordThreshold float64                       `json:"keyword_threshold"`
-		DocumentIDs      []int64                       `json:"document_ids"`
-		QueryRewrite     bool                          `json:"query_rewrite"`
-	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message, ChatModel: request.ChatModel, ThinkingMode: request.ThinkingMode, Attachments: request.Attachments, TopK: request.TopK, Threshold: request.SimilarityThreshold, KeywordThreshold: request.KeywordThreshold, DocumentIDs: request.DocumentIDs, QueryRewrite: request.QueryRewrite})
+		KnowledgeBaseID     int64                         `json:"knowledge_base_id"`
+		ConversationID      int64                         `json:"conversation_id"`
+		Message             string                        `json:"message"`
+		ChatModel           string                        `json:"chat_model"`
+		ThinkingMode        string                        `json:"thinking_mode"`
+		MaxCompletionTokens int                           `json:"max_completion_tokens"`
+		Attachments         []agentservice.ChatAttachment `json:"attachments"`
+		TopK                int                           `json:"top_k"`
+		Threshold           float64                       `json:"similarity_threshold"`
+		KeywordThreshold    float64                       `json:"keyword_threshold"`
+		DocumentIDs         []int64                       `json:"document_ids"`
+		QueryRewrite        bool                          `json:"query_rewrite"`
+	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message, ChatModel: request.ChatModel, ThinkingMode: request.ThinkingMode, MaxCompletionTokens: request.MaxCompletionTokens, Attachments: request.Attachments, TopK: request.TopK, Threshold: request.SimilarityThreshold, KeywordThreshold: request.KeywordThreshold, DocumentIDs: request.DocumentIDs, QueryRewrite: request.QueryRewrite})
 	if err != nil {
 		return "", err
 	}
