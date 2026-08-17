@@ -137,6 +137,13 @@ func NewService(source Source, store Store, chat Chat, maxInputChars int) *Servi
 	return &Service{source: source, store: store, chat: chat, maxInputChars: maxInputChars}
 }
 
+func (s *Service) Status(ctx context.Context, knowledgeBaseID, documentID int64) (Summary, error) {
+	if s == nil || s.store == nil {
+		return Summary{}, errors.New("document summary service unavailable")
+	}
+	return s.store.GetSummary(ctx, knowledgeBaseID, documentID)
+}
+
 func (s *Service) Summarize(ctx context.Context, knowledgeBaseID, documentID int64) (Result, error) {
 	if cached, err := s.store.GetSummary(ctx, knowledgeBaseID, documentID); err == nil {
 		if cached.Status == "succeeded" && strings.TrimSpace(cached.Content) != "" {

@@ -306,6 +306,12 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			if documentInfo, ok := toolResult.Metadata["document_info"]; ok {
 				toolFinishedData["document_info"] = documentInfo
 			}
+			if pending, ok := toolResult.Metadata["pending"].(bool); ok {
+				toolFinishedData["pending"] = pending
+			}
+			if taskID, ok := toolResult.Metadata["task_id"].(string); ok {
+				toolFinishedData["task_id"] = taskID
+			}
 			if err := emitter.emit(agent.EventToolFinished, len(run.Steps()), toolFinishedData); err != nil {
 				return finishError(result, err)
 			}

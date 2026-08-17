@@ -13,7 +13,7 @@ import (
 // work is performed outside the Agent/ReAct loop and is cached by the service.
 func NewDocumentSummary(service *documentsummary.Service) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
+		if r.Method != http.MethodPost && r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
@@ -24,6 +24,23 @@ func NewDocumentSummary(service *documentsummary.Service) http.Handler {
 		documentID, err := strconv.ParseInt(r.PathValue("documentID"), 10, 64)
 		if err != nil || documentID <= 0 {
 			http.Error(w, `{"error":"invalid document ID"}`, http.StatusBadRequest)
+			return
+		}
+		if r.Method == http.MethodGet {
+			status, err := service.Status(r.Context(), knowledgeBaseID, documentID)
+			if errors.Is(err, document.ErrDocumentNotFound) {
+				http.Error(w, `{"error":"document not found"}`, http.StatusNotFound)
+				return
+			}
+			if err != nil {
+				http.Error(w, `{"error":"unable to read document summary status"}`, http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, struct {
+				Status  string `json:"status"`
+				Summary string `json:"summary,omitempty"`
+				Error   string `json:"error,omitempty"`
+			}{Status: status.Status, Summary: status.Content, Error: status.Error})
 			return
 		}
 		result, err := service.Summarize(r.Context(), knowledgeBaseID, documentID)

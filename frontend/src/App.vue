@@ -100,6 +100,8 @@ type AgentEvent = {
   sourceKeys?: string[];
   documents?: AgentDocument[];
   documentInfo?: AgentDocument | null;
+  pending?: boolean;
+  taskID?: string;
   status: "running" | "done" | "error";
 };
 type AgentRunStats = {
@@ -1784,6 +1786,7 @@ const agentToolLabels: Record<string, string> = {
   document_list: "查看文档列表",
   document_info: "查看文档状态",
   document_read: "读取文档正文",
+  document_summary: "生成文档摘要",
 };
 
 function displayAgentToolName(toolName: string) {
@@ -1800,6 +1803,8 @@ function agentToolActivity(toolName: string) {
       return "正在读取文档状态…";
     case "document_read":
       return "正在读取文档正文…";
+    case "document_summary":
+      return "正在生成文档摘要…";
     default:
       return "正在调用工具…";
   }
@@ -1845,7 +1850,7 @@ function recordAgentEvent(
   detail = "",
   step?: number,
   status: AgentEvent["status"] = "done",
-  extra: Pick<AgentEvent, "toolCallID" | "arguments" | "resultSummary"> = {},
+  extra: Pick<AgentEvent, "toolCallID" | "arguments" | "resultSummary" | "pending" | "taskID"> = {},
 ) {
   answer.agentEvents ??= [];
   answer.agentEvents.push({ type, step, label, detail: detail.slice(0, 140), status, ...extra });
@@ -1917,6 +1922,8 @@ function finishLastAgentToolEvent(
     sourceKeys?: string[];
     documents?: AgentDocument[];
     documentInfo?: AgentDocument | null;
+    pending?: boolean;
+    taskID?: string;
   },
 ) {
   const events = answer.agentEvents ?? [];
@@ -1929,6 +1936,8 @@ function finishLastAgentToolEvent(
     latest.resultSummary = options.detail.slice(0, 140);
     latest.sourceKeys = (options.sourceKeys ?? []).slice(0, 20);
     latest.status = options.status ?? "done";
+    latest.pending = options.pending;
+    latest.taskID = options.taskID;
     if (options.documents?.length) latest.documents = options.documents;
     if (options.documentInfo) latest.documentInfo = options.documentInfo;
   }
@@ -1940,6 +1949,7 @@ function toolFinishedLabel(toolName: string): string {
     case "document_list": return "查看文档列表完成";
     case "document_info": return "查看文档状态完成";
     case "document_read": return "读取文档正文完成";
+    case "document_summary": return "文档摘要已提交";
     default: return "工具调用完成";
   }
 }
@@ -2114,12 +2124,16 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
             sourceKeys: sources.map(sourceKey),
             documents: parseAgentDocuments(eventData.documents),
             documentInfo: parseAgentDocumentInfo(eventData.document_info),
+            pending: eventData.pending === true,
+            taskID: dataString("task_id") || undefined,
           });
         }
         if (Object.prototype.hasOwnProperty.call(eventData, "sources")) {
           answer.sources = mergeSources(answer.sources ?? [], parseSources(eventData.sources));
         }
-        answer.activity = "资料查找完成，正在组织答案…";
+        answer.activity = eventData.pending === true
+          ? "文档摘要已提交后台生成，请稍后再次询问…"
+          : "资料查找完成，正在组织答案…";
         break;
       case "approval_required":
         if (!researchMode && answer.runID && selectedKnowledgeBaseId.value) {
