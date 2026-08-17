@@ -12,6 +12,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
+	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
@@ -23,6 +24,7 @@ const systemPrompt = "你是一个通用文档知识库问答助手。需要事�
 
 const documentListPrompt = "当用户询问知识库中有哪些文档时，调用 document_list 工具；当用户已经知道文档 ID、需要查看某个文档的类型、大小或处理状态时，调用 document_info 工具；不要用 knowledge_search 猜测文档目录或文档状态。"
 const documentReadPrompt = "当用户明确要求查看某个文档的正文时，先确认文档 ID，再调用 document_read 分段读取；不要一次读取整篇文档，也不要猜测文件路径。"
+const documentSummaryPrompt = "当用户要求总结、概括或提炼某个完整文档时，先通过 document_list 或 document_info 确认文档 ID，再调用 document_summary；不要用 document_read 逐段读取全文。"
 
 var (
 	ErrInvalidService            = errors.New("invalid agent service")
@@ -64,6 +66,7 @@ type Service struct {
 	historySummarizer  HistorySummarizer
 	documents          document.Reader
 	chunks             documentchunk.Reader
+	documentSummary    *documentsummary.Service
 	sequence           atomic.Uint64
 }
 
@@ -97,6 +100,10 @@ func NewServiceWithLimitsAndSummarizerAndDocuments(chat modelruntime.ToolChatRun
 }
 
 func NewServiceWithLimitsAndSummarizerAndDocumentsAndChunks(chat modelruntime.ToolChatRunner, searcher retrieval.Searcher, maxSteps int, timeout time.Duration, maxToolResultBytes, maxHistoryMessages, maxHistoryBytes int, historySummarizer HistorySummarizer, documents document.Reader, chunks documentchunk.Reader) (*Service, error) {
+	return NewServiceWithLimitsAndSummarizerAndDocumentsAndChunksAndSummary(chat, searcher, maxSteps, timeout, maxToolResultBytes, maxHistoryMessages, maxHistoryBytes, historySummarizer, documents, chunks, nil)
+}
+
+func NewServiceWithLimitsAndSummarizerAndDocumentsAndChunksAndSummary(chat modelruntime.ToolChatRunner, searcher retrieval.Searcher, maxSteps int, timeout time.Duration, maxToolResultBytes, maxHistoryMessages, maxHistoryBytes int, historySummarizer HistorySummarizer, documents document.Reader, chunks documentchunk.Reader, documentSummary *documentsummary.Service) (*Service, error) {
 	if chat == nil || searcher == nil {
 		return nil, ErrInvalidService
 	}
@@ -126,6 +133,7 @@ func NewServiceWithLimitsAndSummarizerAndDocumentsAndChunks(chat modelruntime.To
 		historySummarizer:  historySummarizer,
 		documents:          documents,
 		chunks:             chunks,
+		documentSummary:    documentSummary,
 	}, nil
 }
 
@@ -203,7 +211,7 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	var registry *agent.ToolRegistry
 	if s.documents != nil {
 		if s.chunks != nil {
-			registry, err = agent.NewKnowledgeSearchAndDocumentReadRegistry(s.searcher, s.documents, s.chunks, knowledgeBaseID, s.maxToolResultBytes, request.TopK, maxDistance, keywordThreshold, request.DocumentIDs, request.QueryRewrite)
+			registry, err = agent.NewKnowledgeSearchAndDocumentReadRegistryWithSummary(s.searcher, s.documents, s.chunks, s.documentSummary, knowledgeBaseID, s.maxToolResultBytes, request.TopK, maxDistance, keywordThreshold, request.DocumentIDs, request.QueryRewrite)
 		} else {
 			registry, err = agent.NewKnowledgeSearchAndDocumentListRegistry(s.searcher, s.documents, knowledgeBaseID, s.maxToolResultBytes, request.TopK, maxDistance, keywordThreshold, request.DocumentIDs, request.QueryRewrite)
 		}
@@ -223,7 +231,7 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		runID = s.nextRunID()
 	}
 	messages := []modelclient.ChatMessage{
-		{Role: "system", Content: systemPromptFor(s.documents != nil, s.chunks != nil)},
+		{Role: "system", Content: systemPromptFor(s.documents != nil, s.chunks != nil, s.documentSummary != nil)},
 	}
 	messages = append(messages, history...)
 	userMessage := modelclient.ChatMessage{Role: "user", Content: request.Message}
@@ -252,13 +260,16 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	return response, nil
 }
 
-func systemPromptFor(documentReaderAvailable, chunkReaderAvailable bool) string {
+func systemPromptFor(documentReaderAvailable, chunkReaderAvailable, documentSummaryAvailable bool) string {
 	if !documentReaderAvailable {
 		return systemPrompt
 	}
 	prompt := systemPrompt + documentListPrompt
 	if chunkReaderAvailable {
 		prompt += documentReadPrompt
+	}
+	if documentSummaryAvailable {
+		prompt += documentSummaryPrompt
 	}
 	return prompt
 }

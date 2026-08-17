@@ -8,6 +8,7 @@ import (
 
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
+	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 )
 
@@ -184,7 +185,7 @@ func NewKnowledgeSearchAndDocumentListRegistry(
 	documentIDs []int64,
 	queryRewrite bool,
 ) (*ToolRegistry, error) {
-	return newKnowledgeSearchAndDocumentRegistry(searcher, reader, nil, knowledgeBaseID, maxResultBytes, maxResults, maxDistance, keywordThreshold, documentIDs, queryRewrite)
+	return newKnowledgeSearchAndDocumentRegistry(searcher, reader, nil, nil, knowledgeBaseID, maxResultBytes, maxResults, maxDistance, keywordThreshold, documentIDs, queryRewrite)
 }
 
 // NewKnowledgeSearchAndDocumentReadRegistry adds the bounded document_read
@@ -200,13 +201,18 @@ func NewKnowledgeSearchAndDocumentReadRegistry(
 	documentIDs []int64,
 	queryRewrite bool,
 ) (*ToolRegistry, error) {
-	return newKnowledgeSearchAndDocumentRegistry(searcher, reader, chunkReader, knowledgeBaseID, maxResultBytes, maxResults, maxDistance, keywordThreshold, documentIDs, queryRewrite)
+	return newKnowledgeSearchAndDocumentRegistry(searcher, reader, chunkReader, nil, knowledgeBaseID, maxResultBytes, maxResults, maxDistance, keywordThreshold, documentIDs, queryRewrite)
+}
+
+func NewKnowledgeSearchAndDocumentReadRegistryWithSummary(searcher retrieval.Searcher, reader document.Reader, chunkReader documentchunk.Reader, summary *documentsummary.Service, knowledgeBaseID int64, maxResultBytes, maxResults int, maxDistance, keywordThreshold float64, documentIDs []int64, queryRewrite bool) (*ToolRegistry, error) {
+	return newKnowledgeSearchAndDocumentRegistry(searcher, reader, chunkReader, summary, knowledgeBaseID, maxResultBytes, maxResults, maxDistance, keywordThreshold, documentIDs, queryRewrite)
 }
 
 func newKnowledgeSearchAndDocumentRegistry(
 	searcher retrieval.Searcher,
 	reader document.Reader,
 	chunkReader documentchunk.Reader,
+	summary *documentsummary.Service,
 	knowledgeBaseID int64,
 	maxResultBytes, maxResults int,
 	maxDistance, keywordThreshold float64,
@@ -238,6 +244,9 @@ func newKnowledgeSearchAndDocumentRegistry(
 	if chunkReader != nil {
 		allowlist = append(allowlist, documentReadToolName)
 	}
+	if summary != nil {
+		allowlist = append(allowlist, "document_summary")
+	}
 	registry, err := NewToolRegistryWithAllowlist(allowlist...)
 	if err != nil {
 		return nil, fmt.Errorf("create read-only tool allowlist: %w", err)
@@ -250,6 +259,15 @@ func newKnowledgeSearchAndDocumentRegistry(
 	}
 	if err := registry.Register(infoTool); err != nil {
 		return nil, fmt.Errorf("register document info tool: %w", err)
+	}
+	if summary != nil {
+		summaryTool, err := NewDocumentSummaryToolForKnowledgeBase(summary, knowledgeBaseID)
+		if err != nil {
+			return nil, fmt.Errorf("create document summary tool: %w", err)
+		}
+		if err := registry.Register(summaryTool); err != nil {
+			return nil, fmt.Errorf("register document summary tool: %w", err)
+		}
 	}
 	if chunkReader != nil {
 		readTool, err := NewDocumentReadToolForKnowledgeBase(chunkReader, knowledgeBaseID, maxResultBytes, minInt(maxResults, 8))
