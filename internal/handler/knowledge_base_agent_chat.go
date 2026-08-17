@@ -81,7 +81,7 @@ func NewKnowledgeBaseAgentChatWithConversationAndMetrics(answerer agentservice.A
 			if err != nil {
 				return err
 			}
-			if err := saveConversationExchange(r.Context(), conversations, knowledgeBaseID, request, response); err != nil {
+			if _, err := saveConversationExchange(r.Context(), conversations, knowledgeBaseID, request, response); err != nil {
 				return err
 			}
 			if err := saveConversationSummary(r.Context(), conversations, knowledgeBaseID, request, response); err != nil {
@@ -374,13 +374,13 @@ func loadConversationHistory(ctx context.Context, conversations *conversation.Se
 	return nil
 }
 
-func saveConversationExchange(ctx context.Context, conversations *conversation.Service, knowledgeBaseID int64, request agentservice.ChatRequest, response agentservice.Response) error {
+func saveConversationExchange(ctx context.Context, conversations *conversation.Service, knowledgeBaseID int64, request agentservice.ChatRequest, response agentservice.Response) (int64, error) {
 	if request.ConversationID == 0 || conversations == nil {
-		return nil
+		return 0, nil
 	}
 	metadata := conversationMetadataFromAgentResponse(response)
 	if err := conversations.SaveExchangeWithMetadata(ctx, request.ConversationID, request.Message, response.Answer, metadata); err != nil {
-		return fmt.Errorf("save conversation exchange: %w", err)
+		return 0, fmt.Errorf("save conversation exchange: %w", err)
 	}
 	if request.ChatModel != "" {
 		if _, err := conversations.SetChatModel(ctx, request.ConversationID, knowledgeBaseID, request.ChatModel); err != nil {
@@ -391,7 +391,11 @@ func saveConversationExchange(ctx context.Context, conversations *conversation.S
 	if err := conversations.AutoTitle(ctx, request.ConversationID, knowledgeBaseID, request.Message); err != nil {
 		slog.WarnContext(ctx, "conversation_auto_title_failed", "conversation_id", request.ConversationID, "error", err)
 	}
-	return nil
+	messageID, err := conversations.LatestAssistantMessageID(ctx, request.ConversationID, knowledgeBaseID)
+	if err != nil {
+		return 0, nil
+	}
+	return messageID, nil
 }
 
 const (

@@ -202,6 +202,10 @@ type feedbackStore interface {
 	SaveFeedback(context.Context, int64, int64, int64, int) (Feedback, error)
 }
 
+type latestAssistantMessageStore interface {
+	LatestAssistantMessageID(context.Context, int64, int64) (int64, error)
+}
+
 type distributedConversationLocker interface {
 	WithConversationLock(context.Context, int64, func() error) error
 }
@@ -227,6 +231,17 @@ func (s *Service) SaveFeedback(ctx context.Context, conversationID, knowledgeBas
 		return Feedback{}, ErrFeedbackUnavailable
 	}
 	return store.SaveFeedback(ctx, conversationID, knowledgeBaseID, messageID, rating)
+}
+
+func (s *Service) LatestAssistantMessageID(ctx context.Context, conversationID, knowledgeBaseID int64) (int64, error) {
+	if conversationID <= 0 || knowledgeBaseID <= 0 {
+		return 0, ErrInvalidConversation
+	}
+	store, ok := s.store.(latestAssistantMessageStore)
+	if !ok {
+		return 0, ErrFeedbackUnavailable
+	}
+	return store.LatestAssistantMessageID(ctx, conversationID, knowledgeBaseID)
 }
 
 // WithSummaryLock serializes all work that reads or writes conversation context.
@@ -974,6 +989,27 @@ func (s *PostgresStore) SaveFeedback(ctx context.Context, conversationID, knowle
 		return Feedback{}, fmt.Errorf("save conversation feedback: %w", err)
 	}
 	return result, nil
+}
+
+func (s *PostgresStore) LatestAssistantMessageID(ctx context.Context, conversationID, knowledgeBaseID int64) (int64, error) {
+	var messageID int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT m.id
+		FROM conversation_messages m
+		JOIN conversations c ON c.id = m.conversation_id
+		WHERE c.id = $1
+		  AND c.knowledge_base_id = $2
+		  AND m.role = 'assistant'
+		  AND c.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
+		ORDER BY m.id DESC
+		LIMIT 1`, conversationID, knowledgeBaseID).Scan(&messageID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("get latest assistant message: %w", err)
+	}
+	return messageID, nil
 }
 
 func (s *PostgresStore) ListMessages(ctx context.Context, conversationID int64) ([]Message, error) {

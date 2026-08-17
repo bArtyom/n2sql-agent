@@ -2128,6 +2128,7 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         answer.retryable = false;
         break;
       case "conversation_saved":
+        if (typeof eventData.assistant_message_id === "number") answer.id = eventData.assistant_message_id;
         answer.activity = "已保存到会话";
         break;
       case "conversation_replayed": {

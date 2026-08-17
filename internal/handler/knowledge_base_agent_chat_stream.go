@@ -188,7 +188,8 @@ func NewKnowledgeBaseAgentChatStreamWithHub(answerer agentservice.EventAnswerer,
 			if err != nil {
 				return err
 			}
-			if err := saveConversationExchange(executionContext, conversations, knowledgeBaseID, request, response); err != nil {
+			assistantMessageID, err := saveConversationExchange(executionContext, conversations, knowledgeBaseID, request, response)
+			if err != nil {
 				conversationSaveErr = err
 				message, _ := knowledgeBaseAgentChatError(err)
 				if writeErr := publishHandlerEvent("conversation_save_failed", struct {
@@ -208,8 +209,9 @@ func NewKnowledgeBaseAgentChatStreamWithHub(answerer agentservice.EventAnswerer,
 			}
 			if request.ConversationID != 0 {
 				if writeErr := publishHandlerEvent("conversation_saved", struct {
-					ConversationID int64 `json:"conversation_id"`
-				}{ConversationID: request.ConversationID}); writeErr != nil {
+					ConversationID     int64 `json:"conversation_id"`
+					AssistantMessageID int64 `json:"assistant_message_id,omitempty"`
+				}{ConversationID: request.ConversationID, AssistantMessageID: assistantMessageID}); writeErr != nil {
 					slog.ErrorContext(r.Context(), "agent_sse_conversation_saved_event_write_failed", "request_id", requestid.FromContext(r.Context()), "conversation_id", request.ConversationID, "error", writeErr)
 				}
 			}
