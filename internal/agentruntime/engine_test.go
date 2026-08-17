@@ -192,6 +192,76 @@ func TestEngineCompactsOversizedConversationBeforeModelCall(t *testing.T) {
 	}
 }
 
+func TestEngineTruncatesOversizedToolResultWithoutDroppingEnvelope(t *testing.T) {
+	var received []modelclient.ChatMessage
+	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		received = append([]modelclient.ChatMessage(nil), messages...)
+		return modelclient.ChatResponse{Message: "最终答案"}, nil
+	}}
+	engine, err := agentruntime.NewEngine(chat, agent.NewToolRegistry(), 1)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	toolPayload, err := json.Marshal(map[string]any{
+		"trusted": false,
+		"content": strings.Repeat("工具结果开头 ", 30_000),
+	})
+	if err != nil {
+		t.Fatalf("marshal tool payload: %v", err)
+	}
+	messages := []modelclient.ChatMessage{
+		{Role: "system", Content: "系统提示"},
+		{Role: "user", Content: "旧问题"},
+		{Role: "user", Content: "当前问题"},
+		{Role: "tool", ToolCallID: "call-1", Content: "UNTRUSTED_TOOL_RESULT\n" + string(toolPayload)},
+	}
+	if _, err := engine.Run(context.Background(), "run-tool-compaction", messages); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(received) != 4 {
+		t.Fatalf("message count = %d, want system, note, tool and current user; messages=%#v", len(received), received)
+	}
+	toolMessage := received[3]
+	if toolMessage.Role != "tool" || toolMessage.ToolCallID != "call-1" {
+		t.Fatalf("tool envelope metadata was not preserved: %#v", toolMessage)
+	}
+	if messageBytesForTest(received) > 64*1024 {
+		t.Fatalf("compacted messages exceed budget: %d", messageBytesForTest(received))
+	}
+	const prefix = "UNTRUSTED_TOOL_RESULT\n"
+	if !strings.HasPrefix(toolMessage.Content, prefix) || !strings.Contains(toolMessage.Content, "工具结果开头") {
+		t.Fatalf("tool result prefix/content was not preserved: %q", toolMessage.Content[:minInt(len(toolMessage.Content), 120)])
+	}
+	var envelope struct {
+		Trusted bool   `json:"trusted"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(toolMessage.Content, prefix)), &envelope); err != nil {
+		t.Fatalf("truncated tool envelope is invalid JSON: %v", err)
+	}
+	if envelope.Trusted || !strings.Contains(envelope.Content, "[工具结果已截断]") {
+		t.Fatalf("tool envelope = %#v, want untrusted truncated content", envelope)
+	}
+}
+
+func messageBytesForTest(messages []modelclient.ChatMessage) int {
+	total := 0
+	for _, message := range messages {
+		total += len(message.Content)
+		for _, part := range message.ContentParts {
+			total += len(part.Text)
+		}
+	}
+	return total
+}
+
+func minInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
+}
+
 func TestEngineReturnsModelAnswerWithoutToolCall(t *testing.T) {
 	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, definitions []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 		if len(messages) != 1 || messages[0].Content != "年假怎么计算？" {

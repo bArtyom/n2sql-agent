@@ -377,6 +377,12 @@ func compactConversation(messages []modelclient.ChatMessage, maxBytes int) []mod
 	for index := len(messages) - 1; index > currentUser; index-- {
 		candidate := messageBytes([]modelclient.ChatMessage{messages[index]})
 		if used+candidate > maxBytes {
+			if remaining := maxBytes - used; messages[index].Role == "tool" {
+				if fitted, ok := truncateToolMessage(messages[index], remaining); ok {
+					kept = append(kept, fitted)
+					used += messageBytes([]modelclient.ChatMessage{fitted})
+				}
+			}
 			break
 		}
 		kept = append(kept, messages[index])
@@ -386,6 +392,66 @@ func compactConversation(messages []modelclient.ChatMessage, maxBytes int) []mod
 		result = append(result, kept[index])
 	}
 	return result
+}
+
+const toolResultTruncatedMarker = "[工具结果已截断]"
+
+func truncateToolMessage(message modelclient.ChatMessage, maxBytes int) (modelclient.ChatMessage, bool) {
+	if maxBytes <= 0 {
+		return modelclient.ChatMessage{}, false
+	}
+	prefix := untrustedToolResultPrefix
+	if strings.HasPrefix(message.Content, prefix) {
+		var envelope untrustedToolResultEnvelope
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(message.Content, prefix)), &envelope); err == nil {
+			original := []rune(envelope.Content)
+			makeCandidate := func(limit int) modelclient.ChatMessage {
+				content := string(original[:limit])
+				if limit < len(original) {
+					content = strings.TrimRightFunc(content, func(r rune) bool { return r == '\n' || r == ' ' }) + "\n" + toolResultTruncatedMarker
+				}
+				envelope.Content = content
+				encoded, _ := json.Marshal(envelope)
+				candidate := message
+				candidate.Content = prefix + string(encoded)
+				return candidate
+			}
+			return fitToolCandidate(makeCandidate, len(original), maxBytes)
+		}
+	}
+
+	original := []rune(message.Content)
+	makeCandidate := func(limit int) modelclient.ChatMessage {
+		content := string(original[:limit])
+		if limit < len(original) {
+			content = strings.TrimRightFunc(content, func(r rune) bool { return r == '\n' || r == ' ' }) + "\n" + toolResultTruncatedMarker
+		}
+		candidate := message
+		candidate.Content = content
+		return candidate
+	}
+	return fitToolCandidate(makeCandidate, len(original), maxBytes)
+}
+
+func fitToolCandidate(makeCandidate func(int) modelclient.ChatMessage, maxRunes, maxBytes int) (modelclient.ChatMessage, bool) {
+	if messageBytes([]modelclient.ChatMessage{makeCandidate(maxRunes)}) <= maxBytes {
+		return makeCandidate(maxRunes), true
+	}
+	low, high := 0, maxRunes
+	var best modelclient.ChatMessage
+	found := false
+	for low <= high {
+		middle := low + (high-low)/2
+		candidate := makeCandidate(middle)
+		if messageBytes([]modelclient.ChatMessage{candidate}) <= maxBytes {
+			best = candidate
+			found = true
+			low = middle + 1
+		} else {
+			high = middle - 1
+		}
+	}
+	return best, found
 }
 
 func messageBytes(messages []modelclient.ChatMessage) int {
