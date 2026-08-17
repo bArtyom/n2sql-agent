@@ -24,6 +24,7 @@ var (
 	ErrEmptyFinalAnswer  = errors.New("agent final answer is empty")
 	ErrInvalidToolCall   = errors.New("invalid agent tool call")
 	ErrInvalidToolResult = errors.New("invalid agent tool result")
+	ErrRepeatedToolCall  = errors.New("repeated identical agent tool call")
 )
 
 const untrustedToolResultPrefix = "UNTRUSTED_TOOL_RESULT\n"
@@ -152,6 +153,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 
 	result := Result{Run: run}
 	emitter := newEventEmitter(runID, sink)
+	seenToolCalls := make(map[string]struct{})
 	if err := emitter.emit(agent.EventRunStarted, 0, map[string]any{
 		"status": string(agent.RunRunning),
 	}); err != nil {
@@ -234,6 +236,11 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			if err := validateToolCall(toolCall); err != nil {
 				return addToolFailureWithEvents(result, toolCall.Function.Name, err, emitter)
 			}
+			callKey := normalizedToolCallKey(toolCall.Function.Name, toolCall.Function.Arguments)
+			if _, repeated := seenToolCalls[callKey]; repeated {
+				return completeWithAnswer(result, emitter, "已检测到模型重复调用相同工具和参数，本轮已安全停止，避免重复检索。")
+			}
+			seenToolCalls[callKey] = struct{}{}
 
 			tool, err := e.registry.Find(toolCall.Function.Name)
 			if err != nil {
@@ -439,6 +446,16 @@ func validateToolCall(toolCall modelclient.ToolCall) error {
 		return fmt.Errorf("%w: arguments must be an object", ErrInvalidToolCall)
 	}
 	return nil
+}
+
+func normalizedToolCallKey(toolName, arguments string) string {
+	var value any
+	if err := json.Unmarshal([]byte(arguments), &value); err == nil {
+		if normalized, err := json.Marshal(value); err == nil {
+			return toolName + "\x00" + string(normalized)
+		}
+	}
+	return toolName + "\x00" + arguments
 }
 
 func addToolFailureWithEvents(result Result, toolName string, err error, emitter *eventEmitter) (Result, error) {

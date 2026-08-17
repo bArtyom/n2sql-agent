@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -127,6 +128,41 @@ func TestEngineStopsAfterPendingToolResult(t *testing.T) {
 	}
 	if modelCalls != 1 {
 		t.Fatalf("model calls = %d, want 1 after pending tool result", modelCalls)
+	}
+}
+
+func TestEngineStopsRepeatedIdenticalToolCall(t *testing.T) {
+	tool := &toolStub{}
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(tool); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	modelCalls := 0
+	chat := chatStub{call: func(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		modelCalls++
+		return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+			ID:   fmt.Sprintf("duplicate-call-%d", modelCalls),
+			Type: "function",
+			Function: modelclient.ToolCallFunction{
+				Name:      "knowledge_search",
+				Arguments: `{"query":"年假"}`,
+			},
+		}}}, nil
+	}}
+	engine, err := agentruntime.NewEngine(chat, registry, 4)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	result, err := engine.Run(context.Background(), "run-duplicate-tool", []modelclient.ChatMessage{{Role: "user", Content: "查询年假"}})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Run.Status() != agent.RunSucceeded || !strings.Contains(result.Run.FinalAnswer(), "重复调用") {
+		t.Fatalf("run status = %s, answer = %q", result.Run.Status(), result.Run.FinalAnswer())
+	}
+	if modelCalls != 2 || string(tool.args) != `{"query":"年假"}` {
+		t.Fatalf("model calls = %d, tool args = %s, want two model calls and one tool call", modelCalls, tool.args)
 	}
 }
 
