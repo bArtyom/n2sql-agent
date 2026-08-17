@@ -43,6 +43,7 @@
 - 最新工具审批切片：审批采用工具策略控制；当前只读 RAG 工具默认不弹确认，未来有写入或外部副作用的工具实现 `RequiresApproval() bool` 后才进入审批；进入审批的标准 Agent 会发送 `approval_required`，前端调用 `POST /api/knowledge-bases/{id}/agent-runs/{runID}/approval` 恢复或拒绝运行；审批状态按知识库 ID 和运行 ID 隔离，取消/结束时释放；默认 30 秒未确认会发送 `approval_expired` 并结束本轮；当前为进程内 Hub，Redis/持久化审批后置。
 - 最新答案反馈切片：新增 `conversation_message_feedback` 表和消息级 `POST /api/knowledge-bases/{id}/conversations/{conversationId}/messages/{messageId}/feedback` 接口，支持 `rating=1/-1` 并按管理员与消息幂等更新；后端校验会话、知识库、消息归属及 assistant 角色；流式回答保存事件返回 `assistant_message_id`，前端当前回答也能立即显示“有帮助/需改进”。
 - 最新反馈统计切片：新增 `GET /api/knowledge-bases/{id}/feedback/stats`，聚合 `total/positive/negative/positiveRate`，前端在问答台展示当前知识库满意率。
+- 最新动态起步问题切片：前端根据当前知识库已完成处理的文档标题生成起步问题；选择文档范围后，推荐问题会同步聚焦到选中文档，不增加额外模型调用，模型失败不会影响问答主链路。
 
 ## 明确后置或不做
 

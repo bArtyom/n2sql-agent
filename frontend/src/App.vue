@@ -277,11 +277,23 @@ const selectedDocument = ref<DocumentItem | null>(null);
 const documentPreview = ref<DocumentPreview | null>(null);
 const documentPreviewLoading = ref(false);
 const documentPreviewPageSize = 8;
-const starterQuestions = [
-  "知识库里有哪些文档？",
-  "请总结这套资料的主要内容。",
-  "如何查看指定文档的正文？",
-];
+const starterQuestions = computed(() => {
+  const readyDocuments = documents.value.filter((document) => document.processingStatus === "succeeded");
+  const selectedDocuments = readyDocuments.filter((document) => selectedDocumentIDs.value.includes(document.id));
+  const scope = selectedDocuments.length === 1 ? `《${selectedDocuments[0].originalFilename}》` : "这些资料";
+  const questions = selectedDocuments.length
+    ? [
+        `请总结${scope}的主要内容。`,
+        `请指出${scope}中最值得关注的关键结论。`,
+        `请根据${scope}给出一个具体应用示例。`,
+      ]
+    : [
+        "知识库里有哪些文档？",
+        readyDocuments.length ? `请总结${readyDocuments.slice(0, 2).map((document) => `《${document.originalFilename}》`).join("、")}的主要内容。` : "请总结这套资料的主要内容。",
+        "这些资料之间有哪些共同主题或关联？",
+      ];
+  return questions;
+});
 const followUpQuestions = [
   "请用一个具体例子说明刚才的结论。",
   "请指出刚才回答依据的关键原文。",
