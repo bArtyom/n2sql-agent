@@ -133,6 +133,7 @@ type A2ATask = {
 };
 type Conversation = { id: number; knowledgeBaseId: number; title: string; isPinned: boolean; chatModel?: string; createdAt: string; updatedAt: string };
 type ConversationPage = { items: Conversation[]; has_more: boolean; offset: number; limit: number };
+type FeedbackStats = { total: number; positive: number; negative: number; positiveRate: number };
 type ConversationMessage = {
   id: number;
   conversationId: number;
@@ -215,6 +216,7 @@ const selectedKnowledgeBaseId = ref<number | null>(null);
 const documents = ref<DocumentItem[]>([]);
 const messages = ref<ChatMessage[]>([]);
 const conversations = ref<Conversation[]>([]);
+const feedbackStats = ref<FeedbackStats>({ total: 0, positive: 0, negative: 0, positiveRate: 0 });
 const conversationId = ref<number | null>(null);
 const retrievalDetailsOpen = ref(new Set<number>());
 const question = ref("");
@@ -795,6 +797,7 @@ async function loadKnowledgeBases() {
       selectedKnowledgeBaseId.value = knowledgeBases.value[0]?.id ?? null;
     }
     await refreshDocuments();
+    await refreshFeedbackStats();
   } catch (error) {
     showError(error);
   } finally {
@@ -989,6 +992,18 @@ function toChatMessage(message: ConversationMessage): ChatMessage {
   };
 }
 
+async function refreshFeedbackStats() {
+  if (!selectedKnowledgeBaseId.value) {
+    feedbackStats.value = { total: 0, positive: 0, negative: 0, positiveRate: 0 };
+    return;
+  }
+  try {
+    feedbackStats.value = await requestJSON<FeedbackStats>(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/feedback/stats`);
+  } catch {
+    feedbackStats.value = { total: 0, positive: 0, negative: 0, positiveRate: 0 };
+  }
+}
+
 async function submitAnswerFeedback(message: ChatMessage, rating: -1 | 1) {
   if (!selectedKnowledgeBaseId.value || !conversationId.value || !message.id || message.feedbackSubmitting) return;
   message.feedbackSubmitting = true;
@@ -999,6 +1014,7 @@ async function submitAnswerFeedback(message: ChatMessage, rating: -1 | 1) {
       body: JSON.stringify({ rating }),
     });
     message.feedback = rating;
+    void refreshFeedbackStats();
   } catch (error) {
     showError(error);
   } finally {
@@ -1205,6 +1221,7 @@ function selectKnowledgeBase(id: number) {
   messages.value = [];
   conversationId.value = null;
   void refreshDocuments();
+  void refreshFeedbackStats();
   void loadConversation();
 }
 
@@ -2404,6 +2421,10 @@ onUnmounted(() => {
           <div class="chat-intro">
             <span class="chat-spark">✦</span>
             <div class="chat-intro-copy"><strong>从资料里找答案</strong><p>回答会标记它引用的原始段落。</p></div>
+            <div v-if="feedbackStats.total" class="feedback-summary" title="当前知识库的回答反馈统计">
+              <strong>{{ Math.round(feedbackStats.positiveRate * 100) }}%</strong>
+              <span>满意率 · {{ feedbackStats.total }} 条反馈</span>
+            </div>
             <div class="chat-mode-switch" role="group" aria-label="问答模式">
               <button type="button" :class="{ 'chat-mode--active': chatMode === 'agent' }" :aria-pressed="chatMode === 'agent'" :disabled="streaming" @click="chatMode = 'agent'">标准 Agent</button>
               <button type="button" :class="{ 'chat-mode--active': chatMode === 'research' }" :aria-pressed="chatMode === 'research'" :disabled="streaming" @click="chatMode = 'research'">协作研究</button>

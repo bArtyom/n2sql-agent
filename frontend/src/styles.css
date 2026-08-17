@@ -102,7 +102,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus
 .empty-documents p { max-width: 260px; margin: 8px 0; color: #a0aaa2; font-size: 11px; line-height: 1.7; }
 .empty-glyph { color: #cfdfd1; font-size: 38px; }
 .chat-panel { display: flex; flex-direction: column; }
-.chat-intro { display: flex; align-items: center; gap: 12px; margin: 20px 23px 0; padding: 14px; background: #f5f6ef; }.chat-intro-copy { min-width: 0; flex: 1; }
+.chat-intro { display: flex; align-items: center; gap: 12px; margin: 20px 23px 0; padding: 14px; background: #f5f6ef; }.chat-intro-copy { min-width: 0; flex: 1; }.feedback-summary { display: grid; flex: 0 0 auto; gap: 2px; color: #789080; text-align: right; }.feedback-summary strong { color: #4d8063; font-size: 15px; }.feedback-summary span { font-size: 9px; white-space: nowrap; }
 .chat-spark { color: #c47c3b; font-size: 18px; }.chat-intro strong { color: #334a40; font-size: 12px; }.chat-intro p { margin: 4px 0 0; color: #8a9890; font-size: 10px; }
 .chat-mode-switch { display: flex; flex: 0 0 auto; max-width: 100%; overflow-x: auto; padding: 2px; background: #e8eee5; border: 1px solid #d5e0d3; }.chat-mode-switch button { padding: 6px 8px; color: #819086; background: transparent; border: 0; font-size: 9px; white-space: nowrap; }.chat-mode-switch button:hover { color: #315d50; }.chat-mode-switch .chat-mode--active { color: #f8f4e9; background: #315d50; }
 .chat-mode-note { margin: 9px 23px 0; padding: 8px 10px; color: #8d724e; background: #fbf2e4; border-left: 2px solid #d18c4b; font-size: 10px; line-height: 1.5; }

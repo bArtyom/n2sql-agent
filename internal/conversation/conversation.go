@@ -73,6 +73,13 @@ type Feedback struct {
 	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
+type FeedbackStats struct {
+	Total        int     `json:"total"`
+	Positive     int     `json:"positive"`
+	Negative     int     `json:"negative"`
+	PositiveRate float64 `json:"positiveRate"`
+}
+
 // MessageMetadata contains bounded execution information and source snapshots
 // that help the UI restore how an assistant answer was produced. It is
 // optional so old messages and user messages remain source-compatible.
@@ -202,6 +209,10 @@ type feedbackStore interface {
 	SaveFeedback(context.Context, int64, int64, int64, int) (Feedback, error)
 }
 
+type feedbackStatsStore interface {
+	FeedbackStats(context.Context, int64) (FeedbackStats, error)
+}
+
 type latestAssistantMessageStore interface {
 	LatestAssistantMessageID(context.Context, int64, int64) (int64, error)
 }
@@ -242,6 +253,17 @@ func (s *Service) LatestAssistantMessageID(ctx context.Context, conversationID, 
 		return 0, ErrFeedbackUnavailable
 	}
 	return store.LatestAssistantMessageID(ctx, conversationID, knowledgeBaseID)
+}
+
+func (s *Service) FeedbackStats(ctx context.Context, knowledgeBaseID int64) (FeedbackStats, error) {
+	if knowledgeBaseID <= 0 {
+		return FeedbackStats{}, ErrInvalidKnowledgeBase
+	}
+	store, ok := s.store.(feedbackStatsStore)
+	if !ok {
+		return FeedbackStats{}, ErrFeedbackUnavailable
+	}
+	return store.FeedbackStats(ctx, knowledgeBaseID)
 }
 
 // WithSummaryLock serializes all work that reads or writes conversation context.
@@ -989,6 +1011,26 @@ func (s *PostgresStore) SaveFeedback(ctx context.Context, conversationID, knowle
 		return Feedback{}, fmt.Errorf("save conversation feedback: %w", err)
 	}
 	return result, nil
+}
+
+func (s *PostgresStore) FeedbackStats(ctx context.Context, knowledgeBaseID int64) (FeedbackStats, error) {
+	var stats FeedbackStats
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)::int,
+		       COUNT(*) FILTER (WHERE f.rating = 1)::int,
+		       COUNT(*) FILTER (WHERE f.rating = -1)::int
+		FROM conversation_message_feedback f
+		JOIN conversations c ON c.id = f.conversation_id
+		WHERE c.knowledge_base_id = $1
+		  AND c.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, knowledgeBaseID).
+		Scan(&stats.Total, &stats.Positive, &stats.Negative)
+	if err != nil {
+		return FeedbackStats{}, fmt.Errorf("get conversation feedback stats: %w", err)
+	}
+	if stats.Total > 0 {
+		stats.PositiveRate = float64(stats.Positive) / float64(stats.Total)
+	}
+	return stats, nil
 }
 
 func (s *PostgresStore) LatestAssistantMessageID(ctx context.Context, conversationID, knowledgeBaseID int64) (int64, error) {

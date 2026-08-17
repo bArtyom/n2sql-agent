@@ -63,6 +63,10 @@ func (s *storeStub) Search(_ context.Context, _ int64, query string, limit int) 
 	s.searchLimit = limit
 	return []conversation.Conversation{s.conversation}, nil
 }
+
+func (s *storeStub) FeedbackStats(context.Context, int64) (conversation.FeedbackStats, error) {
+	return conversation.FeedbackStats{Total: 2, Positive: 1, Negative: 1, PositiveRate: 0.5}, nil
+}
 func (s *storeStub) ListPage(_ context.Context, _ int64, limit, offset int) ([]conversation.Conversation, bool, error) {
 	return []conversation.Conversation{s.conversation}, offset == 0 && limit < 2, nil
 }
@@ -342,6 +346,20 @@ func TestServiceRejectsInvalidConversationInputs(t *testing.T) {
 	}
 	if err := service.SaveExchange(context.Background(), 0, "问题", "答案"); !errors.Is(err, conversation.ErrInvalidConversation) {
 		t.Fatalf("SaveExchange() error = %v, want invalid conversation", err)
+	}
+}
+
+func TestServiceFeedbackStats(t *testing.T) {
+	service := conversation.NewService(&storeStub{})
+	stats, err := service.FeedbackStats(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("FeedbackStats() error = %v", err)
+	}
+	if stats.Total != 2 || stats.Positive != 1 || stats.Negative != 1 || stats.PositiveRate != 0.5 {
+		t.Fatalf("FeedbackStats() = %+v, want 2 total, 1 positive, 1 negative, 0.5 rate", stats)
+	}
+	if _, err := service.FeedbackStats(context.Background(), 0); !errors.Is(err, conversation.ErrInvalidKnowledgeBase) {
+		t.Fatalf("invalid knowledge base error = %v, want ErrInvalidKnowledgeBase", err)
 	}
 }
 
