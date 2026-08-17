@@ -609,7 +609,7 @@ func untrustedToolResult(content string) string {
 	return "UNTRUSTED_TOOL_RESULT\n" + string(payload)
 }
 
-func TestEngineFailsWhenModelRequestsUnknownTool(t *testing.T) {
+func TestEngineFeedsUnknownToolBackToModelUntilMaxSteps(t *testing.T) {
 	chat := chatStub{call: func(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 		return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
 			ID:   "call-missing",
@@ -626,14 +626,14 @@ func TestEngineFailsWhenModelRequestsUnknownTool(t *testing.T) {
 	}
 
 	result, err := engine.Run(context.Background(), "run-unknown-tool", []modelclient.ChatMessage{{Role: "user", Content: "hello"}})
-	if !errors.Is(err, agent.ErrToolNotFound) {
-		t.Fatalf("Run() error = %v, want ErrToolNotFound", err)
+	if !errors.Is(err, agentruntime.ErrMaxStepsExceeded) {
+		t.Fatalf("Run() error = %v, want ErrMaxStepsExceeded", err)
 	}
 	if result.Run.Status() != agent.RunFailed {
 		t.Fatalf("run status = %s, want failed", result.Run.Status())
 	}
-	if got := result.Run.Stats().FailureCategory; got != agent.FailureTool {
-		t.Fatalf("run failure category = %q, want %q", got, agent.FailureTool)
+	if got := result.Run.Stats().FailureCategory; got != agent.FailureStepLimit {
+		t.Fatalf("run failure category = %q, want %q", got, agent.FailureStepLimit)
 	}
 }
 
@@ -693,21 +693,29 @@ func TestEngineCancelsBeforeCallingModelWhenContextIsCanceled(t *testing.T) {
 	}
 }
 
-func TestEngineFailsWhenToolExecutionFails(t *testing.T) {
+func TestEngineFeedsToolExecutionFailureBackToModel(t *testing.T) {
 	wantErr := errors.New("search unavailable")
 	registry := agent.NewToolRegistry()
 	if err := registry.Register(&toolStub{err: wantErr}); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
-	chat := chatStub{call: func(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
-		return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
-			ID:   "call-failed",
-			Type: "function",
-			Function: modelclient.ToolCallFunction{
-				Name:      "knowledge_search",
-				Arguments: `{}`,
-			},
-		}}}, nil
+	modelCalls := 0
+	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		modelCalls++
+		if modelCalls == 1 {
+			return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+				ID:   "call-failed",
+				Type: "function",
+				Function: modelclient.ToolCallFunction{
+					Name:      "knowledge_search",
+					Arguments: `{}`,
+				},
+			}}}, nil
+		}
+		if len(messages) < 3 || messages[len(messages)-1].Role != "tool" || !strings.Contains(messages[len(messages)-1].Content, wantErr.Error()) {
+			t.Fatalf("model did not receive tool failure: %#v", messages)
+		}
+		return modelclient.ChatResponse{Message: "暂时无法完成检索。"}, nil
 	}}
 	engine, err := agentruntime.NewEngine(chat, registry, 2)
 	if err != nil {
@@ -715,11 +723,11 @@ func TestEngineFailsWhenToolExecutionFails(t *testing.T) {
 	}
 
 	result, err := engine.Run(context.Background(), "run-tool-failure", []modelclient.ChatMessage{{Role: "user", Content: "hello"}})
-	if !errors.Is(err, wantErr) {
-		t.Fatalf("Run() error = %v, want wrapped tool error", err)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
 	}
-	if result.Run.Status() != agent.RunFailed {
-		t.Fatalf("run status = %s, want failed", result.Run.Status())
+	if result.Run.Status() != agent.RunSucceeded || modelCalls != 2 {
+		t.Fatalf("run status=%s model_calls=%d, want succeeded and 2 calls", result.Run.Status(), modelCalls)
 	}
 }
 
@@ -747,9 +755,7 @@ func TestEngineFeedsRecoverableToolFailureBackToModel(t *testing.T) {
 		}
 		return modelclient.ChatResponse{Message: "我会改写查询后再尝试。"}, nil
 	}}
-	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 2, agentruntime.EngineOptions{
-		MaxToolFailureRecovery: 1,
-	})
+	engine, err := agentruntime.NewEngine(chat, registry, 2)
 	if err != nil {
 		t.Fatalf("NewEngineWithOptions() error = %v", err)
 	}

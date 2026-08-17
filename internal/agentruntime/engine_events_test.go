@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -243,10 +244,10 @@ func TestEngineRunWithEventsEmitsFailureAndCancellation(t *testing.T) {
 		failedEvents = append(failedEvents, event)
 		return nil
 	})
-	if !errors.Is(err, agent.ErrToolNotFound) {
-		t.Fatalf("RunWithEvents() error = %v, want ErrToolNotFound", err)
+	if !errors.Is(err, agentruntime.ErrMaxStepsExceeded) {
+		t.Fatalf("RunWithEvents() error = %v, want ErrMaxStepsExceeded", err)
 	}
-	assertEventTypes(t, failedEvents, agent.EventRunStarted, agent.EventToolCalled, agent.EventRunFailed)
+	assertEventTypes(t, failedEvents, agent.EventRunStarted, agent.EventToolCalled, agent.EventToolFinished, agent.EventRunFailed)
 
 	toolErr := errors.New("search unavailable")
 	toolRegistry := agent.NewToolRegistry()
@@ -271,15 +272,15 @@ func TestEngineRunWithEventsEmitsFailureAndCancellation(t *testing.T) {
 		toolFailureEvents = append(toolFailureEvents, event)
 		return nil
 	})
-	if !errors.Is(err, toolErr) {
-		t.Fatalf("RunWithEvents() error = %v, want tool error", err)
+	if !errors.Is(err, agentruntime.ErrMaxStepsExceeded) {
+		t.Fatalf("RunWithEvents() error = %v, want ErrMaxStepsExceeded", err)
 	}
-	assertEventTypes(t, toolFailureEvents, agent.EventRunStarted, agent.EventToolCalled, agent.EventRunFailed)
-	toolFailureData, ok := toolFailureEvents[len(toolFailureEvents)-1].Data.(map[string]any)
-	if !ok || toolFailureData["error"] != "知识库工具暂时不可用，无法可靠回答。" {
-		t.Fatalf("tool failure event data = %#v, want safe public error", toolFailureEvents[len(toolFailureEvents)-1].Data)
+	assertEventTypes(t, toolFailureEvents, agent.EventRunStarted, agent.EventToolCalled, agent.EventToolFinished, agent.EventRunFailed)
+	toolFailureData, ok := toolFailureEvents[2].Data.(map[string]any)
+	if !ok || toolFailureData["failed"] != true || toolFailureData["result_summary"] != "工具调用失败，已反馈给模型。" {
+		t.Fatalf("tool failure event data = %#v, want failed tool summary", toolFailureEvents[2].Data)
 	}
-	if strings.Contains(toolFailureData["error"].(string), toolErr.Error()) {
+	if strings.Contains(fmt.Sprint(toolFailureData), toolErr.Error()) {
 		t.Fatalf("tool failure event leaked internal error: %#v", toolFailureData)
 	}
 
