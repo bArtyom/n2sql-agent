@@ -16,6 +16,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/handler"
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
 	"github.com/bArtyom/n2sql-agent/internal/mcp"
+	"github.com/bArtyom/n2sql-agent/internal/memory"
 	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
@@ -53,6 +54,7 @@ type Dependencies struct {
 	AgentMaxHistoryBytes       int
 	FollowUpSuggestions        followup.Suggester
 	DocumentSummary            *documentsummary.Service
+	Memories                   memory.Store
 	APIKeyEnvVar               string
 	Metrics                    *metrics.Registry
 }
@@ -88,6 +90,12 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("PATCH /api/knowledge-bases/{id}/conversations/{conversationId}", conversationHandler)
 		mux.Handle("DELETE /api/knowledge-bases/{id}/conversations/{conversationId}", conversationHandler)
 		mux.Handle("DELETE /api/knowledge-bases/{id}/conversations/{conversationId}/messages", conversationHandler)
+	}
+	if dependencies.Memories != nil {
+		memoriesHandler := handler.NewMemories(dependencies.Memories)
+		mux.Handle("GET /api/knowledge-bases/{id}/memories", memoriesHandler)
+		mux.Handle("POST /api/knowledge-bases/{id}/memories", memoriesHandler)
+		mux.Handle("DELETE /api/knowledge-bases/{id}/memories/{memoryID}", memoriesHandler)
 	}
 	if dependencies.Documents != nil {
 		mux.Handle("POST /api/knowledge-bases/{id}/documents", handler.NewDocumentUpload(dependencies.Documents))

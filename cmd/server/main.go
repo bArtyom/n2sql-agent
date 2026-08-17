@@ -24,6 +24,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
 	"github.com/bArtyom/n2sql-agent/internal/followup"
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
+	"github.com/bArtyom/n2sql-agent/internal/memory"
 	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
@@ -46,6 +47,7 @@ func main() {
 
 	providerStore := modelprovider.NewPostgresStore(db)
 	conversationService := conversation.NewService(conversation.NewPostgresStore(db))
+	memoryStore := memory.NewPostgresStore(db)
 	knowledgeBaseStore := knowledgebase.NewPostgresStore(db)
 	documentStore := document.NewPostgresStore(db)
 	modelClient := modelclient.NewHTTPClient(&http.Client{Timeout: cfg.ModelProviderTimeout}, cfg.ModelProviderAllowedHosts)
@@ -143,6 +145,7 @@ func main() {
 			MCPDocuments:               documentService,
 			MCPKnowledgeBases:          knowledgeBaseService,
 			Conversations:              conversationService,
+			Memories:                   memoryStore,
 			AgentMaxToolResultBytes:    cfg.AgentMaxToolResultBytes,
 			AgentMaxHistoryBytes:       cfg.AgentMaxHistoryBytes,
 			FollowUpSuggestions:        followUpService,
