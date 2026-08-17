@@ -21,11 +21,12 @@
 
 ## 当前代码状态
 
-- 最新提交：`25f0c03 feat: add agent tool approval flow`（前置功能提交为 `425c01f`、`d2ecd96`、`817a943`）。
+- 最新提交：`075c57d feat: track async summary progress in chat`；Agent/RAG 主线最近完成异步文档摘要、摘要状态查询，以及 pending 工具结果短路，避免模型重复调用异步工具。
 - 当前工作区在该提交后保持干净。
 - 第一阶段知识库问答底座已完成：知识库、文档上传和 Worker、Markdown/TXT/PDF 提取、OCR 最小骨架、父子 chunk、embedding、混合检索、Rerank、引用和普通 RAG/SSE。
 - Agent Runtime 最小闭环已完成：Tool Registry、Function Calling、受限 ReAct、最大步数/超时/取消、工具失败安全降级、SSE 事件、上下文摘要、会话历史、幂等和运行摘要。
 - Agent 只读工具已覆盖 `knowledge_search`、`document_list`、`document_info`、`document_read`；文档正文读取受知识库、文档、chunk 数量和字节数限制。
+- 异步文档摘要工具 `document_summary` 已接入标准 Agent：后台生成时返回任务状态并立即结束本轮 Agent，不把 pending 占位结果再次交给模型，避免重复工具调用和步数超限；摘要完成后由后续提问读取缓存。
 - 检索已具备向量 + PostgreSQL 关键词、RRF 融合、关键词阈值、可选 Rerank、Query Rewrite、缓存、父块上下文去重、HNSW 和检索统计。
 - Multi-Agent、只读 MCP 和 PostgreSQL 持久化 A2A 已有最小可运行适配；它们不是完整官方协议或生产级多租户方案。
 - 前端已支持会话、引用卡片与懒加载原文、检索统计、Agent 工具轨迹折叠、断线恢复、A2A/协作研究模式、正文分页预览、固定起步问题和按需生成追问建议。

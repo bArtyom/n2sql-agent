@@ -315,6 +315,12 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			if err := emitter.emit(agent.EventToolFinished, len(run.Steps()), toolFinishedData); err != nil {
 				return finishError(result, err)
 			}
+			// A pending tool has handed work to another asynchronous worker. Do
+			// not send the placeholder back to the model: doing so can cause the
+			// model to call the same tool repeatedly while the task is running.
+			if pending, _ := toolResult.Metadata["pending"].(bool); pending {
+				return completeWithAnswer(result, emitter, toolResult.Content)
+			}
 			toolContent, err := markUntrustedToolResult(toolResult.Content)
 			if err != nil {
 				return finishErrorWithEvents(result, err, emitter)

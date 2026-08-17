@@ -92,6 +92,44 @@ func TestEngineRefusesWhenToolHasNoRelevantKnowledge(t *testing.T) {
 	}
 }
 
+func TestEngineStopsAfterPendingToolResult(t *testing.T) {
+	tool := &toolStub{
+		content:  "文档摘要正在后台生成，请稍后再次询问。",
+		metadata: map[string]any{"pending": true, "task_id": "summary-task-1"},
+	}
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(tool); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	modelCalls := 0
+	chat := chatStub{call: func(context.Context, []modelclient.ChatMessage, []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		modelCalls++
+		return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+			ID:   "summary-call-1",
+			Type: "function",
+			Function: modelclient.ToolCallFunction{
+				Name:      "knowledge_search",
+				Arguments: `{}`,
+			},
+		}}}, nil
+	}}
+	engine, err := agentruntime.NewEngine(chat, registry, 3)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	result, err := engine.Run(context.Background(), "run-pending-tool", []modelclient.ChatMessage{{Role: "user", Content: "总结文档"}})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Run.Status() != agent.RunSucceeded || result.Run.FinalAnswer() != tool.content {
+		t.Fatalf("run status = %s, answer = %q", result.Run.Status(), result.Run.FinalAnswer())
+	}
+	if modelCalls != 1 {
+		t.Fatalf("model calls = %d, want 1 after pending tool result", modelCalls)
+	}
+}
+
 func TestEngineReturnsModelAnswerWithoutToolCall(t *testing.T) {
 	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, definitions []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 		if len(messages) != 1 || messages[0].Content != "年假怎么计算？" {
