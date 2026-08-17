@@ -492,6 +492,7 @@ func (r *AutonomousKnowledgeSearchResearcher) ResearchWithEventsAndSearchOptions
 	}
 	engine, err := agentruntime.NewEngineWithOptions(r.chat, registry, r.maxSteps, agentruntime.EngineOptions{
 		ContinueAfterNoRelevant: true,
+		AllowRepeatedToolCalls:  true,
 	})
 	if err != nil {
 		return ResearchReport{}, fmt.Errorf("create research agent engine: %w", err)

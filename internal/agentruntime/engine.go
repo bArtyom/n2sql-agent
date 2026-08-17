@@ -49,6 +49,7 @@ type Engine struct {
 	continueAfterNoRelevant bool
 	approvalGate            func(context.Context, string, json.RawMessage) (bool, error)
 	contextSummarizer       modelruntime.MessageChatRunner
+	allowRepeatedToolCalls  bool
 }
 
 // EngineOptions controls bounded loop behavior without changing the default
@@ -63,6 +64,10 @@ type EngineOptions struct {
 	// ContextSummarizer optionally turns older Agent messages into a short
 	// memory block when the in-run context exceeds its byte budget.
 	ContextSummarizer modelruntime.MessageChatRunner
+	// AllowRepeatedToolCalls lets a caller-owned tool decide how to handle a
+	// repeated call. It is useful for tools that return a structured duplicate
+	// result so the model can see the reason and choose the next action.
+	AllowRepeatedToolCalls bool
 }
 
 // ApprovalGate is called immediately before a tool is executed. Returning
@@ -119,6 +124,7 @@ func NewEngineWithOptions(chat modelruntime.ToolChatRunner, registry *agent.Tool
 		continueAfterNoRelevant: options.ContinueAfterNoRelevant,
 		approvalGate:            options.ApprovalGate,
 		contextSummarizer:       options.ContextSummarizer,
+		allowRepeatedToolCalls:  options.AllowRepeatedToolCalls,
 	}, nil
 }
 
@@ -245,7 +251,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				return addToolFailureWithEvents(result, toolCall.Function.Name, err, emitter)
 			}
 			callKey := normalizedToolCallKey(toolCall.Function.Name, toolCall.Function.Arguments)
-			if _, repeated := seenToolCalls[callKey]; repeated {
+			if _, repeated := seenToolCalls[callKey]; repeated && !e.allowRepeatedToolCalls {
 				return completeWithAnswer(result, emitter, "已检测到模型重复调用相同工具和参数，本轮已安全停止，避免重复检索。")
 			}
 			seenToolCalls[callKey] = struct{}{}
