@@ -12,7 +12,6 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
-	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
@@ -66,7 +65,7 @@ type Service struct {
 	historySummarizer  HistorySummarizer
 	documents          document.Reader
 	chunks             documentchunk.Reader
-	documentSummary    *documentsummary.Service
+	documentSummary    agent.DocumentSummaryRequester
 	sequence           atomic.Uint64
 }
 
@@ -103,7 +102,7 @@ func NewServiceWithLimitsAndSummarizerAndDocumentsAndChunks(chat modelruntime.To
 	return NewServiceWithLimitsAndSummarizerAndDocumentsAndChunksAndSummary(chat, searcher, maxSteps, timeout, maxToolResultBytes, maxHistoryMessages, maxHistoryBytes, historySummarizer, documents, chunks, nil)
 }
 
-func NewServiceWithLimitsAndSummarizerAndDocumentsAndChunksAndSummary(chat modelruntime.ToolChatRunner, searcher retrieval.Searcher, maxSteps int, timeout time.Duration, maxToolResultBytes, maxHistoryMessages, maxHistoryBytes int, historySummarizer HistorySummarizer, documents document.Reader, chunks documentchunk.Reader, documentSummary *documentsummary.Service) (*Service, error) {
+func NewServiceWithLimitsAndSummarizerAndDocumentsAndChunksAndSummary(chat modelruntime.ToolChatRunner, searcher retrieval.Searcher, maxSteps int, timeout time.Duration, maxToolResultBytes, maxHistoryMessages, maxHistoryBytes int, historySummarizer HistorySummarizer, documents document.Reader, chunks documentchunk.Reader, documentSummary agent.DocumentSummaryRequester) (*Service, error) {
 	if chat == nil || searcher == nil {
 		return nil, ErrInvalidService
 	}

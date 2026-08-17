@@ -8,7 +8,6 @@ import (
 
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
-	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 )
 
@@ -204,7 +203,7 @@ func NewKnowledgeSearchAndDocumentReadRegistry(
 	return newKnowledgeSearchAndDocumentRegistry(searcher, reader, chunkReader, nil, knowledgeBaseID, maxResultBytes, maxResults, maxDistance, keywordThreshold, documentIDs, queryRewrite)
 }
 
-func NewKnowledgeSearchAndDocumentReadRegistryWithSummary(searcher retrieval.Searcher, reader document.Reader, chunkReader documentchunk.Reader, summary *documentsummary.Service, knowledgeBaseID int64, maxResultBytes, maxResults int, maxDistance, keywordThreshold float64, documentIDs []int64, queryRewrite bool) (*ToolRegistry, error) {
+func NewKnowledgeSearchAndDocumentReadRegistryWithSummary(searcher retrieval.Searcher, reader document.Reader, chunkReader documentchunk.Reader, summary DocumentSummaryRequester, knowledgeBaseID int64, maxResultBytes, maxResults int, maxDistance, keywordThreshold float64, documentIDs []int64, queryRewrite bool) (*ToolRegistry, error) {
 	return newKnowledgeSearchAndDocumentRegistry(searcher, reader, chunkReader, summary, knowledgeBaseID, maxResultBytes, maxResults, maxDistance, keywordThreshold, documentIDs, queryRewrite)
 }
 
@@ -212,7 +211,7 @@ func newKnowledgeSearchAndDocumentRegistry(
 	searcher retrieval.Searcher,
 	reader document.Reader,
 	chunkReader documentchunk.Reader,
-	summary *documentsummary.Service,
+	summary DocumentSummaryRequester,
 	knowledgeBaseID int64,
 	maxResultBytes, maxResults int,
 	maxDistance, keywordThreshold float64,

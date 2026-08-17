@@ -23,13 +23,17 @@ type documentSummaryInput struct {
 }
 
 type DocumentSummaryTool struct {
-	service         *documentsummary.Service
+	service         DocumentSummaryRequester
 	knowledgeBaseID int64
+}
+
+type DocumentSummaryRequester interface {
+	Start(context.Context, int64, int64) (documentsummary.AsyncResult, error)
 }
 
 var _ Tool = (*DocumentSummaryTool)(nil)
 
-func NewDocumentSummaryToolForKnowledgeBase(service *documentsummary.Service, knowledgeBaseID int64) (*DocumentSummaryTool, error) {
+func NewDocumentSummaryToolForKnowledgeBase(service DocumentSummaryRequester, knowledgeBaseID int64) (*DocumentSummaryTool, error) {
 	if service == nil {
 		return nil, ErrDocumentReaderUnavailable
 	}
@@ -54,9 +58,12 @@ func (t *DocumentSummaryTool) Call(ctx context.Context, raw json.RawMessage) (To
 	if err := decodeToolArguments(raw, &input); err != nil || input.DocumentID <= 0 {
 		return ToolResult{}, fmt.Errorf("%w: decode document_id", ErrInvalidDocumentSummaryInput)
 	}
-	result, err := t.service.Summarize(ctx, t.knowledgeBaseID, input.DocumentID)
+	result, err := t.service.Start(ctx, t.knowledgeBaseID, input.DocumentID)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("summarize document %d: %w", input.DocumentID, err)
+	}
+	if result.Pending {
+		return ToolResult{Content: fmt.Sprintf("文档摘要正在后台生成，任务 ID：%s。请稍后再次询问该文档，生成完成后将直接返回缓存摘要。", result.TaskID), Metadata: map[string]any{"document_summary": true, "pending": true, "task_id": result.TaskID}}, nil
 	}
 	return ToolResult{Content: result.Content, Metadata: map[string]any{"document_summary": true, "cached": result.Cached}}, nil
 }

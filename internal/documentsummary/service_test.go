@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
@@ -79,5 +80,26 @@ func TestServiceUsesBoundedMapReduceForLongDocuments(t *testing.T) {
 	result, err := service.Summarize(context.Background(), 7, 9)
 	if err != nil || result.Content == "" || chat.calls < 2 {
 		t.Fatalf("long summary = %#v, error = %v, calls=%d", result, err, chat.calls)
+	}
+}
+
+func TestAsyncServiceQueuesSummaryWithoutWaitingForModel(t *testing.T) {
+	store := &storeStub{}
+	service := documentsummary.NewService(sourceStub{document: documentsummary.Document{Chunks: []string{"正文"}}}, store, &chatStub{}, 1000)
+	async := documentsummary.NewAsyncService(service, 1)
+	workerContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	async.Run(workerContext)
+
+	result, err := async.Start(context.Background(), 7, 9)
+	if err != nil || !result.Pending || result.TaskID == "" {
+		t.Fatalf("queued result = %#v, error = %v", result, err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && store.status != "succeeded" {
+		time.Sleep(time.Millisecond)
+	}
+	if store.status != "succeeded" {
+		t.Fatalf("summary status = %q, want succeeded", store.status)
 	}
 }

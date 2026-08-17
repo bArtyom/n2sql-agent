@@ -83,6 +83,8 @@ func main() {
 	runner := worker.NewRunnerWithMetricsAndInvalidator(worker.NewPostgresStore(db), processor, metricsRegistry, searchService)
 	answerService := rag.NewService(searchService, chatService)
 	documentSummaryService := documentsummary.NewService(chunkStore, documentStore, chatService, cfg.DocumentSummaryInputChars)
+	documentSummaryAsync := documentsummary.NewAsyncService(documentSummaryService, 1)
+	documentSummaryAsync.Run(context.Background())
 	var historySummarizer agentservice.HistorySummarizer
 	if cfg.AgentHistorySummaryEnabled {
 		historySummarizer = agentservice.NewModelHistorySummarizerWithTimeout(chatService, cfg.AgentHistorySummaryTimeout)
@@ -98,7 +100,7 @@ func main() {
 		historySummarizer,
 		documentService,
 		chunkStore,
-		documentSummaryService,
+		documentSummaryAsync,
 	)
 	if err != nil {
 		log.Fatal(err)
