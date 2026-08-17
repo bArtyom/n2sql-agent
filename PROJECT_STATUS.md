@@ -47,6 +47,7 @@
 - 最新 @ 文档选择切片：聊天输入框输入 `@` 可按文件名搜索并选择已完成文档，已选文档以 chip 展示并可移除；发送时复用已有 `document_ids` 检索范围参数。
 - 最新模型设置稳定性修复：模型服务设置面板不再因误触遮罩层而关闭，只能通过右上角关闭按钮或 Esc 退出，避免填写配置时丢失输入。
 - 最新本地 Embedding 切片：支持通过 `LOCAL_EMBEDDING_BASE_URL`、`LOCAL_EMBEDDING_MODEL` 和 `LOCAL_EMBEDDING_API_KEY` 将文档/查询向量化切换到本地 OpenAI-compatible 服务；聊天仍使用远程 Provider，未配置时保持原有行为。
+- 前端模型服务设置已隐藏嵌入模型输入框：Embedding 由后端本地环境变量控制，保留旧字段仅用于数据库和接口兼容。
 
 ## 明确后置或不做
 

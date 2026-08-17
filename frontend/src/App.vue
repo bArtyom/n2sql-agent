@@ -336,7 +336,9 @@ function emptyModelProvider(): ModelProvider {
     apiKeyEnvVar: "OPENAI_API_KEY",
     chatModel: "",
     chatModels: [],
-    embeddingModel: "",
+    // Kept only for compatibility with the existing backend/database field.
+    // Embedding is configured through LOCAL_EMBEDDING_* in .env.
+    embeddingModel: "local",
     rerankBaseUrl: "",
     rerankModel: "",
     enabled: true,
@@ -756,9 +758,9 @@ function closeProviderSettings() {
 
 async function saveProvider() {
   const form = providerForm.value;
-  if (!form.name.trim() || !form.baseUrl.trim() || !form.chatModel.trim() || !form.embeddingModel.trim()) {
+  if (!form.name.trim() || !form.baseUrl.trim() || !form.chatModel.trim()) {
     providerMessageKind.value = "error";
-    providerMessage.value = "名称、Base URL、聊天模型和嵌入模型都需要填写。";
+    providerMessage.value = "名称、Base URL 和聊天模型都需要填写。";
     return;
   }
   providerSaving.value = true;
@@ -769,6 +771,9 @@ async function saveProvider() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         ...form,
+        // The API still accepts the legacy field, but users no longer need to
+        // configure it because local embedding is selected by the backend.
+        embeddingModel: form.embeddingModel.trim() || "local",
         apiKeyEnvVar: form.apiKeyEnvVar,
         chatModels: providerChatModelsText.value.split(",").map((item) => item.trim()).filter(Boolean),
       }),
@@ -2776,13 +2781,11 @@ onUnmounted(() => {
         </header>
         <div v-if="providerLoading" class="settings-loading">正在读取当前配置…</div>
         <form v-else class="settings-form" @submit.prevent="saveProvider">
-          <p class="settings-intro">告诉文库该去哪里寻找聊天和嵌入能力。密钥始终留在后端环境变量里。</p>
+          <p class="settings-intro">告诉文库该去哪里寻找聊天能力。Embedding 使用后端配置的本地模型，密钥始终留在后端环境变量里。</p>
           <label>服务名称<input v-model="providerForm.name" type="text" placeholder="例如：OpenAI" maxlength="120" required /></label>
           <label>Base URL<input v-model="providerForm.baseUrl" type="url" placeholder="https://api.openai.com/v1" required /></label>
-          <div class="settings-two-column">
-            <label>聊天模型<input v-model="providerForm.chatModel" type="text" placeholder="例如：gpt-4o-mini" required /></label>
-            <label>嵌入模型<input v-model="providerForm.embeddingModel" type="text" placeholder="例如：text-embedding-3-small" required /></label>
-          </div>
+          <label>聊天模型<input v-model="providerForm.chatModel" type="text" placeholder="例如：gpt-4o-mini" required /></label>
+          <p class="settings-help settings-embedding-note">Embedding 已切换为后端本地模型，不需要在这里配置。</p>
           <label>可选聊天模型<input v-model="providerChatModelsText" type="text" placeholder="用逗号分隔，例如：gpt-4o-mini,qwen-plus" maxlength="3200" /><small class="settings-help">会话选择器只显示这里配置的模型；默认聊天模型会自动保留。</small></label>
           <div class="settings-two-column">
             <label>Rerank Base URL（可选）<input v-model="providerForm.rerankBaseUrl" type="url" placeholder="例如：https://…/compatible-api/v1" /></label>

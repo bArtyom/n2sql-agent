@@ -77,7 +77,7 @@ LOCAL_EMBEDDING_API_KEY=ollama
 MODEL_PROVIDER_ALLOWED_HOSTS=api.deepseek.com,127.0.0.1
 ```
 
-留空这三个变量时，项目继续使用模型服务设置页配置的远程 Embedding。切换 Embedding 模型后，需要重新上传文档或重新建立索引；不同 Embedding 模型的向量不能混用。
+留空这三个变量时，项目才会回退到模型服务设置页保存的远程 Embedding 配置。当前前端已不再展示嵌入模型输入框；如果使用本地模型，切换 Embedding 模型后，需要重新上传文档或重新建立索引，不同模型的向量不能混用。
 
 ```sh
 cp .env.example .env
@@ -122,7 +122,7 @@ curl -X POST http://localhost:8080/api/knowledge-bases/1/documents \
 
 删除文档使用 `DELETE /api/knowledge-bases/{id}/documents/{documentID}`。服务端会确认文档属于当前管理员和指定知识库，删除数据库记录及其处理任务、父子 chunk，并清理该知识库的检索缓存。仍在 `pending` 或 `processing` 状态的文档暂不允许删除，会返回 `409`；原始文件清理失败会记录后端日志，但不会把已删除的文档重新暴露给应用。
 
-工作台左侧底部的“模型服务设置”可以读取和保存 Provider 的服务名称、Base URL、聊天模型、可选聊天模型列表、嵌入模型，以及可选的 Rerank Base URL 和 Rerank 模型，并发起连接测试。API Key 不在页面输入，仍只需要写入后端 `.env` 的 `OPENAI_API_KEY`。标准 Agent 会话顶部可以从服务端配置的聊天模型列表中切换回答模型，选择会保存到当前会话；Embedding、Rerank、协作研究和 A2A 继续使用现有默认配置。Rerank 两项同时填写时，混合召回会先扩大候选集，再调用 `qwen3-rerank` 重排；留空则不调用第二个模型。
+工作台左侧底部的“模型服务设置”可以读取和保存 Provider 的服务名称、Base URL、聊天模型、可选聊天模型列表，以及可选的 Rerank Base URL 和 Rerank 模型，并发起连接测试。Embedding 由后端 `.env` 中的本地配置控制，前端不再要求填写嵌入模型；API Key 也不在页面输入，仍只需要写入后端 `.env`。标准 Agent 会话顶部可以从服务端配置的聊天模型列表中切换回答模型，选择会保存到当前会话。Rerank 两项同时填写时，混合召回会先扩大候选集，再调用 `qwen3-rerank` 重排；留空则不调用第二个模型。
 
 模型服务配置保存后，可调用 `POST http://localhost:8080/api/model-provider/connection-test` 检查连通性。该请求会从 `.env` 指定的环境变量（默认示例为 `OPENAI_API_KEY`）读取密钥，并向模型服务的 `{baseUrl}/models` 发起认证请求；密钥不会写入 PostgreSQL 或接口响应。
 
@@ -134,7 +134,7 @@ curl -X POST http://localhost:8080/api/knowledge-bases/1/documents \
 {"input":["需要转成向量的文本"]}
 ```
 
-它使用已保存的 `embeddingModel` 调用 `{baseUrl}/embeddings` 并返回向量。该接口仅用于本地开发验证；调用真实模型服务可能产生费用。
+它使用本地 Embedding 配置（未配置时回退到已保存的 `embeddingModel`）调用 `/embeddings` 并返回向量。该接口仅用于本地开发验证；调用真实模型服务可能产生费用。
 
 知识库语义检索使用 `POST http://localhost:8080/api/knowledge-bases/{id}/search`，请求体示例：
 
