@@ -28,6 +28,11 @@ var (
 	ErrRepeatedToolCall  = errors.New("repeated identical agent tool call")
 )
 
+const (
+	maxModelCallRetries = 2
+	modelRetryDelay     = 50 * time.Millisecond
+)
+
 const untrustedToolResultPrefix = "UNTRUSTED_TOOL_RESULT\n"
 
 const (
@@ -184,7 +189,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 		if err := run.RecordModelCall(); err != nil {
 			return finishErrorWithEvents(result, err, emitter)
 		}
-		response, err := e.chat.ChatMessagesWithTools(ctx, conversation, definitions)
+		response, err := e.chatWithRetry(ctx, conversation, definitions)
 		if err != nil {
 			if stepErr := run.AddStep(agent.Step{Kind: agent.StepModelDecision, Status: agent.StepFailed}); stepErr != nil {
 				return finishErrorWithEvents(result, stepErr, emitter)
@@ -394,6 +399,55 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 	}
 
 	return finishErrorWithCategory(result, ErrMaxStepsExceeded, agent.FailureStepLimit, emitter)
+}
+
+func (e *Engine) chatWithRetry(ctx context.Context, conversation []modelclient.ChatMessage, definitions []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+	var response modelclient.ChatResponse
+	var err error
+	for attempt := 0; attempt <= maxModelCallRetries; attempt++ {
+		response, err = e.chat.ChatMessagesWithTools(ctx, conversation, definitions)
+		if err == nil || !retryableModelError(ctx, err) || attempt == maxModelCallRetries {
+			return response, err
+		}
+		timer := time.NewTimer(modelRetryDelay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return modelclient.ChatResponse{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return response, err
+}
+
+func retryableModelError(ctx context.Context, err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"timeout",
+		"connection reset",
+		"connection refused",
+		"broken pipe",
+		"temporary",
+		"unexpected eof",
+		"http 408",
+		"http 409",
+		"http 425",
+		"http 429",
+		"http 500",
+		"http 502",
+		"http 503",
+		"http 504",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // compactConversation protects the model context during one Agent run. The

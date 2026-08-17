@@ -357,6 +357,46 @@ func minInt(left, right int) int {
 	return right
 }
 
+func TestEngineRetriesTransientModelFailure(t *testing.T) {
+	modelCalls := 0
+	chat := chatStub{call: func(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		modelCalls++
+		if modelCalls == 1 {
+			return modelclient.ChatResponse{}, errors.New("chat endpoint returned HTTP 429")
+		}
+		return modelclient.ChatResponse{Message: "重试后得到答案"}, nil
+	}}
+	engine, err := agentruntime.NewEngine(chat, agent.NewToolRegistry(), 1)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	result, err := engine.Run(context.Background(), "run-model-retry", []modelclient.ChatMessage{{Role: "user", Content: "问题"}})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Response.Message != "重试后得到答案" || modelCalls != 2 {
+		t.Fatalf("answer=%q model_calls=%d, want retried answer and 2 calls", result.Response.Message, modelCalls)
+	}
+}
+
+func TestEngineDoesNotRetryAuthenticationFailure(t *testing.T) {
+	modelCalls := 0
+	chat := chatStub{call: func(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		modelCalls++
+		return modelclient.ChatResponse{}, errors.New("chat endpoint returned HTTP 401")
+	}}
+	engine, err := agentruntime.NewEngine(chat, agent.NewToolRegistry(), 1)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	_, err = engine.Run(context.Background(), "run-model-auth-failure", []modelclient.ChatMessage{{Role: "user", Content: "问题"}})
+	if err == nil || modelCalls != 1 {
+		t.Fatalf("Run() error=%v model_calls=%d, want one non-retried call", err, modelCalls)
+	}
+}
+
 func TestEngineReturnsModelAnswerWithoutToolCall(t *testing.T) {
 	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, definitions []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 		if len(messages) != 1 || messages[0].Content != "年假怎么计算？" {
