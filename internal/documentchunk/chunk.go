@@ -8,7 +8,61 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
 )
+
+// ReadSummaryContent returns ordered parent chunks for the dedicated document
+// summary pipeline. It intentionally bypasses Agent tool-step limits.
+func (s *PostgresStore) ReadSummaryContent(ctx context.Context, knowledgeBaseID, documentID int64) (documentsummary.Document, error) {
+	var filename string
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT d.original_filename FROM documents AS d
+		JOIN knowledge_bases AS kb ON kb.id = d.knowledge_base_id
+		WHERE d.id = $1 AND d.knowledge_base_id = $2
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, documentID, knowledgeBaseID).Scan(&filename); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return documentsummary.Document{}, ErrChunkNotFound
+		}
+		return documentsummary.Document{}, fmt.Errorf("read summary document: %w", err)
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT content FROM document_parent_chunks
+		WHERE document_id = $1 ORDER BY position`, documentID)
+	if err != nil {
+		return documentsummary.Document{}, fmt.Errorf("read summary parents: %w", err)
+	}
+	defer rows.Close()
+	chunks := make([]string, 0)
+	for rows.Next() {
+		var content string
+		if err := rows.Scan(&content); err != nil {
+			return documentsummary.Document{}, fmt.Errorf("scan summary parent: %w", err)
+		}
+		chunks = append(chunks, content)
+	}
+	if err := rows.Err(); err != nil {
+		return documentsummary.Document{}, fmt.Errorf("iterate summary parents: %w", err)
+	}
+	if len(chunks) == 0 {
+		rows, err := s.db.QueryContext(ctx, `SELECT content FROM document_chunks WHERE document_id = $1 ORDER BY position`, documentID)
+		if err != nil {
+			return documentsummary.Document{}, fmt.Errorf("read summary chunks: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var content string
+			if err := rows.Scan(&content); err != nil {
+				return documentsummary.Document{}, fmt.Errorf("scan summary chunk: %w", err)
+			}
+			chunks = append(chunks, content)
+		}
+		if err := rows.Err(); err != nil {
+			return documentsummary.Document{}, fmt.Errorf("iterate summary chunks: %w", err)
+		}
+	}
+	return documentsummary.Document{Filename: filename, Chunks: chunks}, nil
+}
 
 var ErrChunkNotFound = errors.New("document chunk not found")
 

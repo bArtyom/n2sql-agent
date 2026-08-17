@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -34,6 +35,9 @@ type Document struct {
 	SizeBytes        int64  `json:"sizeBytes"`
 	ProcessingStatus string `json:"processingStatus"`
 }
+
+// Summary is the cached, document-level summary generated on demand.
+type Summary = documentsummary.Summary
 
 type UploadInput struct {
 	KnowledgeBaseID  int64
@@ -214,6 +218,9 @@ func (s *LocalFileStore) Delete(ctx context.Context, storagePath string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Database paths use forward slashes on every platform. Normalize before
+	// validating so cleanup also works on Windows.
+	storagePath = filepath.FromSlash(storagePath)
 	if filepath.IsAbs(storagePath) || filepath.Clean(storagePath) != storagePath || filepath.Dir(storagePath) != "documents" {
 		return errors.New("invalid document storage path")
 	}
@@ -284,6 +291,66 @@ func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Docu
 		return nil, fmt.Errorf("iterate documents: %w", err)
 	}
 	return documents, nil
+}
+
+func (s *PostgresStore) GetSummary(ctx context.Context, knowledgeBaseID, documentID int64) (Summary, error) {
+	var summary Summary
+	err := s.db.QueryRowContext(ctx, `
+		SELECT d.summary, d.summary_status, COALESCE(d.summary_error, ''), d.summary_updated_at
+		FROM documents AS d
+		JOIN knowledge_bases AS kb ON kb.id = d.knowledge_base_id
+		WHERE d.id = $1 AND d.knowledge_base_id = $2
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, documentID, knowledgeBaseID).
+		Scan(&summary.Content, &summary.Status, &summary.Error, &summary.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Summary{}, ErrDocumentNotFound
+	}
+	if err != nil {
+		return Summary{}, fmt.Errorf("get document summary: %w", err)
+	}
+	return summary, nil
+}
+
+func (s *PostgresStore) MarkSummaryProcessing(ctx context.Context, knowledgeBaseID, documentID int64) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE documents AS d SET summary_status = 'processing', summary_error = NULL
+		FROM knowledge_bases AS kb
+		WHERE d.knowledge_base_id = kb.id AND d.id = $1 AND d.knowledge_base_id = $2
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, documentID, knowledgeBaseID)
+	if err != nil {
+		return fmt.Errorf("mark document summary processing: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return ErrDocumentNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) SaveSummary(ctx context.Context, knowledgeBaseID, documentID int64, content string) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE documents AS d SET summary = $3, summary_status = 'succeeded', summary_error = NULL, summary_updated_at = CURRENT_TIMESTAMP
+		FROM knowledge_bases AS kb
+		WHERE d.knowledge_base_id = kb.id AND d.id = $1 AND d.knowledge_base_id = $2
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, documentID, knowledgeBaseID, content)
+	if err != nil {
+		return fmt.Errorf("save document summary: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return ErrDocumentNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) SaveSummaryError(ctx context.Context, knowledgeBaseID, documentID int64, message string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE documents AS d SET summary_status = 'failed', summary_error = $3, summary_updated_at = CURRENT_TIMESTAMP
+		FROM knowledge_bases AS kb
+		WHERE d.knowledge_base_id = kb.id AND d.id = $1 AND d.knowledge_base_id = $2
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, documentID, knowledgeBaseID, message)
+	if err != nil {
+		return fmt.Errorf("save document summary error: %w", err)
+	}
+	return nil
 }
 
 func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Document, error) {

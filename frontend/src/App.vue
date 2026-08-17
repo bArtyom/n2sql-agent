@@ -18,6 +18,7 @@ type DocumentPreview = {
   nextPosition: number;
   truncated: boolean;
 };
+type DocumentSummary = { content: string; cached: boolean };
 type QuestionSuggestion = { id: string; text: string; category?: string };
 type Source = {
   documentId: number;
@@ -278,6 +279,8 @@ const sourceLoading = ref(false);
 const selectedDocument = ref<DocumentItem | null>(null);
 const documentPreview = ref<DocumentPreview | null>(null);
 const documentPreviewLoading = ref(false);
+const documentSummary = ref<DocumentSummary | null>(null);
+const documentSummaryLoading = ref(false);
 const documentPreviewPageSize = 8;
 const starterQuestions = computed(() => {
   const readyDocuments = documents.value.filter((document) => document.processingStatus === "succeeded");
@@ -545,6 +548,7 @@ async function openDocumentPreview(item: DocumentItem) {
   if (!selectedKnowledgeBaseId.value || item.processingStatus !== "succeeded") return;
   selectedDocument.value = item;
   documentPreview.value = null;
+  documentSummary.value = null;
   documentPreviewLoading.value = true;
   try {
     documentPreview.value = await requestJSON<DocumentPreview>(
@@ -555,6 +559,23 @@ async function openDocumentPreview(item: DocumentItem) {
     selectedDocument.value = null;
   } finally {
     documentPreviewLoading.value = false;
+  }
+}
+
+async function summarizeDocument(item: DocumentItem) {
+  const knowledgeBaseID = selectedKnowledgeBaseId.value;
+  if (!knowledgeBaseID || item.processingStatus !== "succeeded" || documentSummaryLoading.value) return;
+  documentSummaryLoading.value = true;
+  try {
+    documentSummary.value = await requestJSON<DocumentSummary>(
+      `/api/knowledge-bases/${knowledgeBaseID}/documents/${item.id}/summary`,
+      { method: "POST" },
+    );
+    selectedDocument.value = item;
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : "文档总结失败。";
+  } finally {
+    documentSummaryLoading.value = false;
   }
 }
 
@@ -587,6 +608,8 @@ function closeDocumentPreview() {
   selectedDocument.value = null;
   documentPreview.value = null;
   documentPreviewLoading.value = false;
+  documentSummary.value = null;
+  documentSummaryLoading.value = false;
 }
 
 function submitSuggestedQuestion(prompt: string) {
@@ -2450,6 +2473,14 @@ onUnmounted(() => {
                 @click="openDocumentPreview(document)"
               >查看</button>
               <button
+                v-if="document.processingStatus === 'succeeded'"
+                class="document-preview-button"
+                type="button"
+                :disabled="streaming || documentSummaryLoading"
+                title="总结全文"
+                @click="summarizeDocument(document)"
+              >{{ documentSummaryLoading ? "总结中…" : "总结" }}</button>
+              <button
                 class="document-delete"
                 type="button"
                 :disabled="streaming || deletingDocumentID !== null || ['pending', 'processing'].includes(document.processingStatus)"
@@ -2820,6 +2851,10 @@ onUnmounted(() => {
               <button class="source-copy-button" type="button" :disabled="documentPreviewLoading || streaming" @click="loadMoreDocumentPreview">{{ documentPreviewLoading ? "读取中…" : "继续读取" }}</button>
             </div>
           </template>
+          <section v-if="documentSummary" class="document-summary-card">
+            <div class="document-summary-heading"><strong>文档总结</strong><span>{{ documentSummary.cached ? "已缓存" : "刚刚生成" }}</span></div>
+            <p>{{ documentSummary.content }}</p>
+          </section>
         </div>
         <p class="source-panel-note">正文来自当前知识库已处理的 chunk，读取范围受权限和字节上限约束。</p>
       </aside>

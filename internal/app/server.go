@@ -11,6 +11,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
+	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
 	"github.com/bArtyom/n2sql-agent/internal/followup"
 	"github.com/bArtyom/n2sql-agent/internal/handler"
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
@@ -51,6 +52,7 @@ type Dependencies struct {
 	AgentMaxToolResultBytes    int
 	AgentMaxHistoryBytes       int
 	FollowUpSuggestions        followup.Suggester
+	DocumentSummary            *documentsummary.Service
 	APIKeyEnvVar               string
 	Metrics                    *metrics.Registry
 }
@@ -99,6 +101,9 @@ func New(dependencies Dependencies) http.Handler {
 	if dependencies.ChunkReader != nil {
 		mux.Handle("GET /api/knowledge-bases/{id}/documents/{documentID}/chunks/{position}", handler.NewDocumentChunk(dependencies.ChunkReader))
 		mux.Handle("GET /api/knowledge-bases/{id}/documents/{documentID}/preview", handler.NewDocumentPreview(dependencies.ChunkReader))
+	}
+	if dependencies.DocumentSummary != nil {
+		mux.Handle("POST /api/knowledge-bases/{id}/documents/{documentID}/summary", handler.NewDocumentSummary(dependencies.DocumentSummary))
 	}
 	if dependencies.Embeddings != nil {
 		mux.Handle("POST /api/model-provider/embedding-test", handler.NewModelProviderEmbeddingTest(dependencies.Embeddings))

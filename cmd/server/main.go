@@ -22,6 +22,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 	"github.com/bArtyom/n2sql-agent/internal/documentocr"
+	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
 	"github.com/bArtyom/n2sql-agent/internal/followup"
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
 	"github.com/bArtyom/n2sql-agent/internal/metrics"
@@ -82,6 +83,7 @@ func main() {
 	knowledgeBaseService := knowledgebase.NewServiceWithInvalidator(knowledgeBaseStore, fileStore, searchService)
 	runner := worker.NewRunnerWithMetricsAndInvalidator(worker.NewPostgresStore(db), processor, metricsRegistry, searchService)
 	answerService := rag.NewService(searchService, chatService)
+	documentSummaryService := documentsummary.NewService(chunkStore, documentStore, chatService, 12000)
 	var historySummarizer agentservice.HistorySummarizer
 	if cfg.AgentHistorySummaryEnabled {
 		historySummarizer = agentservice.NewModelHistorySummarizerWithTimeout(chatService, cfg.AgentHistorySummaryTimeout)
@@ -142,6 +144,7 @@ func main() {
 			AgentMaxToolResultBytes:    cfg.AgentMaxToolResultBytes,
 			AgentMaxHistoryBytes:       cfg.AgentMaxHistoryBytes,
 			FollowUpSuggestions:        followUpService,
+			DocumentSummary:            documentSummaryService,
 			APIKeyEnvVar:               cfg.ModelProviderAPIKeyEnvVar,
 			Metrics:                    metricsRegistry,
 		}),
