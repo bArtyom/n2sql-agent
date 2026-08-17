@@ -271,6 +271,8 @@ const similarityThreshold = ref(0.65);
 const queryRewrite = ref(false);
 const keywordThreshold = ref(0.10);
 const selectedDocumentIDs = ref<number[]>([]);
+const documentMentionOpen = ref(false);
+const documentMentionQuery = ref("");
 const selectedSource = ref<Source | null>(null);
 const sourceLoading = ref(false);
 const selectedDocument = ref<DocumentItem | null>(null);
@@ -1002,6 +1004,33 @@ function toChatMessage(message: ConversationMessage): ChatMessage {
     runID: message.metadata?.agent_trace?.run_id,
     mode: message.role === "assistant" ? "agent" : undefined,
   };
+}
+
+const documentMentionCandidates = computed(() => {
+  const query = documentMentionQuery.value.trim().toLowerCase();
+  return documents.value
+    .filter((document) => document.processingStatus === "succeeded")
+    .filter((document) => !query || document.originalFilename.toLowerCase().includes(query))
+    .slice(0, 8);
+});
+
+function updateDocumentMentionState() {
+  const match = question.value.match(/(?:^|\s)@([^\s@]*)$/);
+  documentMentionOpen.value = match !== null;
+  documentMentionQuery.value = match?.[1] ?? "";
+}
+
+function selectDocumentMention(document: DocumentItem) {
+  if (!selectedDocumentIDs.value.includes(document.id)) {
+    selectedDocumentIDs.value = [...selectedDocumentIDs.value, document.id];
+  }
+  question.value = question.value.replace(/(?:^|\s)@[^\s@]*$/, " ").trimStart();
+  documentMentionOpen.value = false;
+  documentMentionQuery.value = "";
+}
+
+function removeDocumentMention(documentID: number) {
+  selectedDocumentIDs.value = selectedDocumentIDs.value.filter((id) => id !== documentID);
 }
 
 async function refreshFeedbackStats() {
@@ -2685,7 +2714,20 @@ onUnmounted(() => {
             </div>
           </section>
           <form class="composer" @submit.prevent="askQuestion">
-            <textarea v-model="question" rows="2" :disabled="!selectedKnowledgeBase || streaming" placeholder="问问这套资料…" @keydown.enter.exact.prevent="askQuestion" />
+            <div v-if="selectedDocumentIDs.length" class="mention-chip-list" aria-label="已选择的检索文档">
+              <span v-for="documentID in selectedDocumentIDs" :key="documentID" class="mention-chip">
+                @{{ documents.find((document) => document.id === documentID)?.originalFilename || `文档 #${documentID}` }}
+                <button type="button" aria-label="移除文档范围" @click="removeDocumentMention(documentID)">×</button>
+              </span>
+            </div>
+            <div class="question-input-wrap">
+              <textarea v-model="question" rows="2" :disabled="!selectedKnowledgeBase || streaming" placeholder="问问这套资料… 输入 @ 选择文档" @input="updateDocumentMentionState" @keydown.enter.exact.prevent="askQuestion" />
+              <div v-if="documentMentionOpen && documentMentionCandidates.length" class="document-mention-menu" role="listbox" aria-label="选择检索文档">
+                <button v-for="document in documentMentionCandidates" :key="document.id" type="button" role="option" @mousedown.prevent="selectDocumentMention(document)">
+                  <strong>@{{ document.originalFilename }}</strong><small>仅检索此文档</small>
+                </button>
+              </div>
+            </div>
             <div v-if="chatMode === 'agent' && chatAttachments.length" class="attachment-draft-list" aria-label="待发送附件">
               <div v-for="(attachment, attachmentIndex) in chatAttachments" :key="`${attachment.filename}-${attachmentIndex}`" class="attachment-draft">
                 <img v-if="attachment.dataURL?.startsWith('data:image/')" :src="attachment.dataURL" :alt="attachment.filename" />

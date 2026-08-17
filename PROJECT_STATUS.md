@@ -44,6 +44,7 @@
 - 最新答案反馈切片：新增 `conversation_message_feedback` 表和消息级 `POST /api/knowledge-bases/{id}/conversations/{conversationId}/messages/{messageId}/feedback` 接口，支持 `rating=1/-1` 并按管理员与消息幂等更新；后端校验会话、知识库、消息归属及 assistant 角色；流式回答保存事件返回 `assistant_message_id`，前端当前回答也能立即显示“有帮助/需改进”。
 - 最新反馈统计切片：新增 `GET /api/knowledge-bases/{id}/feedback/stats`，聚合 `total/positive/negative/positiveRate`，前端在问答台展示当前知识库满意率。
 - 最新动态起步问题切片：前端根据当前知识库已完成处理的文档标题生成起步问题；选择文档范围后，推荐问题会同步聚焦到选中文档，不增加额外模型调用，模型失败不会影响问答主链路。
+- 最新 @ 文档选择切片：聊天输入框输入 `@` 可按文件名搜索并选择已完成文档，已选文档以 chip 展示并可移除；发送时复用已有 `document_ids` 检索范围参数。
 
 ## 明确后置或不做
 
