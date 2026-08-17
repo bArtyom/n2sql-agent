@@ -67,6 +67,7 @@ func (c *traceCollector) observe(event agent.Event) {
 		})
 	case agent.EventToolFinished:
 		index := c.find(traceString(data, "tool_call_id"))
+		failed, _ := data["failed"].(bool)
 		if index < 0 {
 			if len(c.events) >= maxTraceEvents {
 				return
@@ -76,11 +77,11 @@ func (c *traceCollector) observe(event agent.Event) {
 				Step:       event.StepNumber,
 				ToolCallID: traceString(data, "tool_call_id"),
 				ToolName:   traceString(data, "tool_name"),
-				Status:     "succeeded",
+				Status:     traceToolStatus(failed),
 			})
 			index = len(c.events) - 1
 		}
-		c.events[index].Status = "succeeded"
+		c.events[index].Status = traceToolStatus(failed)
 		c.events[index].ResultSummary = boundedTraceText(traceResultSummary(data))
 		c.events[index].SourceKeys = traceSourceKeys(data)
 	case agent.EventRunFailed, agent.EventRunCanceled:
@@ -92,6 +93,13 @@ func (c *traceCollector) observe(event agent.Event) {
 			}
 		}
 	}
+}
+
+func traceToolStatus(failed bool) string {
+	if failed {
+		return "failed"
+	}
+	return "succeeded"
 }
 
 func traceSourceKeys(data map[string]any) []string {

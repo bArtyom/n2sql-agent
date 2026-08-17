@@ -32,3 +32,29 @@ func TestTraceCollectorAssociatesToolSourcesByStableKey(t *testing.T) {
 		t.Fatalf("trace events = %#v, want one deduplicated source key", events)
 	}
 }
+
+func TestTraceCollectorMarksRecoverableToolFailureAsFailed(t *testing.T) {
+	collector := newTraceCollector()
+	if err := collector.Sink(nil)(agent.Event{
+		Type: agent.EventToolCalled,
+		Data: map[string]any{"tool_call_id": "call-failed", "tool_name": "knowledge_search"},
+	}); err != nil {
+		t.Fatalf("tool_called event error = %v", err)
+	}
+	if err := collector.Sink(nil)(agent.Event{
+		Type: agent.EventToolFinished,
+		Data: map[string]any{
+			"tool_call_id":   "call-failed",
+			"tool_name":      "knowledge_search",
+			"failed":         true,
+			"result_summary": "工具参数无效，已反馈给模型。",
+		},
+	}); err != nil {
+		t.Fatalf("tool_finished event error = %v", err)
+	}
+
+	events := collector.Events()
+	if len(events) != 1 || events[0].Status != "failed" || events[0].ResultSummary != "工具参数无效，已反馈给模型。" {
+		t.Fatalf("trace events = %#v, want failed tool event", events)
+	}
+}
