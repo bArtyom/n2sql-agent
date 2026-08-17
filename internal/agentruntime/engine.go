@@ -50,6 +50,7 @@ type Engine struct {
 	approvalGate            func(context.Context, string, json.RawMessage) (bool, error)
 	contextSummarizer       modelruntime.MessageChatRunner
 	allowRepeatedToolCalls  bool
+	maxToolFailureRecovery  int
 }
 
 // EngineOptions controls bounded loop behavior without changing the default
@@ -68,6 +69,9 @@ type EngineOptions struct {
 	// repeated call. It is useful for tools that return a structured duplicate
 	// result so the model can see the reason and choose the next action.
 	AllowRepeatedToolCalls bool
+	// MaxToolFailureRecovery controls how many tool execution errors are fed
+	// back to the model before the run fails. Zero preserves fail-closed mode.
+	MaxToolFailureRecovery int
 }
 
 // ApprovalGate is called immediately before a tool is executed. Returning
@@ -125,6 +129,7 @@ func NewEngineWithOptions(chat modelruntime.ToolChatRunner, registry *agent.Tool
 		approvalGate:            options.ApprovalGate,
 		contextSummarizer:       options.ContextSummarizer,
 		allowRepeatedToolCalls:  options.AllowRepeatedToolCalls,
+		maxToolFailureRecovery:  options.MaxToolFailureRecovery,
 	}, nil
 }
 
@@ -167,6 +172,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 	result := Result{Run: run}
 	emitter := newEventEmitter(runID, sink)
 	seenToolCalls := make(map[string]struct{})
+	recoveredToolFailures := 0
 	if err := emitter.emit(agent.EventRunStarted, 0, map[string]any{
 		"status": string(agent.RunRunning),
 	}); err != nil {
@@ -247,10 +253,20 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			}); err != nil {
 				return finishError(result, err)
 			}
+			callKey := normalizedToolCallKey(toolCall.Function.Name, toolCall.Function.Arguments)
 			if err := validateToolCall(toolCall); err != nil {
+				if recoveredToolFailures < e.maxToolFailureRecovery {
+					recoveredToolFailures++
+					delete(seenToolCalls, callKey)
+					toolContent, feedbackErr := e.recoverToolFailure(&result, emitter, toolCall, err, "工具参数无效，已反馈给模型。")
+					if feedbackErr != nil {
+						return finishErrorWithEvents(result, feedbackErr, emitter)
+					}
+					conversation = append(conversation, modelclient.ChatMessage{Role: "tool", ToolCallID: toolCall.ID, Content: toolContent})
+					continue
+				}
 				return addToolFailureWithEvents(result, toolCall.Function.Name, err, emitter)
 			}
-			callKey := normalizedToolCallKey(toolCall.Function.Name, toolCall.Function.Arguments)
 			if _, repeated := seenToolCalls[callKey]; repeated && !e.allowRepeatedToolCalls {
 				return completeWithAnswer(result, emitter, "已检测到模型重复调用相同工具和参数，本轮已安全停止，避免重复检索。")
 			}
@@ -258,6 +274,16 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 
 			tool, err := e.registry.Find(toolCall.Function.Name)
 			if err != nil {
+				if recoveredToolFailures < e.maxToolFailureRecovery {
+					recoveredToolFailures++
+					delete(seenToolCalls, callKey)
+					toolContent, feedbackErr := e.recoverToolFailure(&result, emitter, toolCall, err, "工具不存在，已反馈给模型。")
+					if feedbackErr != nil {
+						return finishErrorWithEvents(result, feedbackErr, emitter)
+					}
+					conversation = append(conversation, modelclient.ChatMessage{Role: "tool", ToolCallID: toolCall.ID, Content: toolContent})
+					continue
+				}
 				return addToolFailureWithEvents(result, toolCall.Function.Name, err, emitter)
 			}
 			arguments := json.RawMessage(toolCall.Function.Arguments)
@@ -281,9 +307,29 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			}
 			toolResult, err := tool.Call(ctx, arguments)
 			if err != nil {
+				if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && recoveredToolFailures < e.maxToolFailureRecovery {
+					recoveredToolFailures++
+					delete(seenToolCalls, callKey)
+					toolContent, feedbackErr := e.recoverToolFailure(&result, emitter, toolCall, err, "工具调用失败，已反馈给模型。")
+					if feedbackErr != nil {
+						return finishErrorWithEvents(result, feedbackErr, emitter)
+					}
+					conversation = append(conversation, modelclient.ChatMessage{Role: "tool", ToolCallID: toolCall.ID, Content: toolContent})
+					continue
+				}
 				return addToolFailureWithEvents(result, toolCall.Function.Name, fmt.Errorf("execute tool: %w", err), emitter)
 			}
 			if strings.TrimSpace(toolResult.Content) == "" {
+				if recoveredToolFailures < e.maxToolFailureRecovery {
+					recoveredToolFailures++
+					delete(seenToolCalls, callKey)
+					toolContent, feedbackErr := e.recoverToolFailure(&result, emitter, toolCall, ErrInvalidToolResult, "工具调用返回空结果，已反馈给模型。")
+					if feedbackErr != nil {
+						return finishErrorWithEvents(result, feedbackErr, emitter)
+					}
+					conversation = append(conversation, modelclient.ChatMessage{Role: "tool", ToolCallID: toolCall.ID, Content: toolContent})
+					continue
+				}
 				return addToolFailureWithEvents(result, toolCall.Function.Name, ErrInvalidToolResult, emitter)
 			}
 			toolResult = security.RedactToolResult(toolResult)
@@ -614,6 +660,29 @@ func markUntrustedToolResult(content string) (string, error) {
 		return "", fmt.Errorf("encode untrusted tool result: %w", err)
 	}
 	return untrustedToolResultPrefix + string(payload), nil
+}
+
+func (e *Engine) recoverToolFailure(result *Result, emitter *eventEmitter, toolCall modelclient.ToolCall, err error, summary string) (string, error) {
+	if recordErr := result.Run.RecordToolCall(false); recordErr != nil {
+		return "", recordErr
+	}
+	if stepErr := result.Run.AddStep(agent.Step{Kind: agent.StepToolCall, Status: agent.StepFailed, ToolName: toolCall.Function.Name}); stepErr != nil {
+		return "", stepErr
+	}
+	if emitErr := emitter.emit(agent.EventToolFinished, len(result.Run.Steps()), map[string]any{
+		"tool_call_id":   toolCall.ID,
+		"tool_name":      toolCall.Function.Name,
+		"result_summary": summary,
+		"failed":         true,
+	}); emitErr != nil {
+		return "", emitErr
+	}
+	return markUntrustedToolResult(toolFailureFeedback(toolCall.Function.Name, err))
+}
+
+func toolFailureFeedback(toolName string, err error) string {
+	safeError := security.RedactText(strings.TrimSpace(err.Error()))
+	return fmt.Sprintf("工具 %q 执行失败：%s\n\n请分析这个错误，修正参数、改写查询或选择其他工具；不要重复无效调用。", toolName, safeError)
 }
 
 func newEventEmitter(runID string, sink EventSink) *eventEmitter {

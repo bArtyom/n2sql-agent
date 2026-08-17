@@ -723,6 +723,45 @@ func TestEngineFailsWhenToolExecutionFails(t *testing.T) {
 	}
 }
 
+func TestEngineFeedsRecoverableToolFailureBackToModel(t *testing.T) {
+	wantErr := errors.New("invalid query parameter")
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(&toolStub{err: wantErr}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	modelCalls := 0
+	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		modelCalls++
+		if modelCalls == 1 {
+			return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+				ID:   "call-recover",
+				Type: "function",
+				Function: modelclient.ToolCallFunction{
+					Name:      "knowledge_search",
+					Arguments: `{}`,
+				},
+			}}}, nil
+		}
+		if len(messages) < 3 || messages[len(messages)-1].Role != "tool" || !strings.Contains(messages[len(messages)-1].Content, "invalid query parameter") {
+			t.Fatalf("model did not receive tool failure: %#v", messages)
+		}
+		return modelclient.ChatResponse{Message: "我会改写查询后再尝试。"}, nil
+	}}
+	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 2, agentruntime.EngineOptions{
+		MaxToolFailureRecovery: 1,
+	})
+	if err != nil {
+		t.Fatalf("NewEngineWithOptions() error = %v", err)
+	}
+	result, err := engine.Run(context.Background(), "run-tool-failure-recovery", []modelclient.ChatMessage{{Role: "user", Content: "查询资料"}})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Run.Status() != agent.RunSucceeded || modelCalls != 2 {
+		t.Fatalf("run status=%s model_calls=%d, want succeeded and 2 calls", result.Run.Status(), modelCalls)
+	}
+}
+
 func TestEngineRejectsEmptyFinalAnswer(t *testing.T) {
 	chat := chatStub{call: func(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 		return modelclient.ChatResponse{}, nil
