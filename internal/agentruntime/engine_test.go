@@ -12,6 +12,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
+	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
@@ -241,6 +242,60 @@ func TestEngineTruncatesOversizedToolResultWithoutDroppingEnvelope(t *testing.T)
 	}
 	if envelope.Trusted || !strings.Contains(envelope.Content, "[工具结果已截断]") {
 		t.Fatalf("tool envelope = %#v, want untrusted truncated content", envelope)
+	}
+}
+
+type contextSummarizerStub struct {
+	called  bool
+	input   []modelclient.ChatMessage
+	message string
+}
+
+func (s *contextSummarizerStub) ChatMessages(_ context.Context, messages []modelclient.ChatMessage) (modelclient.ChatResponse, error) {
+	s.called = true
+	s.input = append([]modelclient.ChatMessage(nil), messages...)
+	return modelclient.ChatResponse{Message: s.message}, nil
+}
+
+var _ modelruntime.MessageChatRunner = (*contextSummarizerStub)(nil)
+
+func TestEngineSummarizesOlderToolResultsIntoShortMemory(t *testing.T) {
+	summarizer := &contextSummarizerStub{message: "旧工具结果短记忆：文档中提到年假按工龄计算。"}
+	var received []modelclient.ChatMessage
+	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		received = append([]modelclient.ChatMessage(nil), messages...)
+		return modelclient.ChatResponse{Message: "最终答案"}, nil
+	}}
+	engine, err := agentruntime.NewEngineWithOptions(chat, agent.NewToolRegistry(), 1, agentruntime.EngineOptions{
+		ContextSummarizer: summarizer,
+	})
+	if err != nil {
+		t.Fatalf("NewEngineWithOptions() error = %v", err)
+	}
+	oldToolPayload, err := json.Marshal(map[string]any{
+		"trusted": false,
+		"content": strings.Repeat("旧工具结果 ", 30_000),
+	})
+	if err != nil {
+		t.Fatalf("marshal old tool payload: %v", err)
+	}
+	messages := []modelclient.ChatMessage{
+		{Role: "system", Content: "系统提示"},
+		{Role: "user", Content: "旧问题"},
+		{Role: "tool", ToolCallID: "old-call", Content: "UNTRUSTED_TOOL_RESULT\n" + string(oldToolPayload)},
+		{Role: "user", Content: "当前问题"},
+	}
+	if _, err := engine.Run(context.Background(), "run-context-summary", messages); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !summarizer.called || len(summarizer.input) != 2 {
+		t.Fatalf("summarizer called=%v input=%#v, want a dedicated system and user prompt", summarizer.called, summarizer.input)
+	}
+	if len(received) != 3 || received[1].Role != "system" || !strings.Contains(received[1].Content, summarizer.message) || received[2].Content != "当前问题" {
+		t.Fatalf("model context = %#v, want system, short memory and current question", received)
+	}
+	if messageBytesForTest(received) > 64*1024 {
+		t.Fatalf("summarized messages exceed budget: %d", messageBytesForTest(received))
 	}
 }
 

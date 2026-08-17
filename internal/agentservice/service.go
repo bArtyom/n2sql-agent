@@ -220,7 +220,13 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	if err != nil {
 		return Response{}, fmt.Errorf("create knowledge search registry: %w", err)
 	}
-	engine, err := agentruntime.NewEngine(chatRunner, registry, s.maxSteps)
+	var contextSummarizer modelruntime.MessageChatRunner
+	if candidate, ok := s.chat.(modelruntime.MessageChatRunner); ok {
+		contextSummarizer = candidate
+	}
+	engine, err := agentruntime.NewEngineWithOptions(chatRunner, registry, s.maxSteps, agentruntime.EngineOptions{
+		ContextSummarizer: contextSummarizer,
+	})
 	if err != nil {
 		return Response{}, fmt.Errorf("create agent engine: %w", err)
 	}
