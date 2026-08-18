@@ -28,6 +28,7 @@ func TestAgentRunStatusDoesNotExposeRequestSnapshot(t *testing.T) {
 		Status:       agentrun.StatusRunning,
 		AttemptCount: 2,
 		Request:      []byte(`{"message":"secret question"}`),
+		Response:     []byte(`{"answer":"恢复后的答案","status":"succeeded"}`),
 		CreatedAt:    created,
 		UpdatedAt:    created,
 	}})
@@ -44,6 +45,9 @@ func TestAgentRunStatusDoesNotExposeRequestSnapshot(t *testing.T) {
 	body := response.Body.String()
 	if !strings.Contains(body, `"status":"running"`) || !strings.Contains(body, `"attempt_count":2`) {
 		t.Fatalf("body = %q, want run metadata", body)
+	}
+	if !strings.Contains(body, `"answer":"恢复后的答案"`) {
+		t.Fatalf("body = %q, want persisted response", body)
 	}
 	if strings.Contains(body, "secret question") || strings.Contains(body, "request") {
 		t.Fatalf("body = %q, must not expose request snapshot", body)

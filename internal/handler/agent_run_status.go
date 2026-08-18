@@ -38,8 +38,7 @@ func NewAgentRunStatus(reader agentrun.Reader) http.Handler {
 			http.Error(w, `{"error":"unable to load agent run"}`, http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		payload := map[string]any{
 			"run_id":        run.RunID,
 			"status":        run.Status,
 			"attempt_count": run.AttemptCount,
@@ -48,6 +47,14 @@ func NewAgentRunStatus(reader agentrun.Reader) http.Handler {
 			"started_at":    run.StartedAt,
 			"finished_at":   run.FinishedAt,
 			"updated_at":    run.UpdatedAt,
-		})
+		}
+		if len(run.Response) > 0 {
+			var response any
+			if err := json.Unmarshal(run.Response, &response); err == nil {
+				payload["response"] = response
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(payload)
 	})
 }

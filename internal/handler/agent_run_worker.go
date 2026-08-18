@@ -97,7 +97,7 @@ func NewPersistentAgentRunSubmission(maxHistoryBytes int, store agentrun.Store, 
 // It owns all work that used to happen inside the HTTP handler: loading
 // history, waiting for approvals, saving the exchange, and publishing
 // transport-only events.
-func NewPersistentAgentExecutor(answerer agentservice.EventAnswerer, conversations *conversation.Service, hub *agentstream.Hub, registry *metrics.Registry) agentrun.Executor {
+func NewPersistentAgentExecutor(answerer agentservice.EventAnswerer, conversations *conversation.Service, hub *agentstream.Hub, registry *metrics.Registry, resultWriter agentrun.ResultWriter) agentrun.Executor {
 	return agentrun.ExecutorFunc(func(ctx context.Context, run agentrun.Run, sink agentrun.EventSink) error {
 		if answerer == nil || hub == nil {
 			return agentrun.ErrInvalidRun
@@ -194,6 +194,15 @@ func NewPersistentAgentExecutor(answerer agentservice.EventAnswerer, conversatio
 			}
 			logAgentRequest(ctx, started, request, response, err, registry, !replayed)
 			return err
+		}
+		if resultWriter != nil {
+			data, marshalErr := json.Marshal(response)
+			if marshalErr != nil {
+				return fmt.Errorf("encode agent response: %w", marshalErr)
+			}
+			if writeErr := resultWriter.SaveResponse(executionContext, run.ID, data); writeErr != nil {
+				return writeErr
+			}
 		}
 		logAgentRequest(ctx, started, request, response, nil, registry, !replayed)
 		return nil

@@ -33,6 +33,7 @@ type Run struct {
 	KnowledgeBaseID int64           `json:"knowledge_base_id"`
 	ConversationID  int64           `json:"conversation_id,omitempty"`
 	Request         json.RawMessage `json:"request"`
+	Response        json.RawMessage `json:"response,omitempty"`
 	Status          Status          `json:"status"`
 	AttemptCount    int             `json:"attempt_count"`
 	ErrorMessage    string          `json:"error_message,omitempty"`
@@ -68,6 +69,10 @@ type Reader interface {
 	Get(context.Context, string, int64) (Run, error)
 }
 
+type ResultWriter interface {
+	SaveResponse(context.Context, int64, json.RawMessage) error
+}
+
 type PostgresStore struct{ db *sql.DB }
 
 func NewPostgresStore(db *sql.DB) *PostgresStore { return &PostgresStore{db: db} }
@@ -78,12 +83,12 @@ func (s *PostgresStore) Get(ctx context.Context, runID string, knowledgeBaseID i
 	}
 	var run Run
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, run_id, knowledge_base_id, COALESCE(conversation_id, 0), request,
+		SELECT id, run_id, knowledge_base_id, COALESCE(conversation_id, 0), request, response,
 			status, attempt_count, COALESCE(error_message, ''), created_at, started_at,
 			finished_at, lease_until, heartbeat_at, updated_at
 		FROM agent_runs
 		WHERE run_id = $1 AND knowledge_base_id = $2`, runID, knowledgeBaseID).Scan(
-		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.Request,
+		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.Request, &run.Response,
 		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.CreatedAt, &run.StartedAt,
 		&run.FinishedAt, &run.LeaseUntil, &run.HeartbeatAt, &run.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -103,11 +108,11 @@ func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Run, err
 	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO agent_runs (run_id, knowledge_base_id, conversation_id, request)
 		VALUES ($1, $2, NULLIF($3, 0), $4)
-		RETURNING id, run_id, knowledge_base_id, COALESCE(conversation_id, 0), request,
+		RETURNING id, run_id, knowledge_base_id, COALESCE(conversation_id, 0), request, response,
 			status, attempt_count, COALESCE(error_message, ''), created_at, started_at, finished_at,
 			lease_until, heartbeat_at, updated_at`,
 		input.RunID, input.KnowledgeBaseID, input.ConversationID, input.Request).Scan(
-		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.Request,
+		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.Request, &run.Response,
 		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.CreatedAt, &run.StartedAt, &run.FinishedAt,
 		&run.LeaseUntil, &run.HeartbeatAt, &run.UpdatedAt)
 	if err != nil {
@@ -135,9 +140,9 @@ func (s *PostgresStore) ClaimNext(ctx context.Context) (Run, error) {
 		FROM next_run
 		WHERE run.id = next_run.id
 		RETURNING run.id, run.run_id, run.knowledge_base_id, COALESCE(run.conversation_id, 0),
-			run.request, run.status, run.attempt_count, COALESCE(run.error_message, ''),
+			run.request, run.response, run.status, run.attempt_count, COALESCE(run.error_message, ''),
 			run.created_at, run.started_at, run.finished_at, run.lease_until, run.heartbeat_at, run.updated_at`).Scan(
-		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.Request,
+		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.Request, &run.Response,
 		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.CreatedAt, &run.StartedAt, &run.FinishedAt,
 		&run.LeaseUntil, &run.HeartbeatAt, &run.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -147,6 +152,24 @@ func (s *PostgresStore) ClaimNext(ctx context.Context) (Run, error) {
 		return Run{}, fmt.Errorf("claim agent run: %w", err)
 	}
 	return run, nil
+}
+
+func (s *PostgresStore) SaveResponse(ctx context.Context, id int64, response json.RawMessage) error {
+	if id <= 0 || len(response) == 0 || !json.Valid(response) {
+		return ErrInvalidRun
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE agent_runs
+		SET response = $2, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1 AND status = 'running'`, id, response)
+	if err != nil {
+		return fmt.Errorf("save agent run response: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected == 0 {
+		return fmt.Errorf("save agent run response: no running row")
+	}
+	return nil
 }
 
 func (s *PostgresStore) RequeueExpired(ctx context.Context) error {

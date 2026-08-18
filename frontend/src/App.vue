@@ -1651,9 +1651,52 @@ async function resumeAgentStream(answer: ChatMessage, answerIndex: number) {
     headers: { Accept: "text/event-stream" },
   });
   if (!response.ok || !response.body) {
+    const statusResponse = await fetch(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/agent-runs/${encodeURIComponent(answer.runID)}`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+    if (statusResponse.ok) {
+      const statusPayload = await statusResponse.json() as AgentRunStatusPayload;
+      if (statusPayload.response && typeof statusPayload.response === "object") {
+        applyPersistedAgentResponse(answer, statusPayload);
+        return;
+      }
+    }
     throw new Error("无法恢复 Agent 运行，可能已超过保留时间。");
   }
   await readAgentSSE(response, answerIndex, false);
+}
+
+type AgentRunStatusPayload = {
+  run_id?: string;
+  status?: string;
+  error?: string;
+  response?: Record<string, unknown>;
+};
+
+function applyPersistedAgentResponse(answer: ChatMessage, payload: AgentRunStatusPayload) {
+  const response = payload.response;
+  if (!response) return;
+  answer.runID = typeof payload.run_id === "string" ? payload.run_id : answer.runID;
+  answer.content = typeof response.answer === "string" ? response.answer : answer.content;
+  answer.sources = mergeSources(answer.sources ?? [], parseSources(response.sources));
+  const stats = response.stats;
+  if (stats && typeof stats === "object") {
+    answer.agentStats = parseAgentRunStats(stats);
+    const statsRecord = stats as Record<string, unknown>;
+    if (statsRecord.query_rewrite && typeof statsRecord.query_rewrite === "object") answer.queryRewrite = statsRecord.query_rewrite as QueryRewriteStatus;
+    if (statsRecord.retrieval && typeof statsRecord.retrieval === "object") answer.retrieval = statsRecord.retrieval as RetrievalStats;
+  }
+  answer.agentEvents = restoreAgentEvents({
+    run_id: answer.runID,
+    status: typeof response.status === "string" ? response.status : "succeeded",
+    stats: parseAgentRunStats(stats),
+    steps: Array.isArray(response.steps) ? response.steps as StoredAgentTrace["steps"] : [],
+    events: Array.isArray(response.trace) ? response.trace as StoredAgentTrace["events"] : [],
+  });
+  answer.activity = "已从持久化结果恢复";
+  answer.status = payload.status === "canceled" ? "stopped" : payload.status === "failed" ? "error" : "done";
+  answer.retryable = answer.status === "error";
 }
 
 // 页面刷新后尝试恢复上次未完成的 Agent 运行（仅标准 Agent 模式）。

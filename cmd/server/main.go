@@ -113,7 +113,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	agentRunExecutor := handler.NewPersistentAgentExecutor(agentAnswerService, conversationService, agentStreamHub, metricsRegistry)
+	agentRunExecutor := handler.NewPersistentAgentExecutor(agentAnswerService, conversationService, agentStreamHub, metricsRegistry, agentRunStore)
 	agentRunRunner, err := agentrun.NewRunnerWithEventSink(agentRunStore, agentRunExecutor, func(run agentrun.Run) func(agent.Event) error {
 		return agentStreamHub.PublishAgent
 	})
