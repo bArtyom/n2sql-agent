@@ -21,6 +21,7 @@ const defaultRedisEventPrefix = "n2sql:agent:events"
 type LiveEventStore interface {
 	EventStore
 	Subscribe(context.Context, string, int64) ([]agentstream.Event, <-chan agentstream.Event, func(), bool, error)
+	SubscribeFrom(context.Context, string, int64, string) ([]agentstream.Event, <-chan agentstream.Event, func(), bool, error)
 }
 
 // RedisEventStore keeps a bounded, expiring copy of Agent transport events.
@@ -104,6 +105,10 @@ func (s *RedisEventStore) List(ctx context.Context, runID string, knowledgeBaseI
 // event closes the live channel; the run status/final response remains the
 // durable source of truth after the Redis TTL expires.
 func (s *RedisEventStore) Subscribe(ctx context.Context, runID string, knowledgeBaseID int64) ([]agentstream.Event, <-chan agentstream.Event, func(), bool, error) {
+	return s.SubscribeFrom(ctx, runID, knowledgeBaseID, "")
+}
+
+func (s *RedisEventStore) SubscribeFrom(ctx context.Context, runID string, knowledgeBaseID int64, afterEventID string) ([]agentstream.Event, <-chan agentstream.Event, func(), bool, error) {
 	if s == nil || s.client == nil || runID == "" || knowledgeBaseID <= 0 {
 		return nil, nil, nil, false, ErrInvalidRun
 	}
@@ -114,8 +119,39 @@ func (s *RedisEventStore) Subscribe(ctx context.Context, runID string, knowledge
 	}
 	snapshot := decodeRedisEvents(entries, runID)
 	lastID := "0-0"
-	if len(entries) > 0 {
+	cursorTerminal := false
+	if afterEventID != "" {
+		cursorIndex := -1
+		for index, entry := range entries {
+			event, ok := decodeRedisEvent(entry, runID)
+			if ok && event.ID == afterEventID {
+				cursorIndex = index
+				cursorTerminal = isTerminalAgentEvent(event.Type)
+				break
+			}
+		}
+		if cursorIndex < 0 {
+			return nil, nil, nil, false, agentstream.ErrEventGap
+		}
+		lastID = entries[cursorIndex].ID
+	} else if len(entries) > 0 {
 		lastID = entries[len(entries)-1].ID
+	}
+	if afterEventID != "" {
+		filtered := make([]agentstream.Event, 0, len(snapshot))
+		found := false
+		for _, event := range snapshot {
+			if found {
+				filtered = append(filtered, event)
+			}
+			if event.ID == afterEventID {
+				found = true
+			}
+		}
+		snapshot = filtered
+	}
+	if cursorTerminal {
+		return snapshot, closedEventChannel(), func() {}, true, nil
 	}
 	for _, event := range snapshot {
 		if event.Type == string(agent.EventRunFinished) || event.Type == string(agent.EventRunFailed) || event.Type == string(agent.EventRunCanceled) {
@@ -162,6 +198,10 @@ func (s *RedisEventStore) Subscribe(ctx context.Context, runID string, knowledge
 		}
 	}()
 	return snapshot, live, stop, false, nil
+}
+
+func isTerminalAgentEvent(eventType string) bool {
+	return eventType == string(agent.EventRunFinished) || eventType == string(agent.EventRunFailed) || eventType == string(agent.EventRunCanceled)
 }
 
 func decodeRedisEvents(entries []redis.XMessage, runID string) []agentstream.Event {

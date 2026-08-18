@@ -42,6 +42,60 @@ func TestAgentRunStreamReplaysFinishedRun(t *testing.T) {
 	if !strings.Contains(body, "event: run_started\n") || !strings.Contains(body, "event: reasoning_delta\n") || !strings.Contains(body, `"content":"先检查资料"`) || !strings.Contains(body, `"answer":"完成"`) {
 		t.Fatalf("body=%q, want replayed events", body)
 	}
+	if !strings.Contains(body, "id: event-1\n") || !strings.Contains(body, `"version":1`) {
+		t.Fatalf("body=%q, want SSE event ID and version", body)
+	}
+}
+
+func TestAgentRunStreamResumesAfterLastEventID(t *testing.T) {
+	hub := agentstream.NewHub()
+	if err := hub.Start("run-1", 7); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []agent.Event{
+		{ID: "event-1", RunID: "run-1", Type: agent.EventRunStarted},
+		{ID: "event-2", RunID: "run-1", Type: agent.EventRunFinished},
+	} {
+		if err := hub.PublishAgent(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := hub.Finish("run-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/7/agent-runs/run-1/stream", nil)
+	request.Header.Set("Last-Event-ID", "event-1")
+	request.SetPathValue("id", "7")
+	request.SetPathValue("runID", "run-1")
+	response := httptest.NewRecorder()
+	handler.NewAgentRunStream(hub).ServeHTTP(response, request)
+
+	body := response.Body.String()
+	if strings.Contains(body, `"id":"event-1"`) || !strings.Contains(body, `"id":"event-2"`) {
+		t.Fatalf("body=%q, want only events after event-1", body)
+	}
+}
+
+func TestAgentRunStreamReturnsGapForExpiredCursor(t *testing.T) {
+	hub := agentstream.NewHub()
+	if err := hub.Start("run-1", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.PublishAgent(agent.Event{ID: "event-2", RunID: "run-1", Type: agent.EventRunFinished}); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/7/agent-runs/run-1/stream", nil)
+	request.Header.Set("Last-Event-ID", "event-1")
+	request.SetPathValue("id", "7")
+	request.SetPathValue("runID", "run-1")
+	response := httptest.NewRecorder()
+	handler.NewAgentRunStream(hub).ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "event: gap\n") || !strings.Contains(response.Body.String(), "stream_replay_gap") {
+		t.Fatalf("status=%d body=%q, want gap event", response.Code, response.Body.String())
+	}
 }
 
 func TestAgentRunStreamRejectsWrongKnowledgeBase(t *testing.T) {

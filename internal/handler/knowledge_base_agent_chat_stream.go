@@ -281,11 +281,12 @@ func NewAgentRunStreamWithStore(hub *agentstream.Hub, eventStore agentrun.EventS
 			http.Error(w, `{"error":"streaming is not supported"}`, http.StatusInternalServerError)
 			return
 		}
-		snapshot, live, cancel, done, err := hub.Subscribe(runID, knowledgeBaseID, r.Context().Done())
+		lastEventID := r.Header.Get("Last-Event-ID")
+		snapshot, live, cancel, done, err := hub.SubscribeFrom(runID, knowledgeBaseID, lastEventID, r.Context().Done())
 		if err != nil {
-			if errors.Is(err, agentstream.ErrRunNotFound) && eventStore != nil {
+			if (errors.Is(err, agentstream.ErrRunNotFound) || errors.Is(err, agentstream.ErrEventGap)) && eventStore != nil {
 				if liveStore, ok := eventStore.(agentrun.LiveEventStore); ok {
-					storedSnapshot, storedLive, stop, storedDone, streamErr := liveStore.Subscribe(r.Context(), runID, knowledgeBaseID)
+					storedSnapshot, storedLive, stop, storedDone, streamErr := liveStore.SubscribeFrom(r.Context(), runID, knowledgeBaseID, lastEventID)
 					if streamErr == nil {
 						defer stop()
 						w.Header().Set("Content-Type", "text/event-stream")
@@ -313,10 +314,21 @@ func NewAgentRunStreamWithStore(hub *agentstream.Hub, eventStore agentrun.EventS
 								}
 							}
 						}
+					} else if errors.Is(streamErr, agentstream.ErrEventGap) {
+						_ = writeAgentStreamGap(w, flusher, runID, lastEventID)
+						return
 					}
 				}
 				storedEvents, storeErr := eventStore.List(r.Context(), runID, knowledgeBaseID)
 				if storeErr == nil && len(storedEvents) > 0 {
+					if lastEventID != "" {
+						var gap bool
+						storedEvents, gap = eventsAfterCursor(storedEvents, lastEventID)
+						if gap {
+							_ = writeAgentStreamGap(w, flusher, runID, lastEventID)
+							return
+						}
+					}
 					w.Header().Set("Content-Type", "text/event-stream")
 					w.Header().Set("Cache-Control", "no-cache")
 					w.WriteHeader(http.StatusOK)
@@ -327,6 +339,10 @@ func NewAgentRunStreamWithStore(hub *agentstream.Hub, eventStore agentrun.EventS
 					}
 					return
 				}
+			}
+			if errors.Is(err, agentstream.ErrEventGap) {
+				_ = writeAgentStreamGap(w, flusher, runID, lastEventID)
+				return
 			}
 			if errors.Is(err, agentstream.ErrRunNotFound) {
 				http.Error(w, `{"error":"agent run not found or expired"}`, http.StatusNotFound)
@@ -386,5 +402,41 @@ func writeAgentSSEEvent(w http.ResponseWriter, flusher http.Flusher, eventType s
 		return fmt.Errorf("invalid agent SSE event type %q", eventType)
 	}
 
-	return writeSSEMessage(w, flusher, eventType, value)
+	return writeSSEMessageWithID(w, flusher, eventType, eventID(value), value)
+}
+
+func eventID(value any) string {
+	switch event := value.(type) {
+	case agent.Event:
+		return event.ID
+	case agentstream.Event:
+		return event.ID
+	default:
+		return ""
+	}
+}
+
+func eventsAfterCursor(events []agentstream.Event, cursor string) ([]agentstream.Event, bool) {
+	if cursor == "" {
+		return events, false
+	}
+	for index, event := range events {
+		if event.ID == cursor {
+			return events[index+1:], false
+		}
+	}
+	return nil, true
+}
+
+func writeAgentStreamGap(w http.ResponseWriter, flusher http.Flusher, runID, requestedEventID string) error {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	return writeSSEMessage(w, flusher, "gap", map[string]any{
+		"code":               "stream_replay_gap",
+		"run_id":             runID,
+		"requested_event_id": requestedEventID,
+		"recovery":           "reload_durable_state",
+	})
 }

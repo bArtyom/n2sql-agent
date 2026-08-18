@@ -74,9 +74,18 @@ func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, event string, va
 }
 
 func writeSSEMessage(w http.ResponseWriter, flusher http.Flusher, event string, value any) error {
+	return writeSSEMessageWithID(w, flusher, event, "", value)
+}
+
+func writeSSEMessageWithID(w http.ResponseWriter, flusher http.Flusher, event, id string, value any) error {
 	payload, err := json.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("encode SSE event: %w", err)
+	}
+	if id != "" {
+		if _, err := fmt.Fprintf(w, "id: %s\n", id); err != nil {
+			return fmt.Errorf("write SSE event ID: %w", err)
+		}
 	}
 	if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, payload); err != nil {
 		return fmt.Errorf("write SSE event: %w", err)

@@ -54,6 +54,8 @@ type ChatMessage = {
   mode?: ChatMode;
   retryable?: boolean;
   runID?: string;
+  lastEventID?: string;
+  streamGap?: boolean;
   seenEventIDs?: Set<string>;
   // 只用于当前页面的展开状态，不会提交到后端。
   expandedAgentEvents?: Set<string>;
@@ -1646,25 +1648,24 @@ async function readAgentSSE(response: Response, answerIndex: number, researchMod
 async function resumeAgentStream(answer: ChatMessage, answerIndex: number) {
   if (!selectedKnowledgeBaseId.value || !answer.runID) return;
   answer.activity = "正在恢复 Agent 运行…";
+  answer.streamGap = false;
+  const headers: Record<string, string> = { Accept: "text/event-stream" };
+  if (answer.lastEventID) headers["Last-Event-ID"] = answer.lastEventID;
   const response = await fetch(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/agent-runs/${encodeURIComponent(answer.runID)}/stream`, {
     method: "GET",
-    headers: { Accept: "text/event-stream" },
+    headers,
   });
   if (!response.ok || !response.body) {
-    const statusResponse = await fetch(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/agent-runs/${encodeURIComponent(answer.runID)}`, {
-      method: "GET",
-      headers: { Accept: "application/json" },
-    });
-    if (statusResponse.ok) {
-      const statusPayload = await statusResponse.json() as AgentRunStatusPayload;
-      if (statusPayload.response && typeof statusPayload.response === "object") {
-        applyPersistedAgentResponse(answer, statusPayload);
-        return;
-      }
+    if (await recoverPersistedAgentResponse(answer)) {
+      return;
     }
     throw new Error("无法恢复 Agent 运行，可能已超过保留时间。");
   }
   await readAgentSSE(response, answerIndex, false);
+  if (answer.streamGap) {
+    if (await recoverPersistedAgentResponse(answer)) return;
+    throw new Error("实时事件已过期，最终答案尚未持久化。");
+  }
 }
 
 type AgentRunStatusPayload = {
@@ -1673,6 +1674,25 @@ type AgentRunStatusPayload = {
   error?: string;
   response?: Record<string, unknown>;
 };
+
+async function recoverPersistedAgentResponse(answer: ChatMessage): Promise<boolean> {
+  if (!selectedKnowledgeBaseId.value || !answer.runID) return false;
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    const statusResponse = await fetch(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/agent-runs/${encodeURIComponent(answer.runID)}`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+    if (!statusResponse.ok) return false;
+    const statusPayload = await statusResponse.json() as AgentRunStatusPayload;
+    if (statusPayload.response && typeof statusPayload.response === "object") {
+      applyPersistedAgentResponse(answer, statusPayload);
+      return true;
+    }
+    if (statusPayload.status === "failed" || statusPayload.status === "canceled") return false;
+    await new Promise((resolve) => window.setTimeout(resolve, 500));
+  }
+  return false;
+}
 
 function applyPersistedAgentResponse(answer: ChatMessage, payload: AgentRunStatusPayload) {
   const response = payload.response;
@@ -2146,6 +2166,7 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
   if (!dataLines.length) return;
   try {
     const payload = JSON.parse(dataLines.join("\n")) as StreamPayload;
+    if (payload.id) answer.lastEventID = payload.id;
     if (payload.id && answer.seenEventIDs) {
       if (answer.seenEventIDs.has(payload.id)) return;
       answer.seenEventIDs.add(payload.id);
@@ -2155,6 +2176,10 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
     const dataString = (key: string) => typeof eventData[key] === "string" ? eventData[key] as string : "";
 
     switch (event) {
+      case "gap":
+        answer.streamGap = true;
+        answer.activity = "中间事件已过期，正在恢复最终答案…";
+        break;
       case "sources":
         answer.sources = mergeSources(answer.sources ?? [], parseSources(payload.sources));
         if (payload.retrieval) answer.retrieval = payload.retrieval;
