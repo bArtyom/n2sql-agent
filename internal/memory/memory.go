@@ -10,6 +10,7 @@ import (
 )
 
 const MaxContentBytes = 2000
+const MaxProfileBytes = 6000
 
 var (
 	ErrInvalidKnowledgeBase = errors.New("invalid memory knowledge base")
@@ -29,6 +30,13 @@ type Memory struct {
 	UpdatedAt       time.Time `json:"updatedAt"`
 }
 
+type Profile struct {
+	UserID    int64     `json:"userId"`
+	Content   string    `json:"content"`
+	Version   int64     `json:"version"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
 type CreateInput struct {
 	KnowledgeBaseID int64
 	Content         string
@@ -38,6 +46,11 @@ type Store interface {
 	Create(context.Context, int64, CreateInput) (Memory, error)
 	List(context.Context, int64, int64) ([]Memory, error)
 	Delete(context.Context, int64, int64, int64) error
+}
+
+type ProfileStore interface {
+	GetProfile(context.Context, int64) (Profile, error)
+	SaveProfile(context.Context, int64, string) (Profile, error)
 }
 
 type PostgresStore struct{ db *sql.DB }
@@ -131,4 +144,46 @@ func (s *PostgresStore) Delete(ctx context.Context, userID, knowledgeBaseID, mem
 		return ErrNotFound
 	}
 	return nil
+}
+
+func (s *PostgresStore) GetProfile(ctx context.Context, userID int64) (Profile, error) {
+	if userID <= 0 {
+		return Profile{}, ErrUnauthorized
+	}
+	var profile Profile
+	err := s.db.QueryRowContext(ctx, `
+		SELECT user_id, content, version, updated_at
+		FROM user_memory_profiles WHERE user_id = $1`, userID).Scan(
+		&profile.UserID, &profile.Content, &profile.Version, &profile.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Profile{UserID: userID, Version: 1}, nil
+	}
+	if err != nil {
+		return Profile{}, fmt.Errorf("get memory profile: %w", err)
+	}
+	return profile, nil
+}
+
+func (s *PostgresStore) SaveProfile(ctx context.Context, userID int64, content string) (Profile, error) {
+	if userID <= 0 {
+		return Profile{}, ErrUnauthorized
+	}
+	content = strings.TrimSpace(content)
+	if len([]byte(content)) > MaxProfileBytes {
+		return Profile{}, ErrInvalidContent
+	}
+	var profile Profile
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO user_memory_profiles (user_id, content, version)
+		VALUES ($1, $2, 1)
+		ON CONFLICT (user_id) DO UPDATE SET
+			content = EXCLUDED.content,
+			version = user_memory_profiles.version + 1,
+			updated_at = CURRENT_TIMESTAMP
+		RETURNING user_id, content, version, updated_at`, userID, content).Scan(
+		&profile.UserID, &profile.Content, &profile.Version, &profile.UpdatedAt)
+	if err != nil {
+		return Profile{}, fmt.Errorf("save memory profile: %w", err)
+	}
+	return profile, nil
 }

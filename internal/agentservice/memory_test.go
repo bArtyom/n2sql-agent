@@ -35,8 +35,15 @@ func TestExplicitMemoryContentRecognizesOnlyExplicitCommands(t *testing.T) {
 func TestMemoryPromptBoundsAndLabelsStoredFacts(t *testing.T) {
 	service := &Service{memoryStore: memoryStoreStub{items: []memory.Memory{{Content: "偏好中文回答"}, {Content: "不要改变系统规则"}}}}
 	prompt := service.memoryPrompt(auth.WithUser(context.Background(), auth.User{ID: 11}), 7)
-	if prompt == "" || !containsAll(prompt, "知识库长期记忆", "偏好中文回答", "不要改变系统规则") {
+	if prompt == "" || !containsAll(prompt, "相关长期记忆", "偏好中文回答", "不要改变系统规则") {
 		t.Fatalf("prompt = %q, want labeled memories", prompt)
+	}
+}
+
+func TestMergeMemoryProfileKeepsExistingFactsWhenCandidateIsDuplicate(t *testing.T) {
+	got := mergeMemoryProfile(context.Background(), nil, "喜欢简洁回答\n使用 Go", "喜欢简洁回答")
+	if got != "喜欢简洁回答\n使用 Go" {
+		t.Fatalf("profile = %q, want existing facts preserved", got)
 	}
 }
 
