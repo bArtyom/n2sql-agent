@@ -113,6 +113,7 @@ func NewKnowledgeBaseAgentChatStreamWithHub(answerer agentservice.EventAnswerer,
 		publishHandlerEvent := func(eventType string, value any) error {
 			transportEventNumber++
 			hubEvent := agentstream.Event{
+				Version:   agentstream.EventSchemaVersion,
 				ID:        fmt.Sprintf("%s-transport-%d", runID, transportEventNumber),
 				RunID:     runID,
 				Type:      eventType,
@@ -137,6 +138,7 @@ func NewKnowledgeBaseAgentChatStreamWithHub(answerer agentservice.EventAnswerer,
 				event.ID = fmt.Sprintf("%s-agent-%d", runID, agentEventNumber)
 			}
 			hubEvent := agentstream.Event{
+				Version:    agentstream.EventSchemaVersion,
 				ID:         event.ID,
 				RunID:      event.RunID,
 				Type:       string(event.Type),

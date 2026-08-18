@@ -133,6 +133,7 @@ func main() {
 	agentRunRunner, err := agentrun.NewRunnerWithEventSink(agentRunStore, agentRunExecutor, func(run agentrun.Run) func(agent.Event) error {
 		return func(event agent.Event) error {
 			if err := agentEventStore.Append(context.Background(), run, agentstream.Event{
+				Version:    agentstream.EventSchemaVersion,
 				ID:         event.ID,
 				RunID:      event.RunID,
 				Type:       string(event.Type),

@@ -8,6 +8,8 @@ import (
 
 var ErrInvalidEvent = errors.New("invalid agent event")
 
+const EventSchemaVersion = 1
+
 type EventType string
 
 const (
@@ -27,6 +29,7 @@ const (
 
 // Event is an observable occurrence in one Agent run.
 type Event struct {
+	Version    int       `json:"version"`
 	ID         string    `json:"id"`
 	RunID      string    `json:"run_id"`
 	Type       EventType `json:"type"`
@@ -46,6 +49,7 @@ func NewEvent(id, runID string, eventType EventType, data any) (Event, error) {
 		return Event{}, ErrInvalidEvent
 	}
 	return Event{
+		Version:   EventSchemaVersion,
 		ID:        id,
 		RunID:     runID,
 		Type:      eventType,

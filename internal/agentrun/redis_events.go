@@ -187,6 +187,12 @@ func decodeRedisEvent(entry redis.XMessage, runID string) (agentstream.Event, bo
 	if json.Unmarshal([]byte(value), &event) != nil || event.ID == "" || event.Type == "" {
 		return agentstream.Event{}, false
 	}
+	if event.Version == 0 {
+		event.Version = agentstream.EventSchemaVersion
+	}
+	if event.Version != agentstream.EventSchemaVersion {
+		return agentstream.Event{}, false
+	}
 	event.RunID = runID
 	return event, true
 }

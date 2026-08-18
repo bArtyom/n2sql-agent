@@ -16,11 +16,14 @@ import (
 var (
 	ErrRunNotFound            = errors.New("agent run not found")
 	ErrRunAlreadyStarted      = errors.New("agent run already started")
+	ErrEventGap               = errors.New("agent event replay gap")
+	ErrInvalidEvent           = errors.New("invalid agent stream event")
 	ErrApprovalNotFound       = errors.New("agent approval not found")
 	ErrApprovalAlreadyPending = errors.New("agent approval already pending")
 )
 
 const (
+	EventSchemaVersion     = 1
 	defaultMaxRuns         = 128
 	defaultMaxEventsPerRun = 512
 	defaultRunTTL          = 10 * time.Minute
@@ -29,6 +32,7 @@ const (
 // Event is the small transport-neutral event envelope used by the HTTP
 // handler. Agent events and handler-only events share the same replay path.
 type Event struct {
+	Version    int       `json:"version"`
 	ID         string    `json:"id"`
 	RunID      string    `json:"run_id"`
 	Type       string    `json:"type"`
@@ -152,6 +156,7 @@ func (h *Hub) Cancel(runID string, knowledgeBaseID int64) error {
 
 func (h *Hub) PublishAgent(event agent.Event) error {
 	return h.Publish(Event{
+		Version:    EventSchemaVersion,
 		ID:         event.ID,
 		RunID:      event.RunID,
 		Type:       string(event.Type),
@@ -164,6 +169,12 @@ func (h *Hub) PublishAgent(event agent.Event) error {
 func (h *Hub) Publish(event Event) error {
 	if h == nil || event.RunID == "" || event.Type == "" {
 		return ErrRunNotFound
+	}
+	if event.Version == 0 {
+		event.Version = EventSchemaVersion
+	}
+	if event.Version != EventSchemaVersion || !validEventType(event.Type) {
+		return ErrInvalidEvent
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -277,6 +288,13 @@ func (h *Hub) ResolveApproval(runID string, knowledgeBaseID int64, approved bool
 // cancel when it stops consuming; the context only controls this subscription,
 // not the underlying Agent run.
 func (h *Hub) Subscribe(runID string, knowledgeBaseID int64, ctxDone <-chan struct{}) ([]Event, <-chan Event, func(), bool, error) {
+	return h.SubscribeFrom(runID, knowledgeBaseID, "", ctxDone)
+}
+
+// SubscribeFrom returns retained events after afterEventID and then live
+// events. If the cursor has fallen out of the bounded Hub history, it returns
+// ErrEventGap instead of silently replaying an incomplete suffix.
+func (h *Hub) SubscribeFrom(runID string, knowledgeBaseID int64, afterEventID string, ctxDone <-chan struct{}) ([]Event, <-chan Event, func(), bool, error) {
 	if h == nil || runID == "" || knowledgeBaseID <= 0 {
 		return nil, nil, nil, false, ErrRunNotFound
 	}
@@ -288,6 +306,19 @@ func (h *Hub) Subscribe(runID string, knowledgeBaseID int64, ctxDone <-chan stru
 		return nil, nil, nil, false, ErrRunNotFound
 	}
 	snapshot := append([]Event(nil), run.events...)
+	if afterEventID != "" {
+		cursorIndex := -1
+		for index, event := range snapshot {
+			if event.ID == afterEventID {
+				cursorIndex = index
+				break
+			}
+		}
+		if cursorIndex < 0 {
+			return nil, nil, nil, false, ErrEventGap
+		}
+		snapshot = snapshot[cursorIndex+1:]
+	}
 	if run.done {
 		return snapshot, closedEvents(), func() {}, true, nil
 	}
@@ -311,6 +342,19 @@ func (h *Hub) Subscribe(runID string, knowledgeBaseID int64, ctxDone <-chan stru
 		}()
 	}
 	return snapshot, live, cancel, false, nil
+}
+
+func validEventType(eventType string) bool {
+	switch eventType {
+	case "error", "conversation_saved", "conversation_save_failed", "conversation_replayed",
+		string(agent.EventRunStarted), string(agent.EventStepStarted), string(agent.EventToolCalled),
+		string(agent.EventToolFinished), string(agent.EventApprovalRequired), string(agent.EventApprovalResolved),
+		string(agent.EventApprovalExpired), string(agent.EventReasoningDelta), string(agent.EventMessageDelta),
+		string(agent.EventRunFinished), string(agent.EventRunFailed), string(agent.EventRunCanceled):
+		return true
+	default:
+		return false
+	}
 }
 
 func closedEvents() <-chan Event {

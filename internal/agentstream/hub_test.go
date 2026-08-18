@@ -67,6 +67,39 @@ func TestHubBoundsEventsPerRun(t *testing.T) {
 	}
 }
 
+func TestHubSubscribeFromReplaysAfterCursor(t *testing.T) {
+	hub := agentstream.NewHub()
+	if err := hub.Start("run-1", 7); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"event-1", "event-2", "event-3"} {
+		if err := hub.Publish(agentstream.Event{ID: id, RunID: "run-1", Type: "message_delta"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, _, cancel, _, err := hub.SubscribeFrom("run-1", 7, "event-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	if len(snapshot) != 2 || snapshot[0].ID != "event-2" || snapshot[1].ID != "event-3" {
+		t.Fatalf("replayed events = %#v, want event-2 and event-3", snapshot)
+	}
+}
+
+func TestHubSubscribeFromReturnsGapForExpiredCursor(t *testing.T) {
+	hub := agentstream.NewHub()
+	if err := hub.Start("run-1", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.Publish(agentstream.Event{ID: "event-2", RunID: "run-1", Type: "message_delta"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, err := hub.SubscribeFrom("run-1", 7, "event-1", nil); err != agentstream.ErrEventGap {
+		t.Fatalf("cursor error = %v, want ErrEventGap", err)
+	}
+}
+
 func TestHubCancelInvokesRegisteredCancelOnce(t *testing.T) {
 	hub := agentstream.NewHub()
 	if err := hub.Start("run-1", 7); err != nil {

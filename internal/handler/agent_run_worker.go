@@ -139,6 +139,7 @@ func NewPersistentAgentExecutor(answerer agentservice.EventAnswerer, conversatio
 		}
 		emit := func(event agent.Event) error {
 			event.RunID = run.RunID
+			event.Version = agent.EventSchemaVersion
 			if sink != nil {
 				return sink(event)
 			}
