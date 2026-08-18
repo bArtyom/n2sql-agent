@@ -18,20 +18,24 @@ import (
 )
 
 var (
-	ErrInvalidEngine     = errors.New("invalid agent engine")
-	ErrInvalidContext    = errors.New("agent context is required")
-	ErrInvalidMessages   = errors.New("agent messages are required")
-	ErrInvalidMaxSteps   = errors.New("agent max steps must be positive")
-	ErrMaxStepsExceeded  = errors.New("agent max steps exceeded")
-	ErrEmptyFinalAnswer  = errors.New("agent final answer is empty")
-	ErrInvalidToolCall   = errors.New("invalid agent tool call")
-	ErrInvalidToolResult = errors.New("invalid agent tool result")
-	ErrRepeatedToolCall  = errors.New("repeated identical agent tool call")
+	ErrInvalidEngine        = errors.New("invalid agent engine")
+	ErrInvalidContext       = errors.New("agent context is required")
+	ErrInvalidMessages      = errors.New("agent messages are required")
+	ErrInvalidMaxSteps      = errors.New("agent max steps must be positive")
+	ErrMaxStepsExceeded     = errors.New("agent max steps exceeded")
+	ErrEmptyFinalAnswer     = errors.New("agent final answer is empty")
+	ErrInvalidToolCall      = errors.New("invalid agent tool call")
+	ErrInvalidToolResult    = errors.New("invalid agent tool result")
+	ErrRepeatedToolCall     = errors.New("repeated identical agent tool call")
+	ErrInvalidToolTimeout   = errors.New("agent tool timeout must not be negative")
+	ErrInvalidParallelLimit = errors.New("agent parallel tool limit must be positive")
 )
 
 const (
-	maxModelCallRetries = 2
-	modelRetryDelay     = 50 * time.Millisecond
+	maxModelCallRetries      = 2
+	modelRetryDelay          = 50 * time.Millisecond
+	defaultToolTimeout       = 30 * time.Second
+	defaultParallelToolLimit = 4
 )
 
 const untrustedToolResultPrefix = "UNTRUSTED_TOOL_RESULT\n"
@@ -56,6 +60,8 @@ type Engine struct {
 	approvalGate            func(context.Context, string, json.RawMessage) (bool, error)
 	contextSummarizer       modelruntime.MessageChatRunner
 	allowRepeatedToolCalls  bool
+	toolTimeout             time.Duration
+	parallelToolLimit       int
 }
 
 // EngineOptions controls bounded loop behavior without changing the default
@@ -74,6 +80,11 @@ type EngineOptions struct {
 	// repeated call. It is useful for tools that return a structured duplicate
 	// result so the model can see the reason and choose the next action.
 	AllowRepeatedToolCalls bool
+	// ToolTimeout bounds each individual tool call. Zero uses the default.
+	ToolTimeout time.Duration
+	// ParallelToolLimit caps concurrent read-only calls in one model response.
+	// Zero uses the default.
+	ParallelToolLimit int
 }
 
 // ApprovalGate is called immediately before a tool is executed. Returning
@@ -123,6 +134,20 @@ func NewEngineWithOptions(chat modelruntime.ToolChatRunner, registry *agent.Tool
 	if maxSteps <= 0 {
 		return nil, ErrInvalidMaxSteps
 	}
+	toolTimeout := options.ToolTimeout
+	if toolTimeout == 0 {
+		toolTimeout = defaultToolTimeout
+	}
+	if toolTimeout < 0 {
+		return nil, ErrInvalidToolTimeout
+	}
+	parallelToolLimit := options.ParallelToolLimit
+	if parallelToolLimit == 0 {
+		parallelToolLimit = defaultParallelToolLimit
+	}
+	if parallelToolLimit <= 0 {
+		return nil, ErrInvalidParallelLimit
+	}
 	return &Engine{
 		chat:                    chat,
 		registry:                registry,
@@ -131,6 +156,8 @@ func NewEngineWithOptions(chat modelruntime.ToolChatRunner, registry *agent.Tool
 		approvalGate:            options.ApprovalGate,
 		contextSummarizer:       options.ContextSummarizer,
 		allowRepeatedToolCalls:  options.AllowRepeatedToolCalls,
+		toolTimeout:             toolTimeout,
+		parallelToolLimit:       parallelToolLimit,
 	}, nil
 }
 
@@ -309,10 +336,11 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				toolResult = parallelResults[callIndex].result
 				err = parallelResults[callIndex].err
 			} else {
-				toolResult, err = tool.Call(ctx, arguments)
+				toolResult, err = e.callTool(ctx, tool, arguments)
 			}
 			if err != nil {
-				if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				toolTimedOut := errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil
+				if toolTimedOut || (!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)) {
 					delete(seenToolCalls, callKey)
 					toolContent, feedbackErr := e.recoverToolFailure(&result, emitter, toolCall, err, "工具调用失败，已反馈给模型。")
 					if feedbackErr != nil {
@@ -466,6 +494,7 @@ func (e *Engine) precomputeReadOnlyToolCalls(ctx context.Context, calls []modelc
 	}
 	results := make([]parallelToolExecution, len(calls))
 	var waitGroup sync.WaitGroup
+	semaphore := make(chan struct{}, e.parallelToolLimit)
 	waitGroup.Add(parallelCount)
 	for index := range prepared {
 		if !parallel[index] {
@@ -473,11 +502,22 @@ func (e *Engine) precomputeReadOnlyToolCalls(ctx context.Context, calls []modelc
 		}
 		go func(index int) {
 			defer waitGroup.Done()
-			results[index].result, results[index].err = prepared[index].tool.Call(ctx, prepared[index].args)
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+			results[index].result, results[index].err = e.callTool(ctx, prepared[index].tool, prepared[index].args)
 		}(index)
 	}
 	waitGroup.Wait()
 	return results, parallel
+}
+
+func (e *Engine) callTool(ctx context.Context, tool agent.Tool, args json.RawMessage) (agent.ToolResult, error) {
+	if e.toolTimeout <= 0 {
+		return tool.Call(ctx, args)
+	}
+	toolContext, cancel := context.WithTimeout(ctx, e.toolTimeout)
+	defer cancel()
+	return tool.Call(toolContext, args)
 }
 
 func (e *Engine) chatWithRetry(ctx context.Context, conversation []modelclient.ChatMessage, definitions []agent.FunctionDefinition) (modelclient.ChatResponse, error) {

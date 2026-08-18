@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
@@ -39,6 +40,19 @@ type parallelToolStub struct {
 	name    string
 	started chan<- struct{}
 	release <-chan struct{}
+}
+
+type timeoutToolStub struct{}
+
+func (timeoutToolStub) Name() string { return "slow_read" }
+
+func (timeoutToolStub) Description() string { return "slow read-only tool" }
+
+func (timeoutToolStub) Parameters() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+
+func (timeoutToolStub) Call(ctx context.Context, _ json.RawMessage) (agent.ToolResult, error) {
+	<-ctx.Done()
+	return agent.ToolResult{}, ctx.Err()
 }
 
 func (t parallelToolStub) Name() string { return t.name }
@@ -154,6 +168,34 @@ func TestEngineKeepsSafeToolsParallelWhenAnotherCallIsInvalid(t *testing.T) {
 	result, err := engine.Run(context.Background(), "run-partial-parallel-tools", []modelclient.ChatMessage{{Role: "user", Content: "查询"}})
 	if err != nil || result.Run.FinalAnswer() != "完成" {
 		t.Fatalf("Run() = (%#v, %v), want completed answer", result.Run, err)
+	}
+}
+
+func TestEngineAppliesPerToolTimeout(t *testing.T) {
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(timeoutToolStub{}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	callCount := 0
+	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		callCount++
+		if callCount == 1 {
+			return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+				ID: "slow-call", Type: "function", Function: modelclient.ToolCallFunction{Name: "slow_read", Arguments: `{}`},
+			}}}, nil
+		}
+		if len(messages) != 3 || messages[2].ToolCallID != "slow-call" {
+			t.Fatalf("messages = %#v, want timed-out tool result", messages)
+		}
+		return modelclient.ChatResponse{Message: "已根据错误继续处理"}, nil
+	}}
+	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 3, agentruntime.EngineOptions{ToolTimeout: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("NewEngineWithOptions() error = %v", err)
+	}
+	result, err := engine.Run(context.Background(), "run-tool-timeout", []modelclient.ChatMessage{{Role: "user", Content: "查询"}})
+	if err != nil || result.Run.FinalAnswer() != "已根据错误继续处理" {
+		t.Fatalf("Run() = (%#v, %v), want recovered answer", result.Run, err)
 	}
 }
 
