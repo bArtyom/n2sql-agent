@@ -11,17 +11,17 @@ import (
 )
 
 type Executor interface {
-	Execute(context.Context, Run, agentruntimeEventSink) error
+	Execute(context.Context, Run, EventSink) error
 }
 
-// agentruntimeEventSink is kept local so the persistence worker does not
-// depend on the HTTP transport. The handler can adapt it to the Agent event
-// type and publish into the existing Hub.
-type agentruntimeEventSink func(agent.Event) error
+// EventSink is the transport-neutral event channel used by a Worker executor.
+// The executor can publish Agent lifecycle events without knowing whether the
+// consumer is an SSE handler, a WebSocket gateway, or a durable event store.
+type EventSink func(agent.Event) error
 
-type ExecutorFunc func(context.Context, Run, func(agent.Event) error) error
+type ExecutorFunc func(context.Context, Run, EventSink) error
 
-func (f ExecutorFunc) Execute(ctx context.Context, run Run, sink agentruntimeEventSink) error {
+func (f ExecutorFunc) Execute(ctx context.Context, run Run, sink EventSink) error {
 	return f(ctx, run, sink)
 }
 

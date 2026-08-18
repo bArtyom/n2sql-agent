@@ -1572,12 +1572,26 @@ async function streamAgentQuestion(prompt: string, answerIndex: number, activeCo
           attachments: attachments.map(({ filename, contentType, dataBase64 }) => ({ filename, content_type: contentType, data_base64: dataBase64 })),
         }),
   });
-  if (!response.ok || !response.body) {
+  if (!response.ok) {
     const payload = await response.json().catch(() => null);
     throw new Error(payload?.error || "问答服务暂不可用");
   }
   try {
-    const initialRunID = response.headers.get("X-Agent-Run-ID");
+    if (researchMode) {
+      if (!response.body) throw new Error("问答服务没有返回流式内容。");
+      await readAgentSSE(response, answerIndex, true);
+      return;
+    }
+    const payload = await response.json() as { run_id?: string; stream_url?: string };
+    const initialRunID = payload.run_id || response.headers.get("X-Agent-Run-ID");
+    if (!initialRunID) throw new Error("问答服务没有返回运行 ID。");
+    const streamResponse = await fetch(payload.stream_url || `/api/knowledge-bases/${selectedKnowledgeBaseId.value}/agent-runs/${encodeURIComponent(initialRunID)}/stream`, {
+      method: "GET",
+      headers: { Accept: "text/event-stream" },
+    });
+    if (!streamResponse.ok || !streamResponse.body) {
+      throw new Error("无法连接 Agent 流式通道。");
+    }
     if (initialRunID) {
       messages.value[answerIndex].runID = initialRunID;
       // 记住未完成运行：刷新后可以重连 Hub 恢复，而不用重新调用模型。
@@ -1585,7 +1599,7 @@ async function streamAgentQuestion(prompt: string, answerIndex: number, activeCo
         savePendingRun({ knowledgeBaseId: selectedKnowledgeBaseId.value, runID: initialRunID, conversationId: activeConversationID });
       }
     }
-    await readAgentSSE(response, answerIndex, researchMode);
+    await readAgentSSE(streamResponse, answerIndex, false);
   } catch (error) {
     const currentAnswer = messages.value[answerIndex];
     if (!researchMode && currentAnswer?.runID) {

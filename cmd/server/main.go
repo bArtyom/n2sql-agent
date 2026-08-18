@@ -11,6 +11,8 @@ import (
 	"syscall"
 
 	"github.com/bArtyom/n2sql-agent/internal/a2a"
+	"github.com/bArtyom/n2sql-agent/internal/agent"
+	"github.com/bArtyom/n2sql-agent/internal/agentrun"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/agentstream"
 	"github.com/bArtyom/n2sql-agent/internal/app"
@@ -24,6 +26,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/documentocr"
 	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
 	"github.com/bArtyom/n2sql-agent/internal/followup"
+	"github.com/bArtyom/n2sql-agent/internal/handler"
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
 	"github.com/bArtyom/n2sql-agent/internal/memory"
 	"github.com/bArtyom/n2sql-agent/internal/metrics"
@@ -72,6 +75,7 @@ func main() {
 	processor := worker.NewEmbeddingHierarchicalChunkingProcessor(extractor, parentSplitter, childSplitter, chunkStore, embeddingService)
 	metricsRegistry := metrics.New()
 	agentStreamHub := agentstream.NewHub()
+	agentRunStore := agentrun.NewPostgresStore(db)
 	a2aStore := a2a.NewPostgresStore(db)
 	searchService := retrieval.NewHybridServiceWithRerankerAndRewriterAndCache(
 		embeddingService,
@@ -109,6 +113,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	agentRunExecutor := handler.NewPersistentAgentExecutor(agentAnswerService, conversationService, agentStreamHub, metricsRegistry)
+	agentRunRunner, err := agentrun.NewRunnerWithEventSink(agentRunStore, agentRunExecutor, func(run agentrun.Run) func(agent.Event) error {
+		return agentStreamHub.PublishAgent
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
 	agentAnswerService.SetMemoryStore(memoryStore)
 	knowledgeResearcher, err := multiagent.NewAutonomousKnowledgeSearchResearcher(chatService, searchService, cfg.AgentMaxSteps, cfg.AgentMaxToolResultBytes)
 	if err != nil {
@@ -139,6 +150,8 @@ func main() {
 			AgentAnswers:               agentAnswerService,
 			AgentStreamingAnswers:      agentAnswerService,
 			AgentStreamHub:             agentStreamHub,
+			AgentRuns:                  agentRunStore,
+			AgentRunExecutor:           agentRunExecutor,
 			MultiAgentAnswers:          multiAgentAnswers,
 			MultiAgentStreamingAnswers: multiAgentAnswers,
 			A2AAnswers:                 multiAgentAnswers,
@@ -174,12 +187,19 @@ func main() {
 		}()
 	}
 	workerDone := make(chan struct{})
+	agentRunDone := make(chan struct{})
 	a2aRunner := a2a.NewRunnerWithCleanup(a2aStore, multiAgentAnswers, cfg.AgentTimeout, cfg.A2ATaskRetention, cfg.A2ACleanupInterval, metricsRegistry)
 	a2aDone := make(chan struct{})
 	go func() {
 		defer close(a2aDone)
 		a2aRunner.Run(runContext, cfg.WorkerPollInterval, func(err error) {
 			slog.ErrorContext(runContext, "a2a_worker_loop_error", "error", err)
+		})
+	}()
+	go func() {
+		defer close(agentRunDone)
+		agentRunRunner.Run(runContext, cfg.WorkerPollInterval, func(err error) {
+			slog.ErrorContext(runContext, "agent_worker_loop_error", "error", err)
 		})
 	}()
 	go func() {
@@ -193,6 +213,7 @@ func main() {
 	serveErr := app.RunServer(runContext, server, 0)
 	stop()
 	<-workerDone
+	<-agentRunDone
 	<-a2aDone
 	if pprofDone != nil {
 		<-pprofDone

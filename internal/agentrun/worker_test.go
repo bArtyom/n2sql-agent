@@ -38,7 +38,7 @@ func (s *runStoreStub) MarkCanceled(context.Context, int64) error {
 
 func TestRunnerMarksSucceededAfterExecution(t *testing.T) {
 	store := &runStoreStub{run: Run{ID: 1, RunID: "run-1"}, status: StatusPending}
-	runner, err := NewRunner(store, ExecutorFunc(func(_ context.Context, run Run, sink func(agent.Event) error) error {
+	runner, err := NewRunner(store, ExecutorFunc(func(_ context.Context, run Run, sink EventSink) error {
 		if run.RunID != "run-1" {
 			t.Fatalf("run id = %q", run.RunID)
 		}
@@ -55,7 +55,7 @@ func TestRunnerMarksSucceededAfterExecution(t *testing.T) {
 
 func TestRunnerMarksFailedExecution(t *testing.T) {
 	store := &runStoreStub{run: Run{ID: 2, RunID: "run-2"}, status: StatusPending}
-	runner, err := NewRunner(store, ExecutorFunc(func(context.Context, Run, func(agent.Event) error) error {
+	runner, err := NewRunner(store, ExecutorFunc(func(context.Context, Run, EventSink) error {
 		return errors.New("model unavailable")
 	}))
 	if err != nil {
