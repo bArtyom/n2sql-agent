@@ -60,6 +60,14 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("claim agent run: %w", err)
 	}
+	if checkpointStore, ok := r.store.(ToolCheckpointStore); ok {
+		checkpoints, checkpointErr := checkpointStore.ListToolCheckpoints(ctx, run.ID)
+		if checkpointErr != nil {
+			_ = r.store.MarkFailed(context.WithoutCancel(ctx), run.ID, checkpointErr.Error())
+			return true, fmt.Errorf("load agent tool checkpoints: %w", checkpointErr)
+		}
+		run.Checkpoints = checkpoints
+	}
 
 	started := time.Now()
 	sink := func(agent.Event) error { return nil }

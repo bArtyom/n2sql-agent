@@ -2,6 +2,8 @@ package agentruntime_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -82,6 +84,12 @@ func (nonRetryableToolStub) Name() string { return "document_write" }
 func (nonRetryableToolStub) RequiresApproval() bool { return true }
 
 func (nonRetryableToolStub) Retryable() bool { return false }
+
+type readOnlyToolStub struct{ toolStub }
+
+func (readOnlyToolStub) RequiresApproval() bool { return false }
+
+func (readOnlyToolStub) Retryable() bool { return true }
 
 func (t *toolStub) Description() string { return "search the knowledge base" }
 
@@ -917,6 +925,39 @@ func TestEngineFeedsToolExecutionFailureBackToModel(t *testing.T) {
 	}
 	if result.Run.Status() != agent.RunSucceeded || modelCalls != 2 {
 		t.Fatalf("run status=%s model_calls=%d, want succeeded and 2 calls", result.Run.Status(), modelCalls)
+	}
+}
+
+func TestEngineReusesMatchingSafeCheckpointWithoutCallingTool(t *testing.T) {
+	called := false
+	tool := &readOnlyToolStub{toolStub: toolStub{onCall: func(context.Context) { called = true }}}
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(tool); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	arguments := `{"query":"年假"}`
+	sum := sha256.Sum256([]byte("knowledge_search\x00" + arguments))
+	engine, err := agentruntime.NewEngineWithOptions(chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		if len(messages) == 1 {
+			return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+				ID: "call-resume", Type: "function", Function: modelclient.ToolCallFunction{Name: "knowledge_search", Arguments: arguments},
+			}}}, nil
+		}
+		if !strings.Contains(messages[len(messages)-1].Content, "checkpoint content") {
+			t.Fatalf("model did not receive checkpoint content: %#v", messages)
+		}
+		return modelclient.ChatResponse{Message: "根据已恢复的检索结果回答"}, nil
+	}}, registry, 2, agentruntime.EngineOptions{ResumeCheckpoints: []agentruntime.ResumeCheckpoint{{
+		ToolName: "knowledge_search", ArgumentsHash: hex.EncodeToString(sum[:]), Content: "checkpoint content",
+	}}})
+	if err != nil {
+		t.Fatalf("NewEngineWithOptions() error = %v", err)
+	}
+	if _, err := engine.Run(context.Background(), "run-resume-safe", []modelclient.ChatMessage{{Role: "user", Content: "查询"}}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if called {
+		t.Fatal("safe checkpoint was not reused")
 	}
 }
 

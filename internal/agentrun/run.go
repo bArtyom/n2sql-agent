@@ -28,21 +28,22 @@ var (
 const defaultLeaseDuration = 5 * time.Minute
 
 type Run struct {
-	ID              int64           `json:"id"`
-	RunID           string          `json:"run_id"`
-	KnowledgeBaseID int64           `json:"knowledge_base_id"`
-	ConversationID  int64           `json:"conversation_id,omitempty"`
-	Request         json.RawMessage `json:"request"`
-	Response        json.RawMessage `json:"response,omitempty"`
-	Status          Status          `json:"status"`
-	AttemptCount    int             `json:"attempt_count"`
-	ErrorMessage    string          `json:"error_message,omitempty"`
-	CreatedAt       time.Time       `json:"created_at"`
-	StartedAt       *time.Time      `json:"started_at,omitempty"`
-	FinishedAt      *time.Time      `json:"finished_at,omitempty"`
-	LeaseUntil      *time.Time      `json:"lease_until,omitempty"`
-	HeartbeatAt     *time.Time      `json:"heartbeat_at,omitempty"`
-	UpdatedAt       time.Time       `json:"updated_at"`
+	ID              int64            `json:"id"`
+	RunID           string           `json:"run_id"`
+	KnowledgeBaseID int64            `json:"knowledge_base_id"`
+	ConversationID  int64            `json:"conversation_id,omitempty"`
+	Request         json.RawMessage  `json:"request"`
+	Response        json.RawMessage  `json:"response,omitempty"`
+	Status          Status           `json:"status"`
+	AttemptCount    int              `json:"attempt_count"`
+	ErrorMessage    string           `json:"error_message,omitempty"`
+	CreatedAt       time.Time        `json:"created_at"`
+	StartedAt       *time.Time       `json:"started_at,omitempty"`
+	FinishedAt      *time.Time       `json:"finished_at,omitempty"`
+	LeaseUntil      *time.Time       `json:"lease_until,omitempty"`
+	HeartbeatAt     *time.Time       `json:"heartbeat_at,omitempty"`
+	UpdatedAt       time.Time        `json:"updated_at"`
+	Checkpoints     []ToolCheckpoint `json:"-"`
 }
 
 type CreateInput struct {
@@ -78,15 +79,18 @@ type ResultWriter interface {
 // It is a recovery boundary, not a raw tool-output archive.
 type ToolCheckpointStore interface {
 	SaveToolCheckpoint(context.Context, ToolCheckpoint) error
+	ListToolCheckpoints(context.Context, int64) ([]ToolCheckpoint, error)
 }
 
 type ToolCheckpoint struct {
-	AgentRunID   int64
-	AttemptCount int
-	StepNumber   int
-	ToolCallID   string
-	ToolName     string
-	Payload      json.RawMessage
+	AgentRunID    int64
+	AttemptCount  int
+	StepNumber    int
+	ToolCallID    string
+	ToolName      string
+	ArgumentsHash string
+	Content       string
+	Payload       json.RawMessage
 }
 
 type PostgresStore struct{ db *sql.DB }
@@ -190,7 +194,8 @@ func (s *PostgresStore) SaveResponse(ctx context.Context, id int64, response jso
 
 func (s *PostgresStore) SaveToolCheckpoint(ctx context.Context, checkpoint ToolCheckpoint) error {
 	if checkpoint.AgentRunID <= 0 || checkpoint.AttemptCount <= 0 || checkpoint.StepNumber <= 0 ||
-		checkpoint.ToolCallID == "" || checkpoint.ToolName == "" || len(checkpoint.Payload) == 0 || !json.Valid(checkpoint.Payload) {
+		checkpoint.ToolCallID == "" || checkpoint.ToolName == "" || checkpoint.ArgumentsHash == "" || checkpoint.Content == "" ||
+		len(checkpoint.Payload) == 0 || !json.Valid(checkpoint.Payload) {
 		return ErrInvalidRun
 	}
 	_, err := s.db.ExecContext(ctx, `
@@ -207,6 +212,45 @@ func (s *PostgresStore) SaveToolCheckpoint(ctx context.Context, checkpoint ToolC
 		return fmt.Errorf("save agent tool checkpoint: %w", err)
 	}
 	return nil
+}
+
+func (s *PostgresStore) ListToolCheckpoints(ctx context.Context, agentRunID int64) ([]ToolCheckpoint, error) {
+	if agentRunID <= 0 {
+		return nil, ErrInvalidRun
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT attempt_count, step_number, tool_call_id, tool_name, payload
+		FROM agent_run_checkpoints
+		WHERE agent_run_id = $1
+		ORDER BY attempt_count, step_number, id`, agentRunID)
+	if err != nil {
+		return nil, fmt.Errorf("list agent tool checkpoints: %w", err)
+	}
+	defer rows.Close()
+	checkpoints := make([]ToolCheckpoint, 0)
+	for rows.Next() {
+		var checkpoint ToolCheckpoint
+		var envelope struct {
+			ArgumentsHash string          `json:"arguments_hash"`
+			Content       string          `json:"content"`
+			Event         json.RawMessage `json:"event"`
+		}
+		if err := rows.Scan(&checkpoint.AttemptCount, &checkpoint.StepNumber, &checkpoint.ToolCallID, &checkpoint.ToolName, &checkpoint.Payload); err != nil {
+			return nil, fmt.Errorf("scan agent tool checkpoint: %w", err)
+		}
+		if err := json.Unmarshal(checkpoint.Payload, &envelope); err != nil || envelope.ArgumentsHash == "" || envelope.Content == "" || len(envelope.Event) == 0 {
+			continue
+		}
+		checkpoint.AgentRunID = agentRunID
+		checkpoint.ArgumentsHash = envelope.ArgumentsHash
+		checkpoint.Content = envelope.Content
+		checkpoint.Payload = envelope.Event
+		checkpoints = append(checkpoints, checkpoint)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate agent tool checkpoints: %w", err)
+	}
+	return checkpoints, nil
 }
 
 func (s *PostgresStore) RequeueExpired(ctx context.Context) error {

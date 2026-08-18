@@ -5,6 +5,8 @@ import (
 	"log"
 	"strings"
 
+	"github.com/bArtyom/n2sql-agent/internal/agentrun"
+	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 )
 
@@ -42,19 +44,21 @@ type ChatRequest struct {
 	Message string `json:"message"`
 	// RunID is assigned by the streaming transport when it needs a reconnectable
 	// run. It is intentionally not accepted from JSON clients.
-	RunID               string                `json:"-"`
-	TopK                int                   `json:"top_k,omitempty"`
-	ChatModel           string                `json:"chat_model,omitempty"`
-	ThinkingMode        string                `json:"thinking_mode,omitempty"`
-	MaxCompletionTokens int                   `json:"max_completion_tokens,omitempty"`
-	Attachments         []ChatAttachment      `json:"attachments,omitempty"`
-	SimilarityThreshold float64               `json:"similarity_threshold,omitempty"`
-	KeywordThreshold    float64               `json:"keyword_threshold,omitempty"`
-	DocumentIDs         []int64               `json:"document_ids,omitempty"`
-	QueryRewrite        bool                  `json:"query_rewrite,omitempty"`
-	History             []HistoryMessage      `json:"history,omitempty"`
-	ConversationID      int64                 `json:"conversation_id,omitempty"`
-	CachedSummary       *CachedHistorySummary `json:"-"`
+	RunID               string                          `json:"-"`
+	TopK                int                             `json:"top_k,omitempty"`
+	ChatModel           string                          `json:"chat_model,omitempty"`
+	ThinkingMode        string                          `json:"thinking_mode,omitempty"`
+	MaxCompletionTokens int                             `json:"max_completion_tokens,omitempty"`
+	Attachments         []ChatAttachment                `json:"attachments,omitempty"`
+	SimilarityThreshold float64                         `json:"similarity_threshold,omitempty"`
+	KeywordThreshold    float64                         `json:"keyword_threshold,omitempty"`
+	DocumentIDs         []int64                         `json:"document_ids,omitempty"`
+	QueryRewrite        bool                            `json:"query_rewrite,omitempty"`
+	History             []HistoryMessage                `json:"history,omitempty"`
+	ConversationID      int64                           `json:"conversation_id,omitempty"`
+	CachedSummary       *CachedHistorySummary           `json:"-"`
+	RecoveryCheckpoints []agentrun.ToolCheckpoint       `json:"-"`
+	CheckpointSink      agentruntime.ToolCheckpointSink `json:"-"`
 }
 
 type HistorySummaryStats struct {

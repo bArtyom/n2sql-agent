@@ -115,6 +115,24 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 		}
 		request := snapshot.Request
 		request.RunID = run.RunID
+		request.RecoveryCheckpoints = run.Checkpoints
+		if checkpointStore != nil {
+			request.CheckpointSink = func(ctx context.Context, checkpoint agentruntime.ToolCheckpoint) error {
+				payload, err := json.Marshal(map[string]any{
+					"arguments_hash": checkpoint.ArgumentsHash,
+					"content":        checkpoint.Content,
+					"event":          checkpoint.Payload,
+				})
+				if err != nil {
+					return fmt.Errorf("encode tool checkpoint payload: %w", err)
+				}
+				return checkpointStore.SaveToolCheckpoint(ctx, agentrun.ToolCheckpoint{
+					AgentRunID: run.ID, AttemptCount: run.AttemptCount, StepNumber: checkpoint.StepNumber,
+					ToolCallID: checkpoint.ToolCallID, ToolName: checkpoint.ToolName,
+					ArgumentsHash: checkpoint.ArgumentsHash, Content: checkpoint.Content, Payload: payload,
+				})
+			}
+		}
 
 		executionContext, stopRun := context.WithCancel(ctx)
 		defer stopRun()
@@ -147,25 +165,6 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 		emit := func(event agent.Event) error {
 			event.RunID = run.RunID
 			event.Version = agent.EventSchemaVersion
-			if checkpointStore != nil && event.Type == agent.EventToolFinished {
-				payload, marshalErr := json.Marshal(event.Data)
-				if marshalErr != nil {
-					return fmt.Errorf("encode tool checkpoint: %w", marshalErr)
-				}
-				var data struct {
-					ToolCallID string `json:"tool_call_id"`
-					ToolName   string `json:"tool_name"`
-				}
-				if err := json.Unmarshal(payload, &data); err != nil || data.ToolCallID == "" || data.ToolName == "" {
-					return fmt.Errorf("invalid tool checkpoint event")
-				}
-				if err := checkpointStore.SaveToolCheckpoint(executionContext, agentrun.ToolCheckpoint{
-					AgentRunID: run.ID, AttemptCount: run.AttemptCount, StepNumber: event.StepNumber,
-					ToolCallID: data.ToolCallID, ToolName: data.ToolName, Payload: payload,
-				}); err != nil {
-					return err
-				}
-			}
 			if sink != nil {
 				return sink(event)
 			}

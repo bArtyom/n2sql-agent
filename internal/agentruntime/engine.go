@@ -2,6 +2,8 @@ package agentruntime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -62,6 +64,8 @@ type Engine struct {
 	allowRepeatedToolCalls  bool
 	toolTimeout             time.Duration
 	parallelToolLimit       int
+	resumeCheckpoints       []ResumeCheckpoint
+	checkpointSink          ToolCheckpointSink
 }
 
 // EngineOptions controls bounded loop behavior without changing the default
@@ -85,7 +89,29 @@ type EngineOptions struct {
 	// ParallelToolLimit caps concurrent read-only calls in one model response.
 	// Zero uses the default.
 	ParallelToolLimit int
+	// ResumeCheckpoints contains only checkpoints loaded by the durable Worker.
+	// The engine reuses one only when the tool is safe and the arguments hash
+	// matches the new model call exactly.
+	ResumeCheckpoints []ResumeCheckpoint
+	CheckpointSink    ToolCheckpointSink
 }
+
+type ResumeCheckpoint struct {
+	ToolName      string
+	ArgumentsHash string
+	Content       string
+}
+
+type ToolCheckpoint struct {
+	ToolCallID    string
+	ToolName      string
+	StepNumber    int
+	ArgumentsHash string
+	Content       string
+	Payload       any
+}
+
+type ToolCheckpointSink func(context.Context, ToolCheckpoint) error
 
 // ApprovalGate is called immediately before a tool is executed. Returning
 // false rejects the tool call; returning an error aborts the run.
@@ -158,6 +184,8 @@ func NewEngineWithOptions(chat modelruntime.ToolChatRunner, registry *agent.Tool
 		allowRepeatedToolCalls:  options.AllowRepeatedToolCalls,
 		toolTimeout:             toolTimeout,
 		parallelToolLimit:       parallelToolLimit,
+		resumeCheckpoints:       options.ResumeCheckpoints,
+		checkpointSink:          options.CheckpointSink,
 	}, nil
 }
 
@@ -313,7 +341,15 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				return addToolFailureWithEvents(result, toolCall.Function.Name, err, emitter)
 			}
 			arguments := json.RawMessage(toolCall.Function.Arguments)
-			if approvalGate != nil && e.registry.RequiresApproval(toolCall.Function.Name) {
+			var toolResult agent.ToolResult
+			resumed := false
+			if !e.registry.RequiresApproval(toolCall.Function.Name) && e.registry.Retryable(toolCall.Function.Name) {
+				if checkpoint, ok := e.resumeCheckpoint(toolCall.Function.Name, arguments); ok {
+					toolResult = agent.ToolResult{Content: checkpoint.Content, Metadata: map[string]any{"resumed_from_checkpoint": true}}
+					resumed = true
+				}
+			}
+			if !resumed && approvalGate != nil && e.registry.RequiresApproval(toolCall.Function.Name) {
 				if err := emitter.emit(agent.EventApprovalRequired, len(run.Steps())+1, map[string]any{"tool_name": toolCall.Function.Name, "arguments": boundedEventText(toolCall.Function.Arguments)}); err != nil {
 					return result, err
 				}
@@ -331,11 +367,10 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 					return result, err
 				}
 			}
-			var toolResult agent.ToolResult
-			if parallel[callIndex] {
+			if !resumed && parallel[callIndex] {
 				toolResult = parallelResults[callIndex].result
 				err = parallelResults[callIndex].err
-			} else {
+			} else if !resumed {
 				toolResult, err = e.callTool(ctx, tool, arguments)
 			}
 			if err != nil {
@@ -408,6 +443,16 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			}
 			toolFinishedData["no_relevant_results"] = toolResult.NoRelevantResults
 			toolFinishedData["result_summary"] = toolResultSummary(toolResult)
+			toolFinishedData["resumed_from_checkpoint"] = resumed
+			if e.checkpointSink != nil {
+				if err := e.checkpointSink(ctx, ToolCheckpoint{
+					ToolCallID: toolCall.ID, ToolName: toolCall.Function.Name, StepNumber: len(run.Steps()),
+					ArgumentsHash: toolArgumentsHash(toolCall.Function.Name, arguments),
+					Content:       truncateUTF8(toolResult.Content, 32*1024), Payload: toolFinishedData,
+				}); err != nil {
+					return finishErrorWithEvents(result, err, emitter)
+				}
+			}
 			// Structured tool metadata is forwarded for typed rendering while
 			// staying bounded by what each tool already returns.
 			if documents, ok := toolResult.Metadata["documents"]; ok {
@@ -487,6 +532,9 @@ func (e *Engine) precomputeReadOnlyToolCalls(ctx context.Context, calls []modelc
 		}
 		tool, err := e.registry.Find(call.Function.Name)
 		if err != nil || e.registry.RequiresApproval(call.Function.Name) {
+			continue
+		}
+		if _, ok := e.resumeCheckpoint(call.Function.Name, json.RawMessage(call.Function.Arguments)); ok {
 			continue
 		}
 		prepared[index] = struct {
@@ -902,6 +950,23 @@ func normalizedToolCallKey(toolName, arguments string) string {
 		}
 	}
 	return toolName + "\x00" + arguments
+}
+
+func toolArgumentsHash(toolName string, arguments json.RawMessage) string {
+	payload := []byte(normalizedToolCallKey(toolName, string(arguments)))
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
+}
+
+func (e *Engine) resumeCheckpoint(toolName string, arguments json.RawMessage) (ResumeCheckpoint, bool) {
+	wantHash := toolArgumentsHash(toolName, arguments)
+	for index := len(e.resumeCheckpoints) - 1; index >= 0; index-- {
+		checkpoint := e.resumeCheckpoints[index]
+		if checkpoint.ToolName == toolName && checkpoint.ArgumentsHash == wantHash && strings.TrimSpace(checkpoint.Content) != "" {
+			return checkpoint, true
+		}
+	}
+	return ResumeCheckpoint{}, false
 }
 
 func addToolFailureWithEvents(result Result, toolName string, err error, emitter *eventEmitter) (Result, error) {

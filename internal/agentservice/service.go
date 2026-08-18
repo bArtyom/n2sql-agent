@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
+	"github.com/bArtyom/n2sql-agent/internal/agentrun"
 	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
 	"github.com/bArtyom/n2sql-agent/internal/auth"
 	"github.com/bArtyom/n2sql-agent/internal/document"
@@ -270,6 +271,8 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	}
 	engine, err := agentruntime.NewEngineWithOptions(chatRunner, registry, s.maxSteps, agentruntime.EngineOptions{
 		ContextSummarizer: contextSummarizer,
+		ResumeCheckpoints: resumeCheckpoints(request.RecoveryCheckpoints),
+		CheckpointSink:    request.CheckpointSink,
 	})
 	if err != nil {
 		return Response{}, fmt.Errorf("create agent engine: %w", err)
@@ -307,6 +310,19 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		return response, fmt.Errorf("run agent answer: %w", err)
 	}
 	return response, nil
+}
+
+func resumeCheckpoints(checkpoints []agentrun.ToolCheckpoint) []agentruntime.ResumeCheckpoint {
+	if len(checkpoints) == 0 {
+		return nil
+	}
+	result := make([]agentruntime.ResumeCheckpoint, 0, len(checkpoints))
+	for _, checkpoint := range checkpoints {
+		result = append(result, agentruntime.ResumeCheckpoint{
+			ToolName: checkpoint.ToolName, ArgumentsHash: checkpoint.ArgumentsHash, Content: checkpoint.Content,
+		})
+	}
+	return result
 }
 
 func systemPromptFor(documentReaderAvailable, chunkReaderAvailable, documentSummaryAvailable bool) string {
