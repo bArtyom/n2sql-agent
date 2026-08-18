@@ -73,6 +73,22 @@ type ResultWriter interface {
 	SaveResponse(context.Context, int64, json.RawMessage) error
 }
 
+// ToolCheckpointStore persists the bounded result of a completed tool call.
+// The payload must already be truncated and redacted by the Agent runtime.
+// It is a recovery boundary, not a raw tool-output archive.
+type ToolCheckpointStore interface {
+	SaveToolCheckpoint(context.Context, ToolCheckpoint) error
+}
+
+type ToolCheckpoint struct {
+	AgentRunID   int64
+	AttemptCount int
+	StepNumber   int
+	ToolCallID   string
+	ToolName     string
+	Payload      json.RawMessage
+}
+
 type PostgresStore struct{ db *sql.DB }
 
 func NewPostgresStore(db *sql.DB) *PostgresStore { return &PostgresStore{db: db} }
@@ -168,6 +184,27 @@ func (s *PostgresStore) SaveResponse(ctx context.Context, id int64, response jso
 	affected, err := result.RowsAffected()
 	if err != nil || affected == 0 {
 		return fmt.Errorf("save agent run response: no running row")
+	}
+	return nil
+}
+
+func (s *PostgresStore) SaveToolCheckpoint(ctx context.Context, checkpoint ToolCheckpoint) error {
+	if checkpoint.AgentRunID <= 0 || checkpoint.AttemptCount <= 0 || checkpoint.StepNumber <= 0 ||
+		checkpoint.ToolCallID == "" || checkpoint.ToolName == "" || len(checkpoint.Payload) == 0 || !json.Valid(checkpoint.Payload) {
+		return ErrInvalidRun
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO agent_run_checkpoints
+			(agent_run_id, attempt_count, step_number, tool_call_id, tool_name, payload)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (agent_run_id, attempt_count, tool_call_id)
+		DO UPDATE SET step_number = EXCLUDED.step_number,
+		              tool_name = EXCLUDED.tool_name,
+		              payload = EXCLUDED.payload`,
+		checkpoint.AgentRunID, checkpoint.AttemptCount, checkpoint.StepNumber,
+		checkpoint.ToolCallID, checkpoint.ToolName, checkpoint.Payload)
+	if err != nil {
+		return fmt.Errorf("save agent tool checkpoint: %w", err)
 	}
 	return nil
 }

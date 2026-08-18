@@ -129,7 +129,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	agentRunExecutor := handler.NewPersistentAgentExecutor(agentAnswerService, conversationService, agentStreamHub, metricsRegistry, agentRunStore, agentEventStore)
+	agentRunExecutor := handler.NewPersistentAgentExecutorWithCheckpoint(agentAnswerService, conversationService, agentStreamHub, metricsRegistry, agentRunStore, agentEventStore, agentRunStore)
 	agentRunRunner, err := agentrun.NewRunnerWithEventSink(agentRunStore, agentRunExecutor, func(run agentrun.Run) func(agent.Event) error {
 		return func(event agent.Event) error {
 			if err := agentEventStore.Append(context.Background(), run, agentstream.Event{

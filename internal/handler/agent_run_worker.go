@@ -98,6 +98,13 @@ func NewPersistentAgentRunSubmission(maxHistoryBytes int, store agentrun.Store, 
 // history, waiting for approvals, saving the exchange, and publishing
 // transport-only events.
 func NewPersistentAgentExecutor(answerer agentservice.EventAnswerer, conversations *conversation.Service, hub *agentstream.Hub, registry *metrics.Registry, resultWriter agentrun.ResultWriter, eventStore agentrun.EventStore) agentrun.Executor {
+	return NewPersistentAgentExecutorWithCheckpoint(answerer, conversations, hub, registry, resultWriter, eventStore, nil)
+}
+
+// NewPersistentAgentExecutorWithCheckpoint adds a durable boundary after a
+// completed tool event. The event payload is already bounded by the Agent
+// runtime, so the checkpoint stores only a safe summary and metadata.
+func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswerer, conversations *conversation.Service, hub *agentstream.Hub, registry *metrics.Registry, resultWriter agentrun.ResultWriter, eventStore agentrun.EventStore, checkpointStore agentrun.ToolCheckpointStore) agentrun.Executor {
 	return agentrun.ExecutorFunc(func(ctx context.Context, run agentrun.Run, sink agentrun.EventSink) error {
 		if answerer == nil || hub == nil {
 			return agentrun.ErrInvalidRun
@@ -140,6 +147,25 @@ func NewPersistentAgentExecutor(answerer agentservice.EventAnswerer, conversatio
 		emit := func(event agent.Event) error {
 			event.RunID = run.RunID
 			event.Version = agent.EventSchemaVersion
+			if checkpointStore != nil && event.Type == agent.EventToolFinished {
+				payload, marshalErr := json.Marshal(event.Data)
+				if marshalErr != nil {
+					return fmt.Errorf("encode tool checkpoint: %w", marshalErr)
+				}
+				var data struct {
+					ToolCallID string `json:"tool_call_id"`
+					ToolName   string `json:"tool_name"`
+				}
+				if err := json.Unmarshal(payload, &data); err != nil || data.ToolCallID == "" || data.ToolName == "" {
+					return fmt.Errorf("invalid tool checkpoint event")
+				}
+				if err := checkpointStore.SaveToolCheckpoint(executionContext, agentrun.ToolCheckpoint{
+					AgentRunID: run.ID, AttemptCount: run.AttemptCount, StepNumber: event.StepNumber,
+					ToolCallID: data.ToolCallID, ToolName: data.ToolName, Payload: payload,
+				}); err != nil {
+					return err
+				}
+			}
 			if sink != nil {
 				return sink(event)
 			}
