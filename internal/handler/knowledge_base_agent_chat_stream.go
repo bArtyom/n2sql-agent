@@ -86,6 +86,7 @@ func NewKnowledgeBaseAgentChatStreamWithHub(answerer agentservice.EventAnswerer,
 		// The stop endpoint cancels this same context via the registered
 		// function; the engine maps the cancellation to a run_canceled event.
 		executionContext, stopRun := context.WithCancel(context.WithoutCancel(r.Context()))
+		executionContext = agentservice.WithAsyncRun(executionContext)
 		if err := hub.RegisterCancel(runID, stopRun); err != nil {
 			writeKnowledgeBaseAgentChatError(w, fmt.Errorf("register agent run cancel: %w", err))
 			return

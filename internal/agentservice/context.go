@@ -8,6 +8,23 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 )
 
+type asyncRunContextKey struct{}
+
+// WithAsyncRun marks an Agent execution as server-owned rather than tied to
+// the synchronous request timeout. The caller remains responsible for
+// attaching an explicit cancellation path for user-initiated stops.
+func WithAsyncRun(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, asyncRunContextKey{}, true)
+}
+
+func isAsyncRun(ctx context.Context) bool {
+	value, _ := ctx.Value(asyncRunContextKey{}).(bool)
+	return value
+}
+
 // HistoryMessage is a trusted-shape conversation message supplied for short-term context.
 type HistoryMessage struct {
 	ID      int64  `json:"-"`

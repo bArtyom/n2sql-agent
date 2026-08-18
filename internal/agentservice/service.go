@@ -197,7 +197,11 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		}
 		maxDistance = request.SimilarityThreshold
 	}
-	runContext, cancel := context.WithTimeout(ctx, s.timeout)
+	runContext := ctx
+	cancel := func() {}
+	if !isAsyncRun(ctx) {
+		runContext, cancel = context.WithTimeout(ctx, s.timeout)
+	}
 	defer cancel()
 	if thinkingModeRequested {
 		runContext = modelruntime.WithReasoningEffort(runContext, ReasoningEffortForMode(request.ThinkingMode))
