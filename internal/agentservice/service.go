@@ -10,6 +10,7 @@ import (
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
+	"github.com/bArtyom/n2sql-agent/internal/auth"
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/memory"
@@ -201,8 +202,12 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		runContext = modelruntime.WithMaxCompletionTokens(runContext, request.MaxCompletionTokens)
 	}
 	if s.memoryStore != nil {
+		userID, authenticated := auth.UserFromContext(runContext)
 		if content := explicitMemoryContent(request.Message); content != "" {
-			if _, err := s.memoryStore.Create(runContext, memory.CreateInput{KnowledgeBaseID: knowledgeBaseID, Content: content}); err != nil {
+			if !authenticated {
+				return Response{}, fmt.Errorf("save explicit memory: %w", memory.ErrUnauthorized)
+			}
+			if _, err := s.memoryStore.Create(runContext, userID.ID, memory.CreateInput{KnowledgeBaseID: knowledgeBaseID, Content: content}); err != nil {
 				return Response{}, fmt.Errorf("save explicit memory: %w", err)
 			}
 			request.Message = "请简短确认，告诉用户这条信息已经被记住；不要调用知识库工具。"
@@ -330,7 +335,11 @@ func (s *Service) memoryPrompt(ctx context.Context, knowledgeBaseID int64) strin
 	if s == nil || s.memoryStore == nil {
 		return ""
 	}
-	items, err := s.memoryStore.List(ctx, knowledgeBaseID)
+	user, authenticated := auth.UserFromContext(ctx)
+	if !authenticated {
+		return ""
+	}
+	items, err := s.memoryStore.List(ctx, user.ID, knowledgeBaseID)
 	if err != nil || len(items) == 0 {
 		return ""
 	}

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/bArtyom/n2sql-agent/internal/auth"
 	"github.com/bArtyom/n2sql-agent/internal/memory"
 )
 
@@ -13,6 +14,11 @@ const maxMemoryRequestBytes = 4096
 
 func NewMemories(store memory.Store) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, authenticated := auth.UserFromContext(r.Context())
+		if !authenticated {
+			writeMemoryError(w, memory.ErrUnauthorized)
+			return
+		}
 		knowledgeBaseID, err := parsePositiveID(r.PathValue("id"))
 		if err != nil {
 			http.Error(w, `{"error":"invalid knowledge base ID"}`, http.StatusBadRequest)
@@ -28,7 +34,7 @@ func NewMemories(store memory.Store) http.Handler {
 				w.WriteHeader(http.StatusMethodNotAllowed)
 				return
 			}
-			if err := store.Delete(r.Context(), knowledgeBaseID, memoryID); err != nil {
+			if err := store.Delete(r.Context(), user.ID, knowledgeBaseID, memoryID); err != nil {
 				writeMemoryError(w, err)
 				return
 			}
@@ -38,7 +44,7 @@ func NewMemories(store memory.Store) http.Handler {
 
 		switch r.Method {
 		case http.MethodGet:
-			items, err := store.List(r.Context(), knowledgeBaseID)
+			items, err := store.List(r.Context(), user.ID, knowledgeBaseID)
 			if err != nil {
 				writeMemoryError(w, err)
 				return
@@ -61,7 +67,7 @@ func NewMemories(store memory.Store) http.Handler {
 				writeMemoryError(w, memory.ErrInvalidContent)
 				return
 			}
-			item, err := store.Create(r.Context(), memory.CreateInput{KnowledgeBaseID: knowledgeBaseID, Content: content})
+			item, err := store.Create(r.Context(), user.ID, memory.CreateInput{KnowledgeBaseID: knowledgeBaseID, Content: content})
 			if err != nil {
 				writeMemoryError(w, err)
 				return
@@ -78,6 +84,8 @@ func writeMemoryError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, memory.ErrInvalidKnowledgeBase), errors.Is(err, memory.ErrInvalidMemory), errors.Is(err, memory.ErrInvalidContent):
 		http.Error(w, `{"error":"invalid memory request"}`, http.StatusBadRequest)
+	case errors.Is(err, memory.ErrUnauthorized):
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 	case errors.Is(err, memory.ErrNotFound):
 		http.Error(w, `{"error":"memory not found"}`, http.StatusNotFound)
 	default:
