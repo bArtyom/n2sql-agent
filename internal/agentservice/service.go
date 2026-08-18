@@ -390,12 +390,6 @@ func mergeMemoryProfile(ctx context.Context, chat modelruntime.ToolChatRunner, c
 	if current == "" {
 		return candidate
 	}
-	if strings.Contains(current, candidate) {
-		return truncateUTF8(current, memory.MaxProfileBytes)
-	}
-	if strings.Contains(candidate, current) {
-		return truncateUTF8(candidate, memory.MaxProfileBytes)
-	}
 	appended := current + "\n" + candidate
 	if len([]byte(appended)) <= memory.MaxProfileCompactionBytes {
 		return appended

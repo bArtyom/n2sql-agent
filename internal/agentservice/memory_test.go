@@ -42,13 +42,6 @@ func TestMemoryPromptBoundsAndLabelsStoredFacts(t *testing.T) {
 	}
 }
 
-func TestMergeMemoryProfileKeepsExistingFactsWhenCandidateIsDuplicate(t *testing.T) {
-	got := mergeMemoryProfile(context.Background(), nil, "喜欢简洁回答\n使用 Go", "喜欢简洁回答")
-	if got != "喜欢简洁回答\n使用 Go" {
-		t.Fatalf("profile = %q, want existing facts preserved", got)
-	}
-}
-
 type profileMergeChatStub struct {
 	calls int
 }
