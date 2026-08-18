@@ -35,6 +35,26 @@ type toolStub struct {
 	onCall     func(context.Context)
 }
 
+type parallelToolStub struct {
+	name    string
+	started chan<- struct{}
+	release <-chan struct{}
+}
+
+func (t parallelToolStub) Name() string { return t.name }
+
+func (t parallelToolStub) Description() string { return "parallel read-only tool" }
+
+func (t parallelToolStub) Parameters() json.RawMessage {
+	return json.RawMessage(`{"type":"object"}`)
+}
+
+func (t parallelToolStub) Call(context.Context, json.RawMessage) (agent.ToolResult, error) {
+	t.started <- struct{}{}
+	<-t.release
+	return agent.ToolResult{Content: t.name + " result"}, nil
+}
+
 func (t *toolStub) Name() string { return "knowledge_search" }
 
 func (t *toolStub) RequiresApproval() bool { return true }
@@ -58,6 +78,44 @@ func (t *toolStub) Call(ctx context.Context, args json.RawMessage) (agent.ToolRe
 		content = `[{"content":"annual leave policy"}]`
 	}
 	return agent.ToolResult{Content: content, Metadata: t.metadata, NoRelevantResults: t.noRelevant, FallbackAnswer: t.fallback}, nil
+}
+
+func TestEngineRunsIndependentReadOnlyToolsInParallel(t *testing.T) {
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	go func() {
+		<-started
+		<-started
+		close(release)
+	}()
+	registry := agent.NewToolRegistry()
+	for _, name := range []string{"search_a", "search_b"} {
+		if err := registry.Register(parallelToolStub{name: name, started: started, release: release}); err != nil {
+			t.Fatalf("Register(%s) error = %v", name, err)
+		}
+	}
+	callCount := 0
+	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		callCount++
+		if callCount == 1 {
+			return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{
+				{ID: "call-a", Type: "function", Function: modelclient.ToolCallFunction{Name: "search_a", Arguments: `{}`}},
+				{ID: "call-b", Type: "function", Function: modelclient.ToolCallFunction{Name: "search_b", Arguments: `{}`}},
+			}}, nil
+		}
+		if len(messages) != 4 || messages[2].ToolCallID != "call-a" || messages[3].ToolCallID != "call-b" {
+			t.Fatalf("tool messages = %#v, want original call order", messages)
+		}
+		return modelclient.ChatResponse{Message: "完成"}, nil
+	}}
+	engine, err := agentruntime.NewEngine(chat, registry, 3)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	result, err := engine.Run(context.Background(), "run-parallel-tools", []modelclient.ChatMessage{{Role: "user", Content: "查询"}})
+	if err != nil || result.Run.FinalAnswer() != "完成" {
+		t.Fatalf("Run() = (%#v, %v), want completed answer", result.Run, err)
+	}
 }
 
 func TestEngineRefusesWhenToolHasNoRelevantKnowledge(t *testing.T) {

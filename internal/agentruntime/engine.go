@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
@@ -242,9 +243,10 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			Content:   response.Message,
 			ToolCalls: response.ToolCalls,
 		})
+		parallelResults, parallel := e.precomputeReadOnlyToolCalls(ctx, response.ToolCalls, seenToolCalls)
 		var fallbackAnswer string
 		hasRelevantToolResult := false
-		for _, toolCall := range response.ToolCalls {
+		for callIndex, toolCall := range response.ToolCalls {
 			if err := emitter.emit(agent.EventToolCalled, len(run.Steps())+1, map[string]any{
 				"tool_call_id": toolCall.ID,
 				"tool_name":    toolCall.Function.Name,
@@ -302,7 +304,13 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 					return result, err
 				}
 			}
-			toolResult, err := tool.Call(ctx, arguments)
+			var toolResult agent.ToolResult
+			if parallel {
+				toolResult = parallelResults[callIndex].result
+				err = parallelResults[callIndex].err
+			} else {
+				toolResult, err = tool.Call(ctx, arguments)
+			}
 			if err != nil {
 				if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 					delete(seenToolCalls, callKey)
@@ -399,6 +407,59 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 	}
 
 	return finishErrorWithCategory(result, ErrMaxStepsExceeded, agent.FailureStepLimit, emitter)
+}
+
+type parallelToolExecution struct {
+	result agent.ToolResult
+	err    error
+}
+
+// precomputeReadOnlyToolCalls starts independent, already-valid read-only
+// tools together. The normal loop still validates, records, emits events, and
+// appends results in the model's original order. If any call needs approval or
+// cannot be prepared safely, the caller falls back to the existing sequential
+// path for the whole batch.
+func (e *Engine) precomputeReadOnlyToolCalls(ctx context.Context, calls []modelclient.ToolCall, seen map[string]struct{}) ([]parallelToolExecution, bool) {
+	if len(calls) < 2 {
+		return nil, false
+	}
+	prepared := make([]struct {
+		tool agent.Tool
+		args json.RawMessage
+	}, len(calls))
+	batchSeen := make(map[string]struct{}, len(calls))
+	for index, call := range calls {
+		if err := validateToolCall(call); err != nil {
+			return nil, false
+		}
+		key := normalizedToolCallKey(call.Function.Name, call.Function.Arguments)
+		if _, repeated := seen[key]; repeated && !e.allowRepeatedToolCalls {
+			return nil, false
+		}
+		if _, repeated := batchSeen[key]; repeated && !e.allowRepeatedToolCalls {
+			return nil, false
+		}
+		batchSeen[key] = struct{}{}
+		tool, err := e.registry.Find(call.Function.Name)
+		if err != nil || e.registry.RequiresApproval(call.Function.Name) {
+			return nil, false
+		}
+		prepared[index] = struct {
+			tool agent.Tool
+			args json.RawMessage
+		}{tool: tool, args: json.RawMessage(call.Function.Arguments)}
+	}
+	results := make([]parallelToolExecution, len(calls))
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(len(prepared))
+	for index := range prepared {
+		go func(index int) {
+			defer waitGroup.Done()
+			results[index].result, results[index].err = prepared[index].tool.Call(ctx, prepared[index].args)
+		}(index)
+	}
+	waitGroup.Wait()
+	return results, true
 }
 
 func (e *Engine) chatWithRetry(ctx context.Context, conversation []modelclient.ChatMessage, definitions []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
