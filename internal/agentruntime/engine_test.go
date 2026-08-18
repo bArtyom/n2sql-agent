@@ -73,6 +73,16 @@ func (t *toolStub) Name() string { return "knowledge_search" }
 
 func (t *toolStub) RequiresApproval() bool { return true }
 
+func (t *toolStub) Retryable() bool { return true }
+
+type nonRetryableToolStub struct{ toolStub }
+
+func (nonRetryableToolStub) Name() string { return "document_write" }
+
+func (nonRetryableToolStub) RequiresApproval() bool { return true }
+
+func (nonRetryableToolStub) Retryable() bool { return false }
+
 func (t *toolStub) Description() string { return "search the knowledge base" }
 
 func (t *toolStub) Parameters() json.RawMessage {
@@ -907,6 +917,38 @@ func TestEngineFeedsToolExecutionFailureBackToModel(t *testing.T) {
 	}
 	if result.Run.Status() != agent.RunSucceeded || modelCalls != 2 {
 		t.Fatalf("run status=%s model_calls=%d, want succeeded and 2 calls", result.Run.Status(), modelCalls)
+	}
+}
+
+func TestEngineDoesNotFeedSideEffectFailureBackForAutomaticRetry(t *testing.T) {
+	wantErr := errors.New("remote write status unknown")
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(&nonRetryableToolStub{toolStub: toolStub{err: wantErr}}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	modelCalls := 0
+	chat := chatStub{call: func(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		modelCalls++
+		return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+			ID:   "call-write",
+			Type: "function",
+			Function: modelclient.ToolCallFunction{
+				Name:      "document_write",
+				Arguments: `{}`,
+			},
+		}}}, nil
+	}}
+	engine, err := agentruntime.NewEngine(chat, registry, 2)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+
+	_, err = engine.Run(context.Background(), "run-write-ambiguous", []modelclient.ChatMessage{{Role: "user", Content: "写入文档"}})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Run() error = %v, want original side-effect error", err)
+	}
+	if modelCalls != 1 {
+		t.Fatalf("model calls = %d, want 1; side-effect failure must not be offered as an automatic retry", modelCalls)
 	}
 }
 

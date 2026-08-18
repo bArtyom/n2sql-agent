@@ -341,6 +341,12 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			if err != nil {
 				toolTimedOut := errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil
 				if toolTimedOut || (!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)) {
+					if !e.registry.Retryable(toolCall.Function.Name) {
+						if _, feedbackErr := e.recoverToolFailure(&result, emitter, toolCall, err, "有副作用的工具执行失败，无法安全自动重试。请确认外部系统状态后再决定是否继续。"); feedbackErr != nil {
+							return finishErrorWithEvents(result, feedbackErr, emitter)
+						}
+						return result, fmt.Errorf("non-retryable tool %q failed: %w", toolCall.Function.Name, err)
+					}
 					delete(seenToolCalls, callKey)
 					toolContent, feedbackErr := e.recoverToolFailure(&result, emitter, toolCall, err, "工具调用失败，已反馈给模型。")
 					if feedbackErr != nil {
@@ -352,6 +358,12 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				return addToolFailureWithEvents(result, toolCall.Function.Name, fmt.Errorf("execute tool: %w", err), emitter)
 			}
 			if strings.TrimSpace(toolResult.Content) == "" {
+				if !e.registry.Retryable(toolCall.Function.Name) {
+					if _, feedbackErr := e.recoverToolFailure(&result, emitter, toolCall, ErrInvalidToolResult, "有副作用的工具返回空结果，无法确认是否执行成功，因此不会自动重试。"); feedbackErr != nil {
+						return finishErrorWithEvents(result, feedbackErr, emitter)
+					}
+					return result, fmt.Errorf("non-retryable tool %q returned an empty result: %w", toolCall.Function.Name, ErrInvalidToolResult)
+				}
 				{
 					delete(seenToolCalls, callKey)
 					toolContent, feedbackErr := e.recoverToolFailure(&result, emitter, toolCall, ErrInvalidToolResult, "工具调用返回空结果，已反馈给模型。")

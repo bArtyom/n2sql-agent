@@ -22,6 +22,12 @@ type approvingTool struct{ stubTool }
 
 func (approvingTool) RequiresApproval() bool { return true }
 
+type approvingRetryableTool struct{ stubTool }
+
+func (approvingRetryableTool) RequiresApproval() bool { return true }
+
+func (approvingRetryableTool) Retryable() bool { return true }
+
 func (t invalidDefinitionTool) Parameters() json.RawMessage {
 	return t.parameters
 }
@@ -72,6 +78,30 @@ func TestToolRegistryApprovalPolicyDefaultsToReadOnly(t *testing.T) {
 	}
 	if !registry.RequiresApproval("document_write") {
 		t.Fatal("approval-aware tool does not require approval")
+	}
+}
+
+func TestToolRegistryRetryPolicyDefaultsToSafeTools(t *testing.T) {
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(stubTool{name: "knowledge_search"}); err != nil {
+		t.Fatal(err)
+	}
+	if !registry.Retryable("knowledge_search") {
+		t.Fatal("ordinary read-only tool should be retryable")
+	}
+
+	if err := registry.Register(approvingTool{stubTool{name: "document_write"}}); err != nil {
+		t.Fatal(err)
+	}
+	if registry.Retryable("document_write") {
+		t.Fatal("side-effect tool should not be retryable without an explicit policy")
+	}
+
+	if err := registry.Register(approvingRetryableTool{stubTool{name: "idempotent_write"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !registry.Retryable("idempotent_write") {
+		t.Fatal("explicitly idempotent tool should be retryable")
 	}
 }
 

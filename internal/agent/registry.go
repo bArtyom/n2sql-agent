@@ -32,6 +32,15 @@ type ApprovalAwareTool interface {
 	RequiresApproval() bool
 }
 
+// RetryableTool optionally declares whether a tool may be automatically
+// retried after an ambiguous failure. Ordinary read-only tools are retryable
+// by default. A tool that requires approval is non-retryable by default unless
+// it explicitly proves that repeating the operation is safe (for example by
+// using an idempotency key in the downstream system).
+type RetryableTool interface {
+	Retryable() bool
+}
+
 // ToolResult is the normalized result returned by a tool.
 type ToolResult struct {
 	Content           string         `json:"content"`
@@ -124,6 +133,19 @@ func (r *ToolRegistry) RequiresApproval(name string) bool {
 	}
 	aware, ok := tool.(ApprovalAwareTool)
 	return ok && aware.RequiresApproval()
+}
+
+// Retryable reports whether the Agent may feed a failed call back to the
+// model for another automatic attempt. Unknown tools are not retryable.
+func (r *ToolRegistry) Retryable(name string) bool {
+	tool, ok := r.Get(name)
+	if !ok {
+		return false
+	}
+	if retryable, ok := tool.(RetryableTool); ok {
+		return retryable.Retryable()
+	}
+	return !r.RequiresApproval(name)
 }
 
 func (r *ToolRegistry) isAllowed(name string) bool {
