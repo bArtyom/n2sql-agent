@@ -9,9 +9,10 @@ import (
 )
 
 type runStoreStub struct {
-	run    Run
-	status Status
-	failed string
+	run      Run
+	status   Status
+	failed   string
+	requeued bool
 }
 
 func (s *runStoreStub) Create(context.Context, CreateInput) (Run, error) { return s.run, nil }
@@ -23,6 +24,11 @@ func (s *runStoreStub) ClaimNext(context.Context) (Run, error) {
 	s.run.Status = StatusRunning
 	return s.run, nil
 }
+func (s *runStoreStub) RequeueExpired(context.Context) error {
+	s.requeued = true
+	return nil
+}
+func (*runStoreStub) RenewLease(context.Context, int64) error { return nil }
 func (s *runStoreStub) MarkSucceeded(context.Context, int64) error {
 	s.status = StatusSucceeded
 	return nil
@@ -50,6 +56,9 @@ func TestRunnerMarksSucceededAfterExecution(t *testing.T) {
 	worked, err := runner.RunOnce(context.Background())
 	if err != nil || !worked || store.status != StatusSucceeded {
 		t.Fatalf("RunOnce() = (%v, %v), status=%s, want succeeded", worked, err, store.status)
+	}
+	if !store.requeued {
+		t.Fatal("RunOnce() did not requeue expired runs before claiming")
 	}
 }
 

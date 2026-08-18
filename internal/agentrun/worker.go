@@ -31,6 +31,8 @@ type Runner struct {
 	eventSink func(Run) func(agent.Event) error
 }
 
+const leaseHeartbeatInterval = defaultLeaseDuration / 3
+
 func NewRunner(store Store, executor Executor) (*Runner, error) {
 	if store == nil || executor == nil {
 		return nil, ErrInvalidRun
@@ -48,6 +50,9 @@ func NewRunnerWithEventSink(store Store, executor Executor, eventSink func(Run) 
 }
 
 func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
+	if err := r.store.RequeueExpired(ctx); err != nil {
+		return false, fmt.Errorf("requeue expired agent runs: %w", err)
+	}
 	run, err := r.store.ClaimNext(ctx)
 	if errors.Is(err, ErrNoRun) {
 		return false, nil
@@ -63,7 +68,10 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 			sink = candidate
 		}
 	}
-	err = r.executor.Execute(ctx, run, sink)
+	executionContext, stopHeartbeat := context.WithCancel(ctx)
+	defer stopHeartbeat()
+	go r.renewLease(executionContext, run)
+	err = r.executor.Execute(executionContext, run, sink)
 	if err == nil {
 		if markErr := r.store.MarkSucceeded(context.WithoutCancel(ctx), run.ID); markErr != nil {
 			return true, markErr
@@ -85,6 +93,21 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 	}
 	slog.ErrorContext(ctx, "agent_run_failed", "run_id", run.RunID, "duration_ms", time.Since(started).Milliseconds(), "error", err)
 	return true, nil
+}
+
+func (r *Runner) renewLease(ctx context.Context, run Run) {
+	ticker := time.NewTicker(leaseHeartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := r.store.RenewLease(context.WithoutCancel(ctx), run.ID); err != nil {
+				slog.WarnContext(ctx, "agent_run_lease_renew_failed", "run_id", run.RunID, "error", err)
+			}
+		}
+	}
 }
 
 func (r *Runner) Run(ctx context.Context, interval time.Duration, report func(error)) {
