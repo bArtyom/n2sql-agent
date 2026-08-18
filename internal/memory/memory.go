@@ -52,6 +52,7 @@ type Store interface {
 type ProfileStore interface {
 	GetProfile(context.Context, int64) (Profile, error)
 	SaveProfile(context.Context, int64, string) (Profile, error)
+	DeleteProfile(context.Context, int64) error
 }
 
 type PostgresStore struct{ db *sql.DB }
@@ -187,4 +188,14 @@ func (s *PostgresStore) SaveProfile(ctx context.Context, userID int64, content s
 		return Profile{}, fmt.Errorf("save memory profile: %w", err)
 	}
 	return profile, nil
+}
+
+func (s *PostgresStore) DeleteProfile(ctx context.Context, userID int64) error {
+	if userID <= 0 {
+		return ErrUnauthorized
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM user_memory_profiles WHERE user_id = $1`, userID); err != nil {
+		return fmt.Errorf("delete memory profile: %w", err)
+	}
+	return nil
 }

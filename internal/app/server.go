@@ -56,6 +56,7 @@ type Dependencies struct {
 	FollowUpSuggestions        followup.Suggester
 	DocumentSummary            *documentsummary.Service
 	Memories                   memory.Store
+	MemoryProfile              memory.ProfileStore
 	APIKeyEnvVar               string
 	Auth                       auth.Store
 	SecureCookies              bool
@@ -102,6 +103,10 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("GET /api/knowledge-bases/{id}/memories", memoriesHandler)
 		mux.Handle("POST /api/knowledge-bases/{id}/memories", memoriesHandler)
 		mux.Handle("DELETE /api/knowledge-bases/{id}/memories/{memoryID}", memoriesHandler)
+	}
+	if dependencies.MemoryProfile != nil {
+		mux.Handle("GET /api/memory-profile", handler.NewMemoryProfile(dependencies.MemoryProfile))
+		mux.Handle("DELETE /api/memory-profile", handler.NewMemoryProfile(dependencies.MemoryProfile))
 	}
 	if dependencies.Documents != nil {
 		mux.Handle("POST /api/knowledge-bases/{id}/documents", handler.NewDocumentUpload(dependencies.Documents))

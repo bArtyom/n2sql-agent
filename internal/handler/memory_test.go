@@ -14,9 +14,11 @@ import (
 )
 
 type memoryStoreStub struct {
-	items  []memory.Memory
-	input  memory.CreateInput
-	delete [2]int64
+	items   []memory.Memory
+	input   memory.CreateInput
+	delete  [2]int64
+	profile memory.Profile
+	cleared int64
 }
 
 func (s *memoryStoreStub) Create(_ context.Context, _ int64, input memory.CreateInput) (memory.Memory, error) {
@@ -30,6 +32,21 @@ func (s *memoryStoreStub) List(context.Context, int64, int64) ([]memory.Memory, 
 
 func (s *memoryStoreStub) Delete(_ context.Context, _, knowledgeBaseID, memoryID int64) error {
 	s.delete = [2]int64{knowledgeBaseID, memoryID}
+	return nil
+}
+
+func (s *memoryStoreStub) GetProfile(_ context.Context, userID int64) (memory.Profile, error) {
+	s.profile.UserID = userID
+	return s.profile, nil
+}
+
+func (s *memoryStoreStub) SaveProfile(_ context.Context, userID int64, content string) (memory.Profile, error) {
+	s.profile = memory.Profile{UserID: userID, Content: content}
+	return s.profile, nil
+}
+
+func (s *memoryStoreStub) DeleteProfile(_ context.Context, userID int64) error {
+	s.cleared = userID
 	return nil
 }
 
@@ -81,5 +98,27 @@ func TestMemoriesHandlerRejectsInvalidContent(t *testing.T) {
 	server.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want bad request", recorder.Code)
+	}
+}
+
+func TestMemoryProfileHandlerReadsAndClearsAuthenticatedProfile(t *testing.T) {
+	store := &memoryStoreStub{profile: memory.Profile{Content: "偏好简洁回答", Version: 2}}
+	server := http.NewServeMux()
+	server.Handle("/api/memory-profile", handlerpkg.NewMemoryProfile(store))
+
+	get := httptest.NewRecorder()
+	getRequest := httptest.NewRequest(http.MethodGet, "/api/memory-profile", nil)
+	getRequest = getRequest.WithContext(auth.WithUser(getRequest.Context(), auth.User{ID: 11}))
+	server.ServeHTTP(get, getRequest)
+	if get.Code != http.StatusOK || !strings.Contains(get.Body.String(), "偏好简洁回答") {
+		t.Fatalf("get status=%d body=%s, want profile", get.Code, get.Body.String())
+	}
+
+	clear := httptest.NewRecorder()
+	clearRequest := httptest.NewRequest(http.MethodDelete, "/api/memory-profile", nil)
+	clearRequest = clearRequest.WithContext(auth.WithUser(clearRequest.Context(), auth.User{ID: 11}))
+	server.ServeHTTP(clear, clearRequest)
+	if clear.Code != http.StatusNoContent || store.cleared != 11 {
+		t.Fatalf("clear status=%d user=%d, want 204 for user 11", clear.Code, store.cleared)
 	}
 }

@@ -149,6 +149,7 @@ func main() {
 			MCPKnowledgeBases:          knowledgeBaseService,
 			Conversations:              conversationService,
 			Memories:                   memoryStore,
+			MemoryProfile:              memoryStore,
 			Auth:                       authStore,
 			SecureCookies:              cfg.SecureCookies,
 			AgentMaxToolResultBytes:    cfg.AgentMaxToolResultBytes,
