@@ -133,6 +133,7 @@ func NewKnowledgeBaseAgentChatStreamWithHub(answerer agentservice.EventAnswerer,
 			// The real Agent Service uses request.RunID. Normalizing here keeps the
 			// transport boundary safe for alternate EventAnswerer implementations.
 			event.RunID = runID
+			event.Version = agent.EventSchemaVersion
 			if event.ID == "" {
 				agentEventNumber++
 				event.ID = fmt.Sprintf("%s-agent-%d", runID, agentEventNumber)

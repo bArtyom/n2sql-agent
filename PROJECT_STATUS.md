@@ -29,6 +29,7 @@
 - Agent 运行新增按知识库隔离的只读状态接口 `GET /api/knowledge-bases/{id}/agent-runs/{runID}`，返回状态、尝试次数、错误和时间信息，不暴露请求快照；SSE 负责实时事件，状态接口负责刷新和最终状态确认。
 - Agent 运行最终 `Response` 已持久化到 `agent_runs.response`；当 SSE Hub 事件过期但任务已完成时，前端可通过状态接口恢复最终回答、引用、统计和轨迹。
 - Agent 中间事件支持可选 Redis 短期流：配置 `AGENT_STREAM_REDIS_URL` 后使用 Redis Stream 的有界长度与 TTL，SSE 可跨实例重放并持续订阅；未配置时回退 PostgreSQL 事件表。最终答案、运行状态和会话消息仍持久化到 PostgreSQL。
+- Agent SSE 已增加事件版本、稳定事件 ID、`Last-Event-ID` 续传和 `stream_replay_gap` 恢复；前端遇到事件窗口缺口时改读 PostgreSQL 最终答案。工具 checkpoint 目前完成边界设计，仍保持租约过期后从头重试，不宣称断点续跑。
 - Agent 只读工具已覆盖 `knowledge_search`、`document_list`、`document_info`、`document_read`；文档正文读取受知识库、文档、chunk 数量和字节数限制。
 - 异步文档摘要工具 `document_summary` 已接入标准 Agent：后台生成时返回任务状态并立即结束本轮 Agent，不把 pending 占位结果再次交给模型，避免重复工具调用和步数超限；摘要完成后由后续提问读取缓存。
 - Agent 会话记忆改造第一步：历史语义摘要模型调用失败时最多重试 2 次；上下文取消会立即停止重试，最终仍由现有抽取式摘要兜底，不阻断正常问答。
