@@ -88,6 +88,20 @@ func TestLoadReadsRetrievalCacheSettings(t *testing.T) {
 	}
 }
 
+func TestLoadReadsAgentStreamRedisSettings(t *testing.T) {
+	t.Setenv("AGENT_STREAM_REDIS_URL", "redis://localhost:6379/2")
+	t.Setenv("AGENT_STREAM_TTL", "45m")
+	t.Setenv("AGENT_STREAM_MAX_LEN", "2048")
+
+	cfg := config.Load()
+	if cfg.AgentStreamRedisURL != "redis://localhost:6379/2" {
+		t.Fatalf("agent stream redis URL = %q", cfg.AgentStreamRedisURL)
+	}
+	if cfg.AgentStreamTTL != 45*time.Minute || cfg.AgentStreamMaxLen != 2048 {
+		t.Fatalf("agent stream settings = %s/%d", cfg.AgentStreamTTL, cfg.AgentStreamMaxLen)
+	}
+}
+
 func TestLoadReadsA2ACleanupSettings(t *testing.T) {
 	t.Setenv("A2A_TASK_RETENTION", "48h")
 	t.Setenv("A2A_CLEANUP_INTERVAL", "15m")

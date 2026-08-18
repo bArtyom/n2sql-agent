@@ -76,7 +76,22 @@ func main() {
 	metricsRegistry := metrics.New()
 	agentStreamHub := agentstream.NewHub()
 	agentRunStore := agentrun.NewPostgresStore(db)
-	agentEventStore := agentrun.NewPostgresEventStore(db)
+	var agentEventStore agentrun.EventStore = agentrun.NewPostgresEventStore(db)
+	if cfg.AgentStreamRedisURL != "" {
+		redisEventStore, redisErr := agentrun.NewRedisEventStore(
+			cfg.AgentStreamRedisURL,
+			"",
+			cfg.AgentStreamTTL,
+			cfg.AgentStreamMaxLen,
+		)
+		if redisErr != nil {
+			log.Printf("agent stream Redis disabled, falling back to PostgreSQL event replay: %v", redisErr)
+		} else {
+			agentEventStore = redisEventStore
+			defer redisEventStore.Close()
+			log.Printf("agent stream Redis enabled: ttl=%s max_len=%d", cfg.AgentStreamTTL, cfg.AgentStreamMaxLen)
+		}
+	}
 	a2aStore := a2a.NewPostgresStore(db)
 	searchService := retrieval.NewHybridServiceWithRerankerAndRewriterAndCache(
 		embeddingService,

@@ -31,6 +31,8 @@ const (
 	defaultAgentHistorySummaryTimeout = 10 * time.Second
 	defaultRetrievalCacheEntries      = 128
 	defaultRetrievalCacheTTL          = 2 * time.Minute
+	defaultAgentStreamTTL             = time.Hour
+	defaultAgentStreamMaxLen          = 4096
 )
 
 type Config struct {
@@ -63,6 +65,9 @@ type Config struct {
 	AgentHistorySummaryTimeout time.Duration
 	RetrievalCacheEntries      int
 	RetrievalCacheTTL          time.Duration
+	AgentStreamRedisURL        string
+	AgentStreamTTL             time.Duration
+	AgentStreamMaxLen          int
 	SecureCookies              bool
 }
 
@@ -110,6 +115,9 @@ func Load() Config {
 		AgentHistorySummaryTimeout: time.Duration(positiveIntEnv("AGENT_HISTORY_SUMMARY_TIMEOUT_MS", int(defaultAgentHistorySummaryTimeout/time.Millisecond))) * time.Millisecond,
 		RetrievalCacheEntries:      positiveIntEnv("RETRIEVAL_CACHE_ENTRIES", defaultRetrievalCacheEntries),
 		RetrievalCacheTTL:          durationEnv("RETRIEVAL_CACHE_TTL", defaultRetrievalCacheTTL),
+		AgentStreamRedisURL:        strings.TrimSpace(os.Getenv("AGENT_STREAM_REDIS_URL")),
+		AgentStreamTTL:             durationEnv("AGENT_STREAM_TTL", defaultAgentStreamTTL),
+		AgentStreamMaxLen:          positiveIntEnv("AGENT_STREAM_MAX_LEN", defaultAgentStreamMaxLen),
 		SecureCookies:              boolEnv("SECURE_COOKIES", false),
 	}
 }

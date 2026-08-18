@@ -282,6 +282,37 @@ func NewAgentRunStreamWithStore(hub *agentstream.Hub, eventStore agentrun.EventS
 		snapshot, live, cancel, done, err := hub.Subscribe(runID, knowledgeBaseID, r.Context().Done())
 		if err != nil {
 			if errors.Is(err, agentstream.ErrRunNotFound) && eventStore != nil {
+				if liveStore, ok := eventStore.(agentrun.LiveEventStore); ok {
+					storedSnapshot, storedLive, stop, storedDone, streamErr := liveStore.Subscribe(r.Context(), runID, knowledgeBaseID)
+					if streamErr == nil {
+						defer stop()
+						w.Header().Set("Content-Type", "text/event-stream")
+						w.Header().Set("Cache-Control", "no-cache")
+						w.Header().Set("X-Accel-Buffering", "no")
+						w.WriteHeader(http.StatusOK)
+						for _, event := range storedSnapshot {
+							if err := writeAgentSSEEvent(w, flusher, event.Type, event); err != nil {
+								return
+							}
+						}
+						if storedDone {
+							return
+						}
+						for {
+							select {
+							case <-r.Context().Done():
+								return
+							case event, ok := <-storedLive:
+								if !ok {
+									return
+								}
+								if err := writeAgentSSEEvent(w, flusher, event.Type, event); err != nil {
+									return
+								}
+							}
+						}
+					}
+				}
 				storedEvents, storeErr := eventStore.List(r.Context(), runID, knowledgeBaseID)
 				if storeErr == nil && len(storedEvents) > 0 {
 					w.Header().Set("Content-Type", "text/event-stream")
