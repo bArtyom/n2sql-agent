@@ -5,8 +5,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/auth"
 	"github.com/bArtyom/n2sql-agent/internal/memory"
+	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 )
 
 type memoryStoreStub struct {
@@ -44,6 +46,42 @@ func TestMergeMemoryProfileKeepsExistingFactsWhenCandidateIsDuplicate(t *testing
 	got := mergeMemoryProfile(context.Background(), nil, "喜欢简洁回答\n使用 Go", "喜欢简洁回答")
 	if got != "喜欢简洁回答\n使用 Go" {
 		t.Fatalf("profile = %q, want existing facts preserved", got)
+	}
+}
+
+type profileMergeChatStub struct {
+	calls int
+}
+
+func (s *profileMergeChatStub) ChatMessagesWithTools(context.Context, []modelclient.ChatMessage, []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+	return modelclient.ChatResponse{}, nil
+}
+
+func (s *profileMergeChatStub) ChatMessages(context.Context, []modelclient.ChatMessage) (modelclient.ChatResponse, error) {
+	s.calls++
+	return modelclient.ChatResponse{Message: "整理后的用户画像"}, nil
+}
+
+func TestMergeMemoryProfileAppendsBeforeCompactionThreshold(t *testing.T) {
+	chat := &profileMergeChatStub{}
+	got := mergeMemoryProfile(context.Background(), chat, "喜欢简洁回答", "使用 Go")
+	if got != "喜欢简洁回答\n使用 Go" {
+		t.Fatalf("profile = %q, want direct append", got)
+	}
+	if chat.calls != 0 {
+		t.Fatalf("model calls = %d, want 0 before threshold", chat.calls)
+	}
+}
+
+func TestMergeMemoryProfileCompactsAfterThreshold(t *testing.T) {
+	chat := &profileMergeChatStub{}
+	current := strings.Repeat("a", memory.MaxProfileCompactionBytes)
+	got := mergeMemoryProfile(context.Background(), chat, current, "新增偏好")
+	if got != "整理后的用户画像" {
+		t.Fatalf("profile = %q, want model-compacted profile", got)
+	}
+	if chat.calls != 1 {
+		t.Fatalf("model calls = %d, want 1 after threshold", chat.calls)
 	}
 }
 

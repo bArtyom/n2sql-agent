@@ -11,6 +11,7 @@ import (
 
 const MaxContentBytes = 2000
 const MaxProfileBytes = 6000
+const MaxProfileCompactionBytes = 4500
 
 var (
 	ErrInvalidKnowledgeBase = errors.New("invalid memory knowledge base")

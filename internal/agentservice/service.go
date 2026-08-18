@@ -396,6 +396,10 @@ func mergeMemoryProfile(ctx context.Context, chat modelruntime.ToolChatRunner, c
 	if strings.Contains(candidate, current) {
 		return truncateUTF8(candidate, memory.MaxProfileBytes)
 	}
+	appended := current + "\n" + candidate
+	if len([]byte(appended)) <= memory.MaxProfileCompactionBytes {
+		return appended
+	}
 	if summarizer, ok := chat.(modelruntime.MessageChatRunner); ok {
 		mergeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 		defer cancel()
@@ -407,7 +411,7 @@ func mergeMemoryProfile(ctx context.Context, chat modelruntime.ToolChatRunner, c
 			return truncateUTF8(strings.TrimSpace(response.Message), memory.MaxProfileBytes)
 		}
 	}
-	return truncateUTF8(current+"\n"+candidate, memory.MaxProfileBytes)
+	return truncateUTF8(appended, memory.MaxProfileBytes)
 }
 
 func responseFromRun(result agentruntime.Result, historySummaryStats HistorySummaryStats) Response {
