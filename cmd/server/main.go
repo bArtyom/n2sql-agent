@@ -151,6 +151,7 @@ func main() {
 			AgentStreamingAnswers:      agentAnswerService,
 			AgentStreamHub:             agentStreamHub,
 			AgentRuns:                  agentRunStore,
+			AgentRunReader:             agentRunStore,
 			AgentRunExecutor:           agentRunExecutor,
 			MultiAgentAnswers:          multiAgentAnswers,
 			MultiAgentStreamingAnswers: multiAgentAnswers,

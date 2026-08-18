@@ -20,8 +20,9 @@ const (
 )
 
 var (
-	ErrNoRun      = errors.New("no pending agent run")
-	ErrInvalidRun = errors.New("invalid agent run")
+	ErrNoRun       = errors.New("no pending agent run")
+	ErrRunNotFound = errors.New("agent run not found")
+	ErrInvalidRun  = errors.New("invalid agent run")
 )
 
 const defaultLeaseDuration = 5 * time.Minute
@@ -60,9 +61,39 @@ type Store interface {
 	MarkCanceled(context.Context, int64) error
 }
 
+// Reader exposes safe run metadata without exposing the persisted request
+// snapshot. It is intentionally separate from Store so read-only API handlers
+// do not need task mutation capabilities.
+type Reader interface {
+	Get(context.Context, string, int64) (Run, error)
+}
+
 type PostgresStore struct{ db *sql.DB }
 
 func NewPostgresStore(db *sql.DB) *PostgresStore { return &PostgresStore{db: db} }
+
+func (s *PostgresStore) Get(ctx context.Context, runID string, knowledgeBaseID int64) (Run, error) {
+	if runID == "" || knowledgeBaseID <= 0 {
+		return Run{}, ErrInvalidRun
+	}
+	var run Run
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, run_id, knowledge_base_id, COALESCE(conversation_id, 0), request,
+			status, attempt_count, COALESCE(error_message, ''), created_at, started_at,
+			finished_at, lease_until, heartbeat_at, updated_at
+		FROM agent_runs
+		WHERE run_id = $1 AND knowledge_base_id = $2`, runID, knowledgeBaseID).Scan(
+		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.Request,
+		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.CreatedAt, &run.StartedAt,
+		&run.FinishedAt, &run.LeaseUntil, &run.HeartbeatAt, &run.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Run{}, ErrRunNotFound
+	}
+	if err != nil {
+		return Run{}, fmt.Errorf("get agent run: %w", err)
+	}
+	return run, nil
+}
 
 func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Run, error) {
 	if input.RunID == "" || input.KnowledgeBaseID <= 0 || len(input.Request) == 0 || !json.Valid(input.Request) {
