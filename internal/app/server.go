@@ -174,8 +174,9 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("POST /api/knowledge-bases/{id}/mcp", mcp.NewKnowledgeBaseHandler(dependencies.MCPKnowledgeSearch, dependencies.MCPDocuments, dependencies.MCPKnowledgeBases, dependencies.AgentMaxToolResultBytes))
 	}
 
+	var root http.Handler = mux
 	if dependencies.Auth != nil {
-		mux = auth.Middleware(dependencies.Auth)(mux)
+		root = auth.Middleware(dependencies.Auth)(root)
 	}
-	return requestid.NewMiddleware(slog.Default(), registry.Middleware(mux))
+	return requestid.NewMiddleware(slog.Default(), registry.Middleware(root))
 }
