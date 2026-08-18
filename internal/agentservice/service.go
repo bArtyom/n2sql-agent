@@ -73,7 +73,7 @@ type Service struct {
 	sequence           atomic.Uint64
 }
 
-// SetMemoryStore enables optional knowledge-base-scoped explicit memories.
+// SetMemoryStore enables optional user-scoped explicit memories.
 // It is kept as a setter so existing constructors remain source-compatible.
 func (s *Service) SetMemoryStore(store memory.Store) {
 	if s != nil {
