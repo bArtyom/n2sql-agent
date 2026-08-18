@@ -2,22 +2,22 @@
 
 ## 阶段目标
 
-在第一阶段 RAG 底座上，优先完成一套规模可控但面试可讲的 Agent 最小闭环；Redis、复杂队列和性能工程后置到第三阶段：
+在第一阶段 RAG 底座上，完成一套规模可控但面试可讲的 Agent 最小闭环，并继续沿着 DeerFlow 的 Runtime 设计和 WeKnora 的产品交互演进；复杂分布式能力按风险逐步引入：
 
 1. 能独立实现 Tool Registry、Function Calling、ReAct 和上下文管理。
 2. 能演示“知识库检索工具 + 最终回答”的 Agent Run，并通过 SSE 展示事件。
 3. 能处理步骤数、耗时、Token、取消、超时和工具错误等执行边界。
 4. 为后续队列、重试、限流和性能工程保留清晰接口，而不是提前引入无关组件。
 
-## 参考 WeKnora 的阅读顺序
+## 双参考阅读顺序
 
-只按问题阅读，不从头到尾通读整个仓库：
+只按问题阅读，不从头到尾通读仓库：
 
-- Agent 循环：`internal/agent/engine.go`、`internal/agent/act.go`、`internal/agent/tools/registry.go`。
-- 消息与工具协议：`internal/models/chat/chat.go`。
-- MCP：`internal/mcp/client.go`、`internal/mcp/manager.go`。
-- 任务可靠性：`internal/application/repository/task_queue.go`、`internal/container/container.go`（进入第三阶段时阅读）。
-- 限流、观测和安全边界：`internal/ratelimit/limiter.go`、`internal/tracing/langfuse/`、`internal/sandbox/`。
+- WeKnora 产品链路：Agent 循环、工具注册、会话消息、知识库工具、审批、停止生成、引用和流式事件。
+- WeKnora RAG 链路：文档解析、chunk、向量/关键词检索、RRF、Rerank、引用和会话知识库交互。
+- DeerFlow Runtime 链路：`backend/docs/STREAMING.md`、`backend/docs/RUN_EVENT_STREAM.md`、Run Manager、Worker lease、StreamBridge、checkpoint 和子 Agent 事件。
+- DeerFlow 工具消息链路：LLM tool call、ToolMessage 配对、工具错误恢复、工具进度和上下文压缩。
+- n2sql 每次只实现一个缩小版，不复制仓库结构；先写“问题—不变量—最小实现—验证”四段笔记。
 
 每个模块阅读后都写三句话：它解决什么问题、关键不变量是什么、如果缩小到 n2sql 会保留什么。
 
@@ -64,6 +64,23 @@
 - 以一个具体问题为目标，例如减少重复 Embedding、限制模型并发或降低检索 P95。
 
 验收：至少有一份简短性能报告，包含基线、改动、结果和未解决瓶颈；报告中的数据能够复现。
+
+### 切片六：长任务 Runtime 与事件恢复（DeerFlow 主线）
+
+- 将 Agent Run、Worker、租约、心跳、取消和最终结果分开建模。
+- 用短期 Redis Stream/Hub 传输 token、思考和工具进度；用 PostgreSQL 保存状态、最终回答和必要摘要。
+- 增加事件游标、重放窗口、`gap` 恢复和最终答案兜底；不把每个 token 当作永久会话消息。
+- 研究 checkpoint 与“从头重试”的边界：只有工具幂等和步骤状态持久化后，才允许真正断点续跑。
+
+验收：断开 SSE 后能在保留窗口内继续；事件过期后能恢复最终答案；Worker 崩溃不会让任务永久卡住；能说明重放、重试和 checkpoint 的区别。
+
+### 切片七：WeKnora 风格 RAG 质量闭环（WeKnora 主线）
+
+- 继续完善文档结构、父子 chunk、混合召回、过滤、Rerank 和引用链路。
+- 增加小规模 RAG 评测集，区分召回失败、引用错配、上下文超长和回答生成失败。
+- 优先做用户可感知的文档选择、原文定位、总结和引用解释，不先扩展更多前端装饰。
+
+验收：同一问题能够展示检索候选、最终引用和降级原因；文档范围过滤不越权；至少有可复现的召回/引用质量基线。
 
 ### 切片五：Multi-Agent、MCP 与最小 A2A
 
