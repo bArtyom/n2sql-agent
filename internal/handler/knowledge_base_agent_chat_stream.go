@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
+	"github.com/bArtyom/n2sql-agent/internal/agentrun"
 	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/agentstream"
@@ -252,6 +253,10 @@ func NewKnowledgeBaseAgentChatStreamWithHub(answerer agentservice.EventAnswerer,
 // in-process Hub. It is intentionally scoped by knowledge base ID so a run ID
 // cannot be used to read another knowledge base's events.
 func NewAgentRunStream(hub *agentstream.Hub) http.Handler {
+	return NewAgentRunStreamWithStore(hub, nil)
+}
+
+func NewAgentRunStreamWithStore(hub *agentstream.Hub, eventStore agentrun.EventStore) http.Handler {
 	if hub == nil {
 		hub = agentstream.NewHub()
 	}
@@ -276,6 +281,20 @@ func NewAgentRunStream(hub *agentstream.Hub) http.Handler {
 		}
 		snapshot, live, cancel, done, err := hub.Subscribe(runID, knowledgeBaseID, r.Context().Done())
 		if err != nil {
+			if errors.Is(err, agentstream.ErrRunNotFound) && eventStore != nil {
+				storedEvents, storeErr := eventStore.List(r.Context(), runID, knowledgeBaseID)
+				if storeErr == nil && len(storedEvents) > 0 {
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.Header().Set("Cache-Control", "no-cache")
+					w.WriteHeader(http.StatusOK)
+					for _, event := range storedEvents {
+						if err := writeAgentSSEEvent(w, flusher, event.Type, event); err != nil {
+							return
+						}
+					}
+					return
+				}
+			}
 			if errors.Is(err, agentstream.ErrRunNotFound) {
 				http.Error(w, `{"error":"agent run not found or expired"}`, http.StatusNotFound)
 				return

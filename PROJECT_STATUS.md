@@ -28,6 +28,7 @@
 - Agent 异步运行已接入主聊天链路：标准 Agent 提交接口先持久化 `agent_runs` 并返回 `run_id`，后台 Worker 领取并执行请求快照，执行事件经进程内 Hub 由独立 SSE 连接流式转发；会话保存、审批等待和错误事件均在 Worker 执行上下文中完成。Worker 已增加 5 分钟租约、约 100 秒心跳和过期 `running` 任务回收；旧的同步 POST SSE 逻辑仍保留为无持久化依赖时的回退路径。
 - Agent 运行新增按知识库隔离的只读状态接口 `GET /api/knowledge-bases/{id}/agent-runs/{runID}`，返回状态、尝试次数、错误和时间信息，不暴露请求快照；SSE 负责实时事件，状态接口负责刷新和最终状态确认。
 - Agent 运行最终 `Response` 已持久化到 `agent_runs.response`；当 SSE Hub 事件过期但任务已完成时，前端可通过状态接口恢复最终回答、引用、统计和轨迹。
+- Agent 中间事件新增 `agent_run_events` PostgreSQL 日志：实时阶段仍走内存 Hub，Hub 丢失或服务重启后，SSE 可从数据库重放已落库的事件；暂不引入 Redis Stream。
 - Agent 只读工具已覆盖 `knowledge_search`、`document_list`、`document_info`、`document_read`；文档正文读取受知识库、文档、chunk 数量和字节数限制。
 - 异步文档摘要工具 `document_summary` 已接入标准 Agent：后台生成时返回任务状态并立即结束本轮 Agent，不把 pending 占位结果再次交给模型，避免重复工具调用和步数超限；摘要完成后由后续提问读取缓存。
 - Agent 会话记忆改造第一步：历史语义摘要模型调用失败时最多重试 2 次；上下文取消会立即停止重试，最终仍由现有抽取式摘要兜底，不阻断正常问答。

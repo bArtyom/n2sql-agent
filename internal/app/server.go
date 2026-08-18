@@ -45,6 +45,7 @@ type Dependencies struct {
 	AgentStreamHub             *agentstream.Hub
 	AgentRuns                  agentrun.Store
 	AgentRunReader             agentrun.Reader
+	AgentEventStore            agentrun.EventStore
 	AgentRunExecutor           agentrun.Executor
 	MultiAgentAnswers          multiagent.Answerer
 	MultiAgentStreamingAnswers multiagent.EventAnswerer
@@ -158,7 +159,7 @@ func New(dependencies Dependencies) http.Handler {
 		} else {
 			mux.Handle("POST /api/knowledge-bases/{id}/agent-chat/stream", handler.NewKnowledgeBaseAgentChatStreamWithHub(dependencies.AgentStreamingAnswers, dependencies.Conversations, dependencies.AgentMaxHistoryBytes, registry, hub))
 		}
-		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}/stream", handler.NewAgentRunStream(hub))
+		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}/stream", handler.NewAgentRunStreamWithStore(hub, dependencies.AgentEventStore))
 		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}", handler.NewAgentRunStatus(dependencies.AgentRunReader))
 		mux.Handle("POST /api/knowledge-bases/{id}/agent-runs/{runID}/stop", handler.NewAgentRunStop(hub))
 		mux.Handle("POST /api/knowledge-bases/{id}/agent-runs/{runID}/approval", handler.NewAgentRunApproval(hub))

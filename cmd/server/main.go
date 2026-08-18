@@ -76,6 +76,7 @@ func main() {
 	metricsRegistry := metrics.New()
 	agentStreamHub := agentstream.NewHub()
 	agentRunStore := agentrun.NewPostgresStore(db)
+	agentEventStore := agentrun.NewPostgresEventStore(db)
 	a2aStore := a2a.NewPostgresStore(db)
 	searchService := retrieval.NewHybridServiceWithRerankerAndRewriterAndCache(
 		embeddingService,
@@ -113,9 +114,21 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	agentRunExecutor := handler.NewPersistentAgentExecutor(agentAnswerService, conversationService, agentStreamHub, metricsRegistry, agentRunStore)
+	agentRunExecutor := handler.NewPersistentAgentExecutor(agentAnswerService, conversationService, agentStreamHub, metricsRegistry, agentRunStore, agentEventStore)
 	agentRunRunner, err := agentrun.NewRunnerWithEventSink(agentRunStore, agentRunExecutor, func(run agentrun.Run) func(agent.Event) error {
-		return agentStreamHub.PublishAgent
+		return func(event agent.Event) error {
+			if err := agentEventStore.Append(context.Background(), run, agentstream.Event{
+				ID:         event.ID,
+				RunID:      event.RunID,
+				Type:       string(event.Type),
+				StepNumber: event.StepNumber,
+				Data:       event.Data,
+				CreatedAt:  event.CreatedAt,
+			}); err != nil {
+				return err
+			}
+			return agentStreamHub.PublishAgent(event)
+		}
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -152,6 +165,7 @@ func main() {
 			AgentStreamHub:             agentStreamHub,
 			AgentRuns:                  agentRunStore,
 			AgentRunReader:             agentRunStore,
+			AgentEventStore:            agentEventStore,
 			AgentRunExecutor:           agentRunExecutor,
 			MultiAgentAnswers:          multiAgentAnswers,
 			MultiAgentStreamingAnswers: multiAgentAnswers,

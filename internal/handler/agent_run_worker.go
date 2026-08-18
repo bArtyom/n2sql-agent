@@ -97,7 +97,7 @@ func NewPersistentAgentRunSubmission(maxHistoryBytes int, store agentrun.Store, 
 // It owns all work that used to happen inside the HTTP handler: loading
 // history, waiting for approvals, saving the exchange, and publishing
 // transport-only events.
-func NewPersistentAgentExecutor(answerer agentservice.EventAnswerer, conversations *conversation.Service, hub *agentstream.Hub, registry *metrics.Registry, resultWriter agentrun.ResultWriter) agentrun.Executor {
+func NewPersistentAgentExecutor(answerer agentservice.EventAnswerer, conversations *conversation.Service, hub *agentstream.Hub, registry *metrics.Registry, resultWriter agentrun.ResultWriter, eventStore agentrun.EventStore) agentrun.Executor {
 	return agentrun.ExecutorFunc(func(ctx context.Context, run agentrun.Run, sink agentrun.EventSink) error {
 		if answerer == nil || hub == nil {
 			return agentrun.ErrInvalidRun
@@ -120,13 +120,22 @@ func NewPersistentAgentExecutor(answerer agentservice.EventAnswerer, conversatio
 			}
 		}()
 
+		transportEventNumber := 0
 		publish := func(eventType string, value any) error {
-			return hub.Publish(agentstream.Event{
+			transportEventNumber++
+			event := agentstream.Event{
+				ID:        fmt.Sprintf("%s-transport-%d", run.RunID, transportEventNumber),
 				RunID:     run.RunID,
 				Type:      eventType,
 				Data:      value,
 				CreatedAt: time.Now().UTC(),
-			})
+			}
+			if eventStore != nil {
+				if err := eventStore.Append(executionContext, run, event); err != nil {
+					return err
+				}
+			}
+			return hub.Publish(event)
 		}
 		emit := func(event agent.Event) error {
 			event.RunID = run.RunID
