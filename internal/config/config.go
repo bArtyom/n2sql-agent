@@ -63,6 +63,7 @@ type Config struct {
 	AgentHistorySummaryTimeout time.Duration
 	RetrievalCacheEntries      int
 	RetrievalCacheTTL          time.Duration
+	SecureCookies              bool
 }
 
 func Load() Config {
@@ -109,6 +110,7 @@ func Load() Config {
 		AgentHistorySummaryTimeout: time.Duration(positiveIntEnv("AGENT_HISTORY_SUMMARY_TIMEOUT_MS", int(defaultAgentHistorySummaryTimeout/time.Millisecond))) * time.Millisecond,
 		RetrievalCacheEntries:      positiveIntEnv("RETRIEVAL_CACHE_ENTRIES", defaultRetrievalCacheEntries),
 		RetrievalCacheTTL:          durationEnv("RETRIEVAL_CACHE_TTL", defaultRetrievalCacheTTL),
+		SecureCookies:              boolEnv("SECURE_COOKIES", false),
 	}
 }
 

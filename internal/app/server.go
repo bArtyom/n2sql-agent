@@ -8,6 +8,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/a2a"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/agentstream"
+	"github.com/bArtyom/n2sql-agent/internal/auth"
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
@@ -56,6 +57,8 @@ type Dependencies struct {
 	DocumentSummary            *documentsummary.Service
 	Memories                   memory.Store
 	APIKeyEnvVar               string
+	Auth                       auth.Store
+	SecureCookies              bool
 	Metrics                    *metrics.Registry
 }
 
@@ -67,6 +70,9 @@ func New(dependencies Dependencies) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handler.Health)
 	mux.Handle("GET /metrics", registry.Handler())
+	if dependencies.Auth != nil {
+		mux.Handle("/api/auth/", handler.NewAuth(dependencies.Auth, dependencies.SecureCookies))
+	}
 
 	modelProviderHandler := handler.NewModelProvider(dependencies.Providers, dependencies.APIKeyEnvVar)
 	mux.Handle("GET /api/model-provider", modelProviderHandler)
@@ -168,5 +174,8 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("POST /api/knowledge-bases/{id}/mcp", mcp.NewKnowledgeBaseHandler(dependencies.MCPKnowledgeSearch, dependencies.MCPDocuments, dependencies.MCPKnowledgeBases, dependencies.AgentMaxToolResultBytes))
 	}
 
+	if dependencies.Auth != nil {
+		mux = auth.Middleware(dependencies.Auth)(mux)
+	}
 	return requestid.NewMiddleware(slog.Default(), registry.Middleware(mux))
 }
