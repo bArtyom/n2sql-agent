@@ -305,7 +305,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				}
 			}
 			var toolResult agent.ToolResult
-			if parallel {
+			if parallel[callIndex] {
 				toolResult = parallelResults[callIndex].result
 				err = parallelResults[callIndex].err
 			} else {
@@ -415,51 +415,69 @@ type parallelToolExecution struct {
 }
 
 // precomputeReadOnlyToolCalls starts independent, already-valid read-only
-// tools together. The normal loop still validates, records, emits events, and
-// appends results in the model's original order. If any call needs approval or
-// cannot be prepared safely, the caller falls back to the existing sequential
-// path for the whole batch.
-func (e *Engine) precomputeReadOnlyToolCalls(ctx context.Context, calls []modelclient.ToolCall, seen map[string]struct{}) ([]parallelToolExecution, bool) {
+// tools together. Calls that need approval or cannot be prepared safely are
+// left for the normal loop, which handles them sequentially. The normal loop
+// still validates, records, emits events, and appends results in the model's
+// original order.
+func (e *Engine) precomputeReadOnlyToolCalls(ctx context.Context, calls []modelclient.ToolCall, seen map[string]struct{}) ([]parallelToolExecution, []bool) {
 	if len(calls) < 2 {
-		return nil, false
+		return nil, make([]bool, len(calls))
 	}
 	prepared := make([]struct {
 		tool agent.Tool
 		args json.RawMessage
 	}, len(calls))
-	batchSeen := make(map[string]struct{}, len(calls))
+	batchCounts := make(map[string]int, len(calls))
+	keys := make([]string, len(calls))
 	for index, call := range calls {
-		if err := validateToolCall(call); err != nil {
-			return nil, false
-		}
 		key := normalizedToolCallKey(call.Function.Name, call.Function.Arguments)
-		if _, repeated := seen[key]; repeated && !e.allowRepeatedToolCalls {
-			return nil, false
+		keys[index] = key
+		batchCounts[key]++
+	}
+	parallel := make([]bool, len(calls))
+	for index, call := range calls {
+		if validateToolCall(call) != nil {
+			continue
 		}
-		if _, repeated := batchSeen[key]; repeated && !e.allowRepeatedToolCalls {
-			return nil, false
+		if _, repeated := seen[keys[index]]; repeated && !e.allowRepeatedToolCalls {
+			continue
 		}
-		batchSeen[key] = struct{}{}
+		if batchCounts[keys[index]] > 1 && !e.allowRepeatedToolCalls {
+			continue
+		}
 		tool, err := e.registry.Find(call.Function.Name)
 		if err != nil || e.registry.RequiresApproval(call.Function.Name) {
-			return nil, false
+			continue
 		}
 		prepared[index] = struct {
 			tool agent.Tool
 			args json.RawMessage
 		}{tool: tool, args: json.RawMessage(call.Function.Arguments)}
+		parallel[index] = true
+	}
+	parallelCount := 0
+	for _, eligible := range parallel {
+		if eligible {
+			parallelCount++
+		}
+	}
+	if parallelCount < 2 {
+		return nil, make([]bool, len(calls))
 	}
 	results := make([]parallelToolExecution, len(calls))
 	var waitGroup sync.WaitGroup
-	waitGroup.Add(len(prepared))
+	waitGroup.Add(parallelCount)
 	for index := range prepared {
+		if !parallel[index] {
+			continue
+		}
 		go func(index int) {
 			defer waitGroup.Done()
 			results[index].result, results[index].err = prepared[index].tool.Call(ctx, prepared[index].args)
 		}(index)
 	}
 	waitGroup.Wait()
-	return results, true
+	return results, parallel
 }
 
 func (e *Engine) chatWithRetry(ctx context.Context, conversation []modelclient.ChatMessage, definitions []agent.FunctionDefinition) (modelclient.ChatResponse, error) {

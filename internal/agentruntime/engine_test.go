@@ -118,6 +118,45 @@ func TestEngineRunsIndependentReadOnlyToolsInParallel(t *testing.T) {
 	}
 }
 
+func TestEngineKeepsSafeToolsParallelWhenAnotherCallIsInvalid(t *testing.T) {
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	go func() {
+		<-started
+		<-started
+		close(release)
+	}()
+	registry := agent.NewToolRegistry()
+	for _, name := range []string{"search_a", "search_b"} {
+		if err := registry.Register(parallelToolStub{name: name, started: started, release: release}); err != nil {
+			t.Fatalf("Register(%s) error = %v", name, err)
+		}
+	}
+	callCount := 0
+	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		callCount++
+		if callCount == 1 {
+			return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{
+				{ID: "call-a", Type: "function", Function: modelclient.ToolCallFunction{Name: "search_a", Arguments: `{}`}},
+				{ID: "call-invalid", Type: "function", Function: modelclient.ToolCallFunction{Name: "missing_tool", Arguments: `{}`}},
+				{ID: "call-b", Type: "function", Function: modelclient.ToolCallFunction{Name: "search_b", Arguments: `{}`}},
+			}}, nil
+		}
+		if len(messages) != 5 || messages[2].ToolCallID != "call-a" || messages[3].ToolCallID != "call-invalid" || messages[4].ToolCallID != "call-b" {
+			t.Fatalf("tool messages = %#v, want safe and invalid calls preserved in order", messages)
+		}
+		return modelclient.ChatResponse{Message: "完成"}, nil
+	}}
+	engine, err := agentruntime.NewEngine(chat, registry, 3)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	result, err := engine.Run(context.Background(), "run-partial-parallel-tools", []modelclient.ChatMessage{{Role: "user", Content: "查询"}})
+	if err != nil || result.Run.FinalAnswer() != "完成" {
+		t.Fatalf("Run() = (%#v, %v), want completed answer", result.Run, err)
+	}
+}
+
 func TestEngineRefusesWhenToolHasNoRelevantKnowledge(t *testing.T) {
 	tool := &toolStub{noRelevant: true, fallback: "资料中没有足够信息，无法可靠回答。"}
 	registry := agent.NewToolRegistry()
