@@ -600,9 +600,6 @@ func TestNewServiceRejectsInvalidDependencies(t *testing.T) {
 	if _, err := agentservice.NewService(chatStub{}, &searcherStub{}, 0, time.Minute); !errors.Is(err, agentservice.ErrInvalidMaxSteps) {
 		t.Fatalf("invalid max steps error = %v, want ErrInvalidMaxSteps", err)
 	}
-	if _, err := agentservice.NewService(chatStub{}, &searcherStub{}, 3, 0); !errors.Is(err, agentservice.ErrInvalidTimeout) {
-		t.Fatalf("invalid timeout error = %v, want ErrInvalidTimeout", err)
-	}
 	if _, err := agentservice.NewServiceWithToolResultLimit(chatStub{}, &searcherStub{}, 3, time.Minute, 1); !errors.Is(err, agentservice.ErrInvalidMaxToolResultBytes) {
 		t.Fatalf("invalid tool result limit error = %v, want ErrInvalidMaxToolResultBytes", err)
 	}
@@ -615,13 +612,15 @@ func TestNewServiceRejectsInvalidDependencies(t *testing.T) {
 }
 
 func TestServiceCancelsRunWhenTimeoutExpires(t *testing.T) {
-	service, err := agentservice.NewService(blockingChatStub{}, &searcherStub{}, 3, 20*time.Millisecond)
+	service, err := agentservice.NewService(blockingChatStub{}, &searcherStub{}, 3, time.Hour)
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
 
 	var events []agent.Event
-	response, err := service.AnswerWithEvents(context.Background(), 7, agentservice.ChatRequest{Message: "问题"}, func(event agent.Event) error {
+	requestContext, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	response, err := service.AnswerWithEvents(requestContext, 7, agentservice.ChatRequest{Message: "问题"}, func(event agent.Event) error {
 		events = append(events, event)
 		return nil
 	})

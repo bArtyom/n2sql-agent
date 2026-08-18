@@ -32,7 +32,6 @@ var (
 	ErrInvalidService            = errors.New("invalid agent service")
 	ErrInvalidRequest            = errors.New("invalid agent chat request")
 	ErrInvalidMaxSteps           = errors.New("agent max steps must be positive")
-	ErrInvalidTimeout            = errors.New("agent timeout must be positive")
 	ErrInvalidMaxToolResultBytes = errors.New("agent max tool result bytes must be at least 2")
 	ErrInvalidMaxHistoryMessages = errors.New("agent max history messages must be positive")
 	ErrInvalidMaxHistoryBytes    = errors.New("agent max history bytes must be positive")
@@ -125,9 +124,10 @@ func NewServiceWithLimitsAndSummarizerAndDocumentsAndChunksAndSummary(chat model
 	if maxSteps <= 0 {
 		return nil, ErrInvalidMaxSteps
 	}
-	if timeout <= 0 {
-		return nil, ErrInvalidTimeout
-	}
+	// timeout is retained in the constructor signature for the current
+	// internal callers, but Agent runs no longer use a whole-run timeout.
+	// Individual model/tool calls and explicit user cancellation remain bounded.
+	_ = timeout
 	if maxToolResultBytes < 2 {
 		return nil, ErrInvalidMaxToolResultBytes
 	}
@@ -199,9 +199,6 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	}
 	runContext := ctx
 	cancel := func() {}
-	if !isAsyncRun(ctx) {
-		runContext, cancel = context.WithTimeout(ctx, s.timeout)
-	}
 	defer cancel()
 	if thinkingModeRequested {
 		runContext = modelruntime.WithReasoningEffort(runContext, ReasoningEffortForMode(request.ThinkingMode))
