@@ -24,11 +24,11 @@ func (s *agentRunStoreStub) Create(_ context.Context, input agentrun.CreateInput
 func (*agentRunStoreStub) ClaimNext(context.Context) (agentrun.Run, error) {
 	return agentrun.Run{}, agentrun.ErrNoRun
 }
-func (*agentRunStoreStub) RequeueExpired(context.Context) error            { return nil }
-func (*agentRunStoreStub) RenewLease(context.Context, int64) error         { return nil }
-func (*agentRunStoreStub) MarkSucceeded(context.Context, int64) error      { return nil }
-func (*agentRunStoreStub) MarkFailed(context.Context, int64, string) error { return nil }
-func (*agentRunStoreStub) MarkCanceled(context.Context, int64) error       { return nil }
+func (*agentRunStoreStub) RequeueExpired(context.Context) error                    { return nil }
+func (*agentRunStoreStub) RenewLease(context.Context, int64, string) error         { return nil }
+func (*agentRunStoreStub) MarkSucceeded(context.Context, int64, string) error      { return nil }
+func (*agentRunStoreStub) MarkFailed(context.Context, int64, string, string) error { return nil }
+func (*agentRunStoreStub) MarkCanceled(context.Context, int64, string) error       { return nil }
 
 func TestPersistentAgentRunSubmissionReturnsRunIDWithoutExecuting(t *testing.T) {
 	store := &agentRunStoreStub{}

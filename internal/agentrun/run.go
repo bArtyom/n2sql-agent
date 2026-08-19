@@ -44,6 +44,7 @@ type Run struct {
 	FinishedAt      *time.Time       `json:"finished_at,omitempty"`
 	LeaseUntil      *time.Time       `json:"lease_until,omitempty"`
 	HeartbeatAt     *time.Time       `json:"heartbeat_at,omitempty"`
+	LeaseToken      string           `json:"-"`
 	UpdatedAt       time.Time        `json:"updated_at"`
 	Checkpoints     []ToolCheckpoint `json:"-"`
 }
@@ -59,10 +60,10 @@ type Store interface {
 	Create(context.Context, CreateInput) (Run, error)
 	ClaimNext(context.Context) (Run, error)
 	RequeueExpired(context.Context) error
-	RenewLease(context.Context, int64) error
-	MarkSucceeded(context.Context, int64) error
-	MarkFailed(context.Context, int64, string) error
-	MarkCanceled(context.Context, int64) error
+	RenewLease(context.Context, int64, string) error
+	MarkSucceeded(context.Context, int64, string) error
+	MarkFailed(context.Context, int64, string, string) error
+	MarkCanceled(context.Context, int64, string) error
 }
 
 // Reader exposes safe run metadata without exposing the persisted request
@@ -127,12 +128,12 @@ func (s *PostgresStore) Get(ctx context.Context, runID string, knowledgeBaseID i
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, run_id, knowledge_base_id, COALESCE(conversation_id, 0), request, response,
 			status, attempt_count, COALESCE(error_message, ''), created_at, started_at,
-			finished_at, lease_until, heartbeat_at, updated_at
+			finished_at, lease_until, heartbeat_at, lease_token, updated_at
 		FROM agent_runs
 		WHERE run_id = $1 AND knowledge_base_id = $2`, runID, knowledgeBaseID).Scan(
 		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.Request, &run.Response,
 		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.CreatedAt, &run.StartedAt,
-		&run.FinishedAt, &run.LeaseUntil, &run.HeartbeatAt, &run.UpdatedAt)
+		&run.FinishedAt, &run.LeaseUntil, &run.HeartbeatAt, &run.LeaseToken, &run.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Run{}, ErrRunNotFound
 	}
@@ -152,11 +153,11 @@ func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Run, err
 		VALUES ($1, $2, NULLIF($3, 0), $4)
 		RETURNING id, run_id, knowledge_base_id, COALESCE(conversation_id, 0), request, response,
 			status, attempt_count, COALESCE(error_message, ''), created_at, started_at, finished_at,
-			lease_until, heartbeat_at, updated_at`,
+			lease_until, heartbeat_at, lease_token, updated_at`,
 		input.RunID, input.KnowledgeBaseID, input.ConversationID, input.Request).Scan(
 		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.Request, &run.Response,
 		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.CreatedAt, &run.StartedAt, &run.FinishedAt,
-		&run.LeaseUntil, &run.HeartbeatAt, &run.UpdatedAt)
+		&run.LeaseUntil, &run.HeartbeatAt, &run.LeaseToken, &run.UpdatedAt)
 	if err != nil {
 		return Run{}, fmt.Errorf("create agent run: %w", err)
 	}
@@ -177,16 +178,17 @@ func (s *PostgresStore) ClaimNext(ctx context.Context) (Run, error) {
 			started_at = CURRENT_TIMESTAMP, finished_at = NULL,
 			error_message = NULL,
 			lease_until = CURRENT_TIMESTAMP + INTERVAL '5 minutes',
+			lease_token = md5(random()::text || clock_timestamp()::text || run.id::text),
 			heartbeat_at = CURRENT_TIMESTAMP,
 			updated_at = CURRENT_TIMESTAMP
 		FROM next_run
 		WHERE run.id = next_run.id
 		RETURNING run.id, run.run_id, run.knowledge_base_id, COALESCE(run.conversation_id, 0),
 			run.request, run.response, run.status, run.attempt_count, COALESCE(run.error_message, ''),
-			run.created_at, run.started_at, run.finished_at, run.lease_until, run.heartbeat_at, run.updated_at`).Scan(
+			run.created_at, run.started_at, run.finished_at, run.lease_until, run.heartbeat_at, run.lease_token, run.updated_at`).Scan(
 		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.Request, &run.Response,
 		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.CreatedAt, &run.StartedAt, &run.FinishedAt,
-		&run.LeaseUntil, &run.HeartbeatAt, &run.UpdatedAt)
+		&run.LeaseUntil, &run.HeartbeatAt, &run.LeaseToken, &run.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Run{}, ErrNoRun
 	}
@@ -364,7 +366,7 @@ func truncateCheckpointText(value string, maxBytes int) string {
 func (s *PostgresStore) RequeueExpired(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE agent_runs
-		SET status = 'pending', lease_until = NULL, heartbeat_at = NULL,
+		SET status = 'pending', lease_until = NULL, heartbeat_at = NULL, lease_token = NULL,
 			error_message = 'worker lease expired', updated_at = CURRENT_TIMESTAMP
 		WHERE status = 'running' AND lease_until IS NOT NULL AND lease_until <= CURRENT_TIMESTAMP`)
 	if err != nil {
@@ -373,15 +375,15 @@ func (s *PostgresStore) RequeueExpired(ctx context.Context) error {
 	return nil
 }
 
-func (s *PostgresStore) RenewLease(ctx context.Context, id int64) error {
-	if id <= 0 {
+func (s *PostgresStore) RenewLease(ctx context.Context, id int64, leaseToken string) error {
+	if id <= 0 || leaseToken == "" {
 		return ErrInvalidRun
 	}
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE agent_runs
 		SET lease_until = CURRENT_TIMESTAMP + INTERVAL '5 minutes',
 			heartbeat_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-		WHERE id = $1 AND status = 'running'`, id)
+		WHERE id = $1 AND status = 'running' AND lease_token = $2`, id, leaseToken)
 	if err != nil {
 		return fmt.Errorf("renew agent run lease: %w", err)
 	}
@@ -392,27 +394,27 @@ func (s *PostgresStore) RenewLease(ctx context.Context, id int64) error {
 	return nil
 }
 
-func (s *PostgresStore) MarkSucceeded(ctx context.Context, id int64) error {
-	return s.markFinished(ctx, id, StatusSucceeded, "")
+func (s *PostgresStore) MarkSucceeded(ctx context.Context, id int64, leaseToken string) error {
+	return s.markFinished(ctx, id, leaseToken, StatusSucceeded, "")
 }
 
-func (s *PostgresStore) MarkFailed(ctx context.Context, id int64, message string) error {
-	return s.markFinished(ctx, id, StatusFailed, message)
+func (s *PostgresStore) MarkFailed(ctx context.Context, id int64, message, leaseToken string) error {
+	return s.markFinished(ctx, id, leaseToken, StatusFailed, message)
 }
 
-func (s *PostgresStore) MarkCanceled(ctx context.Context, id int64) error {
-	return s.markFinished(ctx, id, StatusCanceled, "")
+func (s *PostgresStore) MarkCanceled(ctx context.Context, id int64, leaseToken string) error {
+	return s.markFinished(ctx, id, leaseToken, StatusCanceled, "")
 }
 
-func (s *PostgresStore) markFinished(ctx context.Context, id int64, status Status, message string) error {
-	if id <= 0 {
+func (s *PostgresStore) markFinished(ctx context.Context, id int64, leaseToken string, status Status, message string) error {
+	if id <= 0 || leaseToken == "" {
 		return ErrInvalidRun
 	}
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE agent_runs
 		SET status = $2, error_message = NULLIF($3, ''), finished_at = CURRENT_TIMESTAMP,
-			lease_until = NULL, heartbeat_at = NULL, updated_at = CURRENT_TIMESTAMP
-		WHERE id = $1 AND status = 'running'`, id, status, message)
+			lease_until = NULL, heartbeat_at = NULL, lease_token = NULL, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1 AND status = 'running' AND lease_token = $4`, id, status, message, leaseToken)
 	if err != nil {
 		return fmt.Errorf("mark agent run %s: %w", status, err)
 	}

@@ -63,7 +63,7 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 	if checkpointStore, ok := r.store.(ToolCheckpointStore); ok {
 		checkpoints, checkpointErr := checkpointStore.ListToolCheckpoints(ctx, run.ID)
 		if checkpointErr != nil {
-			_ = r.store.MarkFailed(context.WithoutCancel(ctx), run.ID, checkpointErr.Error())
+			_ = r.store.MarkFailed(context.WithoutCancel(ctx), run.ID, checkpointErr.Error(), run.LeaseToken)
 			return true, fmt.Errorf("load agent tool checkpoints: %w", checkpointErr)
 		}
 		run.Checkpoints = checkpoints
@@ -81,14 +81,14 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 	go r.renewLease(executionContext, run)
 	err = r.executor.Execute(executionContext, run, sink)
 	if err == nil {
-		if markErr := r.store.MarkSucceeded(context.WithoutCancel(ctx), run.ID); markErr != nil {
+		if markErr := r.store.MarkSucceeded(context.WithoutCancel(ctx), run.ID, run.LeaseToken); markErr != nil {
 			return true, markErr
 		}
 		r.cleanupTerminalCheckpoints(ctx, run.ID)
 		return true, nil
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		if markErr := r.store.MarkCanceled(context.WithoutCancel(ctx), run.ID); markErr != nil {
+		if markErr := r.store.MarkCanceled(context.WithoutCancel(ctx), run.ID, run.LeaseToken); markErr != nil {
 			return true, markErr
 		}
 		r.cleanupTerminalCheckpoints(ctx, run.ID)
@@ -98,7 +98,7 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 	if len(message) > 2000 {
 		message = message[:2000]
 	}
-	if markErr := r.store.MarkFailed(context.WithoutCancel(ctx), run.ID, message); markErr != nil {
+	if markErr := r.store.MarkFailed(context.WithoutCancel(ctx), run.ID, message, run.LeaseToken); markErr != nil {
 		return true, markErr
 	}
 	r.cleanupTerminalCheckpoints(ctx, run.ID)
@@ -124,7 +124,7 @@ func (r *Runner) renewLease(ctx context.Context, run Run) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := r.store.RenewLease(context.WithoutCancel(ctx), run.ID); err != nil {
+			if err := r.store.RenewLease(context.WithoutCancel(ctx), run.ID, run.LeaseToken); err != nil {
 				slog.WarnContext(ctx, "agent_run_lease_renew_failed", "run_id", run.RunID, "error", err)
 			}
 		}

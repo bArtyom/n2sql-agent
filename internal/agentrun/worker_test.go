@@ -10,11 +10,12 @@ import (
 )
 
 type runStoreStub struct {
-	run      Run
-	status   Status
-	failed   string
-	requeued bool
-	deleted  int
+	run         Run
+	status      Status
+	failed      string
+	requeued    bool
+	deleted     int
+	markedToken string
 }
 
 func (s *runStoreStub) Create(context.Context, CreateInput) (Run, error) { return s.run, nil }
@@ -30,16 +31,19 @@ func (s *runStoreStub) RequeueExpired(context.Context) error {
 	s.requeued = true
 	return nil
 }
-func (*runStoreStub) RenewLease(context.Context, int64) error { return nil }
-func (s *runStoreStub) MarkSucceeded(context.Context, int64) error {
+func (*runStoreStub) RenewLease(context.Context, int64, string) error { return nil }
+func (s *runStoreStub) MarkSucceeded(_ context.Context, _ int64, token string) error {
+	s.markedToken = token
 	s.status = StatusSucceeded
 	return nil
 }
-func (s *runStoreStub) MarkFailed(_ context.Context, _ int64, message string) error {
+func (s *runStoreStub) MarkFailed(_ context.Context, _ int64, message, token string) error {
+	s.markedToken = token
 	s.status, s.failed = StatusFailed, message
 	return nil
 }
-func (s *runStoreStub) MarkCanceled(context.Context, int64) error {
+func (s *runStoreStub) MarkCanceled(_ context.Context, _ int64, token string) error {
+	s.markedToken = token
 	s.status = StatusCanceled
 	return nil
 }
@@ -54,7 +58,7 @@ func (*runStoreStub) CleanupTerminalToolCheckpoints(context.Context, time.Durati
 }
 
 func TestRunnerMarksSucceededAfterExecution(t *testing.T) {
-	store := &runStoreStub{run: Run{ID: 1, RunID: "run-1"}, status: StatusPending}
+	store := &runStoreStub{run: Run{ID: 1, RunID: "run-1", LeaseToken: "lease-a"}, status: StatusPending}
 	runner, err := NewRunner(store, ExecutorFunc(func(_ context.Context, run Run, sink EventSink) error {
 		if run.RunID != "run-1" {
 			t.Fatalf("run id = %q", run.RunID)
@@ -73,6 +77,9 @@ func TestRunnerMarksSucceededAfterExecution(t *testing.T) {
 	}
 	if store.deleted != 1 {
 		t.Fatalf("deleted checkpoints = %d, want 1", store.deleted)
+	}
+	if store.markedToken != "lease-a" {
+		t.Fatalf("marked token = %q, want lease-a", store.markedToken)
 	}
 }
 
