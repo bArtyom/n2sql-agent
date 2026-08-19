@@ -38,7 +38,7 @@
 - Agent Worker 租约丢失主动停止已补齐：心跳续租失败后立即取消本次执行上下文，旧 Worker 不再继续调用模型或工具；数据库 token fencing 继续作为最终写入保护。
 - Agent Worker 已区分取消原因：用户取消仍进入 `canceled`；心跳导致的 `ErrLeaseLost` 不写终态，保留运行记录等待租约回收后由下一个 Worker 接管，避免把故障恢复误判成用户主动停止。
 - Agent Worker 已增加最大接管次数：租约过期的 Run 最多尝试 3 次；超过次数后进入 `failed` 并记录 `worker lease expired: maximum attempts reached`，避免故障任务无限循环。
-- Agent checkpoint 第一版断点续跑已接入：checkpoint 额外保存有界的原始工具参数；Worker 接管后将最近的安全只读工具调用重建为 `assistant tool_call + tool result` 上下文，直接进入下一次模型决策，减少重复的工具选择；缺少参数的旧 checkpoint 继续使用原有安全结果复用，不恢复副作用工具。
+- Agent checkpoint 第一版断点续跑已接入：checkpoint 额外保存有界的原始工具参数；Worker 接管后将最近的安全只读工具调用重建为 `assistant tool_call + tool result` 上下文，直接进入下一次模型决策，减少重复的工具选择；旧格式 checkpoint 已通过迁移清理，不再兼容。
 - Agent checkpoint 恢复轨迹已补齐：接管时发出带 `checkpoint_action=resumed_context` 的 `tool_finished` 事件，并将已恢复的工具参数加入本轮重复调用保护，前端和运行日志可以区分“重新执行”与“从 checkpoint 恢复”。
 - Agent checkpoint 已保存模型决策批次 ID；同一轮并行只读工具恢复时，会重建为一条带多个 `tool_call` 的 assistant 消息及对应 tool 消息，避免恢复后的上下文协议失真。
 - Agent checkpoint 写入已改为可降级：保存失败不会让已成功的工具调用和最终问答失败；`tool_finished` 会标记 `checkpoint_action=save_failed`，表示本轮没有建立可恢复 checkpoint，后续接管时按安全工具重试策略处理。

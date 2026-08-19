@@ -938,17 +938,13 @@ func TestEngineReusesMatchingSafeCheckpointWithoutCallingTool(t *testing.T) {
 	arguments := `{"query":"年假"}`
 	sum := sha256.Sum256([]byte("knowledge_search\x00" + arguments))
 	engine, err := agentruntime.NewEngineWithOptions(chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
-		if len(messages) == 1 {
-			return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
-				ID: "call-resume", Type: "function", Function: modelclient.ToolCallFunction{Name: "knowledge_search", Arguments: arguments},
-			}}}, nil
-		}
-		if !strings.Contains(messages[len(messages)-1].Content, "checkpoint content") {
+		if len(messages) != 3 || !strings.Contains(messages[len(messages)-1].Content, "checkpoint content") {
 			t.Fatalf("model did not receive checkpoint content: %#v", messages)
 		}
 		return modelclient.ChatResponse{Message: "根据已恢复的检索结果回答"}, nil
 	}}, registry, 2, agentruntime.EngineOptions{ResumeCheckpoints: []agentruntime.ResumeCheckpoint{{
-		ToolName: "knowledge_search", ArgumentsHash: hex.EncodeToString(sum[:]), Content: "checkpoint content",
+		ToolCallID: "checkpoint-call", DecisionID: "checkpoint-decision", ToolName: "knowledge_search", Arguments: arguments,
+		ArgumentsHash: hex.EncodeToString(sum[:]), Content: "checkpoint content",
 	}}})
 	if err != nil {
 		t.Fatalf("NewEngineWithOptions() error = %v", err)
@@ -983,7 +979,7 @@ func TestEngineResumesSafeToolConversationWithoutRepeatingModelDecision(t *testi
 		return modelclient.ChatResponse{Message: "根据断点继续回答"}, nil
 	}}
 	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 2, agentruntime.EngineOptions{ResumeCheckpoints: []agentruntime.ResumeCheckpoint{{
-		ToolCallID: "call-resumed", ToolName: "knowledge_search", Arguments: arguments,
+		ToolCallID: "call-resumed", DecisionID: "decision-resumed", ToolName: "knowledge_search", Arguments: arguments,
 		ArgumentsHash: hex.EncodeToString(sum[:]), Content: "已保存的检索结果",
 	}}})
 	if err != nil {

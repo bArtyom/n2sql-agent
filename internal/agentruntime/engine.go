@@ -1011,9 +1011,8 @@ func (e *Engine) resumeCheckpoint(toolName string, arguments json.RawMessage) (R
 // resumeConversation reconstructs only the safe, completed tool exchanges
 // that were checkpointed before a Worker stopped. The next model call sees
 // those exchanges as existing context, so it does not need to decide to call
-// the same read-only tool again. Checkpoints without the original arguments
-// remain eligible for the older result-reuse path but cannot be reconstructed
-// into a model conversation.
+// the same read-only tool again. Only current-format checkpoints with original
+// arguments and a decision ID are reconstructed into a model conversation.
 func (e *Engine) resumeConversation(run *agent.AgentRun) ([]modelclient.ChatMessage, []ResumeCheckpoint, error) {
 	if run == nil || len(e.resumeCheckpoints) == 0 {
 		return nil, nil, nil
@@ -1022,7 +1021,7 @@ func (e *Engine) resumeConversation(run *agent.AgentRun) ([]modelclient.ChatMess
 	seen := make(map[string]struct{})
 	for index := len(e.resumeCheckpoints) - 1; index >= 0; index-- {
 		checkpoint := e.resumeCheckpoints[index]
-		if checkpoint.ToolCallID == "" || checkpoint.Arguments == "" || checkpoint.Content == "" || !json.Valid([]byte(checkpoint.Arguments)) {
+		if checkpoint.ToolCallID == "" || checkpoint.DecisionID == "" || checkpoint.Arguments == "" || checkpoint.Content == "" || !json.Valid([]byte(checkpoint.Arguments)) {
 			continue
 		}
 		if e.registry.RequiresApproval(checkpoint.ToolName) || !e.registry.Retryable(checkpoint.ToolName) {
@@ -1049,9 +1048,6 @@ func (e *Engine) resumeConversation(run *agent.AgentRun) ([]modelclient.ChatMess
 			return nil, nil, err
 		}
 		decisionID := checkpoint.DecisionID
-		if decisionID == "" {
-			decisionID = "legacy-" + checkpoint.ToolCallID
-		}
 		if len(groups) == 0 || groups[len(groups)-1].decisionID != decisionID {
 			groups = append(groups, resumeGroup{decisionID: decisionID})
 		}

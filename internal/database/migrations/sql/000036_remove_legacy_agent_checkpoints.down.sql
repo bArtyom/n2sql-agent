@@ -1,0 +1,1 @@
+-- Irreversible data cleanup: legacy checkpoint rows were intentionally removed.
