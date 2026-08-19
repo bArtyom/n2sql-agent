@@ -1048,6 +1048,53 @@ func TestEngineRestoresParallelToolCallsInOneAssistantMessage(t *testing.T) {
 	}
 }
 
+func TestEngineContinuesWhenCheckpointPersistenceFails(t *testing.T) {
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(&readOnlyToolStub{}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	modelCalls := 0
+	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		modelCalls++
+		if modelCalls == 1 {
+			return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+				ID: "call-checkpoint-failure", Type: "function",
+				Function: modelclient.ToolCallFunction{Name: "knowledge_search", Arguments: `{}`},
+			}}}, nil
+		}
+		if len(messages) != 3 || messages[2].Role != "tool" {
+			t.Fatalf("messages = %#v, want tool result after persistence failure", messages)
+		}
+		return modelclient.ChatResponse{Message: "仍然完成回答"}, nil
+	}}
+	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 2, agentruntime.EngineOptions{
+		CheckpointSink: func(context.Context, agentruntime.ToolCheckpoint) error {
+			return errors.New("checkpoint database unavailable")
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEngineWithOptions() error = %v", err)
+	}
+	var events []agent.Event
+	result, err := engine.RunWithEvents(context.Background(), "run-checkpoint-failure", []modelclient.ChatMessage{{Role: "user", Content: "查询"}}, func(event agent.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil || result.Run.Status() != agent.RunSucceeded || result.Run.FinalAnswer() != "仍然完成回答" {
+		t.Fatalf("Run() = (%#v, %v), want successful answer", result.Run, err)
+	}
+	for _, event := range events {
+		if event.Type != agent.EventToolFinished {
+			continue
+		}
+		data, ok := event.Data.(map[string]any)
+		if ok && data["checkpoint_action"] == "save_failed" {
+			return
+		}
+	}
+	t.Fatalf("events = %#v, want checkpoint_action=save_failed", events)
+}
+
 func TestEngineDoesNotFeedSideEffectFailureBackForAutomaticRetry(t *testing.T) {
 	wantErr := errors.New("remote write status unknown")
 	registry := agent.NewToolRegistry()

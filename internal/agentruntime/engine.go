@@ -485,7 +485,11 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 					// externalized. SSE never receives this content.
 					Content: toolResult.Content, Payload: toolFinishedData,
 				}); err != nil {
-					return finishErrorWithEvents(result, err, emitter)
+					// Checkpoints accelerate recovery but are not the primary
+					// Agent result. A storage outage must not discard an already
+					// successful tool call or prevent the model from answering.
+					toolFinishedData["checkpoint_action"] = "save_failed"
+					toolFinishedData["checkpoint_error"] = "checkpoint persistence failed"
 				}
 			}
 			// Structured tool metadata is forwarded for typed rendering while
