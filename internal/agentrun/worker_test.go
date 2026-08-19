@@ -10,13 +10,14 @@ import (
 )
 
 type runStoreStub struct {
-	run         Run
-	status      Status
-	failed      string
-	requeued    bool
-	deleted     int
-	markedToken string
-	renewErr    error
+	run           Run
+	status        Status
+	failed        string
+	requeued      bool
+	deleted       int
+	markedToken   string
+	renewErr      error
+	checkpointErr error
 }
 
 func (s *runStoreStub) Create(context.Context, CreateInput) (Run, error) { return s.run, nil }
@@ -32,7 +33,11 @@ func (s *runStoreStub) RequeueExpired(context.Context) error {
 	s.requeued = true
 	return nil
 }
-func (s *runStoreStub) RenewLease(context.Context, int64, string) error { return s.renewErr }
+func (s *runStoreStub) ListToolCheckpoints(context.Context, int64) ([]ToolCheckpoint, error) {
+	return nil, s.checkpointErr
+}
+func (*runStoreStub) SaveToolCheckpoint(context.Context, ToolCheckpoint) error { return nil }
+func (s *runStoreStub) RenewLease(context.Context, int64, string) error        { return s.renewErr }
 func (s *runStoreStub) MarkSucceeded(_ context.Context, _ int64, token string) error {
 	s.markedToken = token
 	s.status = StatusSucceeded
@@ -123,6 +128,27 @@ func TestExpiredRunStopsRetryingAfterMaximumAttempts(t *testing.T) {
 	}
 	if shouldRetryExpiredRun(maxAgentRunAttempts) {
 		t.Fatalf("attempt %d should stop retrying", maxAgentRunAttempts)
+	}
+}
+
+func TestRunnerContinuesWhenCheckpointLoadFails(t *testing.T) {
+	store := &runStoreStub{
+		run:           Run{ID: 4, RunID: "run-4", LeaseToken: "lease-a"},
+		status:        StatusPending,
+		checkpointErr: errors.New("checkpoint store unavailable"),
+	}
+	runner, err := NewRunner(store, ExecutorFunc(func(_ context.Context, run Run, _ EventSink) error {
+		if len(run.Checkpoints) != 0 {
+			t.Fatalf("checkpoints = %#v, want empty fallback", run.Checkpoints)
+		}
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("NewRunner() error = %v", err)
+	}
+	worked, err := runner.RunOnce(context.Background())
+	if err != nil || !worked || store.status != StatusSucceeded {
+		t.Fatalf("RunOnce() = (%v, %v), status=%s, want succeeded fallback", worked, err, store.status)
 	}
 }
 

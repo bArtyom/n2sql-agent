@@ -64,10 +64,10 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 	if checkpointStore, ok := r.store.(ToolCheckpointStore); ok {
 		checkpoints, checkpointErr := checkpointStore.ListToolCheckpoints(ctx, run.ID)
 		if checkpointErr != nil {
-			_ = r.store.MarkFailed(context.WithoutCancel(ctx), run.ID, checkpointErr.Error(), run.LeaseToken)
-			return true, fmt.Errorf("load agent tool checkpoints: %w", checkpointErr)
+			slog.WarnContext(ctx, "agent_checkpoint_load_failed", "run_id", run.RunID, "error", checkpointErr)
+		} else {
+			run.Checkpoints = checkpoints
 		}
-		run.Checkpoints = checkpoints
 	}
 
 	started := time.Now()
