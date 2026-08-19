@@ -953,8 +953,12 @@ func TestEngineReusesMatchingSafeCheckpointWithoutCallingTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEngineWithOptions() error = %v", err)
 	}
-	if _, err := engine.Run(context.Background(), "run-resume-safe", []modelclient.ChatMessage{{Role: "user", Content: "查询"}}); err != nil {
+	result, err := engine.Run(context.Background(), "run-resume-safe", []modelclient.ChatMessage{{Role: "user", Content: "查询"}})
+	if err != nil {
 		t.Fatalf("Run() error = %v", err)
+	}
+	if got := result.Run.Stats().CheckpointReuses; got != 1 {
+		t.Fatalf("checkpoint reuses = %d, want 1", got)
 	}
 	if called {
 		t.Fatal("safe checkpoint was not reused")

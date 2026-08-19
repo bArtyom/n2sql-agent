@@ -54,12 +54,15 @@ func TestAgentRunTracksRuntimeStats(t *testing.T) {
 	if err := run.RecordToolCall(false); err != nil {
 		t.Fatalf("RecordToolCall(failure) error = %v", err)
 	}
+	if err := run.RecordCheckpointReuse(); err != nil {
+		t.Fatalf("RecordCheckpointReuse() error = %v", err)
+	}
 	if err := run.Complete("答案"); err != nil {
 		t.Fatalf("Complete() error = %v", err)
 	}
 
 	stats := run.Stats()
-	if stats.Status != agent.RunSucceeded || stats.ModelCalls != 1 || stats.ToolCalls != 2 || stats.SuccessfulToolCalls != 1 || stats.FailedToolCalls != 1 || stats.PromptTokens != 11 || stats.CompletionTokens != 3 || stats.EmbeddingTokens != 7 || stats.TotalTokens != 21 || stats.FailureCategory != "" {
+	if stats.Status != agent.RunSucceeded || stats.ModelCalls != 1 || stats.ToolCalls != 2 || stats.SuccessfulToolCalls != 1 || stats.FailedToolCalls != 1 || stats.CheckpointReuses != 1 || stats.PromptTokens != 11 || stats.CompletionTokens != 3 || stats.EmbeddingTokens != 7 || stats.TotalTokens != 21 || stats.FailureCategory != "" {
 		t.Fatalf("stats = %#v, want completed call counts", stats)
 	}
 	if stats.StartedAt.IsZero() || stats.FinishedAt.IsZero() || stats.FinishedAt.Before(stats.StartedAt) {

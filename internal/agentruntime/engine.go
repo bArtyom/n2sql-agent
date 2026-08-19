@@ -346,6 +346,9 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			if !e.registry.RequiresApproval(toolCall.Function.Name) && e.registry.Retryable(toolCall.Function.Name) {
 				if checkpoint, ok := e.resumeCheckpoint(toolCall.Function.Name, arguments); ok {
 					toolResult = agent.ToolResult{Content: checkpoint.Content, Metadata: map[string]any{"resumed_from_checkpoint": true}}
+					if err := run.RecordCheckpointReuse(); err != nil {
+						return finishErrorWithEvents(result, err, emitter)
+					}
 					resumed = true
 				}
 			}
@@ -444,6 +447,11 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			toolFinishedData["no_relevant_results"] = toolResult.NoRelevantResults
 			toolFinishedData["result_summary"] = toolResultSummary(toolResult)
 			toolFinishedData["resumed_from_checkpoint"] = resumed
+			if resumed {
+				toolFinishedData["checkpoint_action"] = "reused"
+			} else {
+				toolFinishedData["checkpoint_action"] = "stored"
+			}
 			if e.checkpointSink != nil {
 				if err := e.checkpointSink(ctx, ToolCheckpoint{
 					ToolCallID: toolCall.ID, ToolName: toolCall.Function.Name, StepNumber: len(run.Steps()),

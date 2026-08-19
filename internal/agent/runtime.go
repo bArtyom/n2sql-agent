@@ -79,6 +79,7 @@ type AgentRun struct {
 	toolCalls        int
 	successTools     int
 	failedTools      int
+	checkpointReuses int
 	promptTokens     int
 	completionTokens int
 	embeddingTokens  int
@@ -102,6 +103,7 @@ type RunStats struct {
 	ToolCalls           int                            `json:"tool_calls"`
 	SuccessfulToolCalls int                            `json:"successful_tool_calls"`
 	FailedToolCalls     int                            `json:"failed_tool_calls"`
+	CheckpointReuses    int                            `json:"checkpoint_reuses"`
 	PromptTokens        int                            `json:"prompt_tokens"`
 	CompletionTokens    int                            `json:"completion_tokens"`
 	EmbeddingTokens     int                            `json:"embedding_tokens"`
@@ -220,6 +222,16 @@ func (r *AgentRun) RecordToolCall(success bool) error {
 	return nil
 }
 
+// RecordCheckpointReuse records that a safe, matching tool result was reused
+// after Worker recovery instead of executing the tool again.
+func (r *AgentRun) RecordCheckpointReuse() error {
+	if r == nil || r.status != RunRunning {
+		return fmt.Errorf("%w: record checkpoint reuse", ErrInvalidRunTransition)
+	}
+	r.checkpointReuses++
+	return nil
+}
+
 // ObserveChatTokens adds provider-reported chat usage to this running Agent.
 func (r *AgentRun) ObserveChatTokens(tokenUsage usage.TokenUsage) {
 	if r == nil {
@@ -331,6 +343,7 @@ func (r *AgentRun) Stats() RunStats {
 		ToolCalls:           r.toolCalls,
 		SuccessfulToolCalls: r.successTools,
 		FailedToolCalls:     r.failedTools,
+		CheckpointReuses:    r.checkpointReuses,
 		PromptTokens:        r.promptTokens,
 		CompletionTokens:    r.completionTokens,
 		EmbeddingTokens:     r.embeddingTokens,
