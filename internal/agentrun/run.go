@@ -29,6 +29,11 @@ var (
 )
 
 const defaultLeaseDuration = 5 * time.Minute
+const maxAgentRunAttempts = 3
+
+func shouldRetryExpiredRun(attemptCount int) bool {
+	return attemptCount < maxAgentRunAttempts
+}
 
 type Run struct {
 	ID              int64            `json:"id"`
@@ -367,9 +372,14 @@ func truncateCheckpointText(value string, maxBytes int) string {
 func (s *PostgresStore) RequeueExpired(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE agent_runs
-		SET status = 'pending', lease_until = NULL, heartbeat_at = NULL, lease_token = NULL,
-			error_message = 'worker lease expired', updated_at = CURRENT_TIMESTAMP
-		WHERE status = 'running' AND lease_until IS NOT NULL AND lease_until <= CURRENT_TIMESTAMP`)
+		SET status = CASE WHEN attempt_count >= $1 THEN 'failed' ELSE 'pending' END,
+			lease_until = NULL, heartbeat_at = NULL, lease_token = NULL,
+			error_message = CASE WHEN attempt_count >= $1
+				THEN 'worker lease expired: maximum attempts reached'
+				ELSE 'worker lease expired' END,
+			finished_at = CASE WHEN attempt_count >= $1 THEN CURRENT_TIMESTAMP ELSE NULL END,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE status = 'running' AND lease_until IS NOT NULL AND lease_until <= CURRENT_TIMESTAMP`, maxAgentRunAttempts)
 	if err != nil {
 		return fmt.Errorf("requeue expired agent runs: %w", err)
 	}

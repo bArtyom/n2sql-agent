@@ -117,6 +117,15 @@ func TestRunnerCancelsExecutionWhenLeaseRenewalFails(t *testing.T) {
 	}
 }
 
+func TestExpiredRunStopsRetryingAfterMaximumAttempts(t *testing.T) {
+	if !shouldRetryExpiredRun(1) {
+		t.Fatal("attempt 1 should be retryable")
+	}
+	if shouldRetryExpiredRun(maxAgentRunAttempts) {
+		t.Fatalf("attempt %d should stop retrying", maxAgentRunAttempts)
+	}
+}
+
 func TestRunnerLeavesRunReclaimableWhenLeaseIsLost(t *testing.T) {
 	store := &runStoreStub{
 		run:      Run{ID: 3, RunID: "run-3", LeaseToken: "lease-a"},
