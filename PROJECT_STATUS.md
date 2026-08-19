@@ -33,6 +33,7 @@
 - 工具安全重试原则已落地：普通工具默认允许失败后反馈模型重试；实现 `RequiresApproval()` 的副作用工具默认禁止自动重试，只有同时显式实现 `Retryable() bool { return true }` 才允许，便于未来接入业务幂等键后安全恢复。
 - Agent 工具 checkpoint 已接入安全复用：新增 `agent_run_checkpoints` 表，标准异步 Worker 在 `tool_finished` 边界保存脱敏结果；小结果以内联元数据保存，大结果写入带 TTL 的本地临时文件，PostgreSQL 只保存引用、预览和参数哈希；恢复时按工具名和规范化参数哈希匹配，只有不需审批且允许重试的工具才复用，副作用工具不会绕过审批，临时文件过期则只读工具降级为重新调用。Run 进入 succeeded/failed/canceled 后立即删除恢复 checkpoint，后台再清理终态遗留记录；最终答案、会话消息和运行摘要不删除。
 - Agent checkpoint 恢复增加可观测字段：`tool_finished` 标记 `checkpoint_action=stored/reused`，运行摘要增加 `checkpoint_reuses`，用于判断 Worker 接管后实际复用了多少个只读工具结果；不记录完整工具内容。
+- Agent SSE gap 恢复增强：事件过期后先查询 Run 状态；若仍为 `running`，前端不再携带过期的 `Last-Event-ID`，而是重新订阅 Redis 当前尾部继续接收后续事件；终态任务仍从 PostgreSQL 恢复最终答案，避免慢前端把长任务误判为失败。
 - Agent 只读工具已覆盖 `knowledge_search`、`document_list`、`document_info`、`document_read`；文档正文读取受知识库、文档、chunk 数量和字节数限制。
 - 异步文档摘要工具 `document_summary` 已接入标准 Agent：后台生成时返回任务状态并立即结束本轮 Agent，不把 pending 占位结果再次交给模型，避免重复工具调用和步数超限；摘要完成后由后续提问读取缓存。
 - Agent 会话记忆改造第一步：历史语义摘要模型调用失败时最多重试 2 次；上下文取消会立即停止重试，最终仍由现有抽取式摘要兜底，不阻断正常问答。

@@ -1649,23 +1649,34 @@ async function resumeAgentStream(answer: ChatMessage, answerIndex: number) {
   if (!selectedKnowledgeBaseId.value || !answer.runID) return;
   answer.activity = "正在恢复 Agent 运行…";
   answer.streamGap = false;
+  const initialResult = await connectAgentStream(answer, answerIndex, true);
+  if (initialResult === "completed") return;
+  if (initialResult === "gap") {
+    const statusPayload = await fetchAgentRunStatus(answer);
+    if (statusPayload?.status === "running") {
+      answer.streamGap = false;
+      answer.activity = "中间事件已过期，正在订阅最新进度…";
+      const tailResult = await connectAgentStream(answer, answerIndex, false);
+      if (tailResult === "completed") return;
+    }
+  }
+  if (await recoverPersistedAgentResponse(answer)) return;
+  throw new Error("实时事件已过期，最终答案尚未持久化。");
+}
+
+type AgentStreamConnectResult = "completed" | "gap" | "unavailable";
+
+async function connectAgentStream(answer: ChatMessage, answerIndex: number, withCursor: boolean): Promise<AgentStreamConnectResult> {
+  if (!selectedKnowledgeBaseId.value || !answer.runID) return "unavailable";
   const headers: Record<string, string> = { Accept: "text/event-stream" };
-  if (answer.lastEventID) headers["Last-Event-ID"] = answer.lastEventID;
+  if (withCursor && answer.lastEventID) headers["Last-Event-ID"] = answer.lastEventID;
   const response = await fetch(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/agent-runs/${encodeURIComponent(answer.runID)}/stream`, {
     method: "GET",
     headers,
   });
-  if (!response.ok || !response.body) {
-    if (await recoverPersistedAgentResponse(answer)) {
-      return;
-    }
-    throw new Error("无法恢复 Agent 运行，可能已超过保留时间。");
-  }
+  if (!response.ok || !response.body) return "unavailable";
   await readAgentSSE(response, answerIndex, false);
-  if (answer.streamGap) {
-    if (await recoverPersistedAgentResponse(answer)) return;
-    throw new Error("实时事件已过期，最终答案尚未持久化。");
-  }
+  return answer.streamGap ? "gap" : "completed";
 }
 
 type AgentRunStatusPayload = {
@@ -1674,6 +1685,16 @@ type AgentRunStatusPayload = {
   error?: string;
   response?: Record<string, unknown>;
 };
+
+async function fetchAgentRunStatus(answer: ChatMessage): Promise<AgentRunStatusPayload | null> {
+  if (!selectedKnowledgeBaseId.value || !answer.runID) return null;
+  const statusResponse = await fetch(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/agent-runs/${encodeURIComponent(answer.runID)}`, {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  });
+  if (!statusResponse.ok) return null;
+  return await statusResponse.json() as AgentRunStatusPayload;
+}
 
 async function recoverPersistedAgentResponse(answer: ChatMessage): Promise<boolean> {
   if (!selectedKnowledgeBaseId.value || !answer.runID) return false;
