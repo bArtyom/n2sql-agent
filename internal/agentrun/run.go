@@ -25,6 +25,7 @@ var (
 	ErrNoRun       = errors.New("no pending agent run")
 	ErrRunNotFound = errors.New("agent run not found")
 	ErrInvalidRun  = errors.New("invalid agent run")
+	ErrLeaseLost   = errors.New("agent run lease lost")
 )
 
 const defaultLeaseDuration = 5 * time.Minute

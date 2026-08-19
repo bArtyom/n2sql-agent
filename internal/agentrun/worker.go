@@ -26,9 +26,10 @@ func (f ExecutorFunc) Execute(ctx context.Context, run Run, sink EventSink) erro
 }
 
 type Runner struct {
-	store     Store
-	executor  Executor
-	eventSink func(Run) func(agent.Event) error
+	store             Store
+	executor          Executor
+	eventSink         func(Run) func(agent.Event) error
+	heartbeatInterval time.Duration
 }
 
 const leaseHeartbeatInterval = defaultLeaseDuration / 3
@@ -37,7 +38,7 @@ func NewRunner(store Store, executor Executor) (*Runner, error) {
 	if store == nil || executor == nil {
 		return nil, ErrInvalidRun
 	}
-	return &Runner{store: store, executor: executor}, nil
+	return &Runner{store: store, executor: executor, heartbeatInterval: leaseHeartbeatInterval}, nil
 }
 
 func NewRunnerWithEventSink(store Store, executor Executor, eventSink func(Run) func(agent.Event) error) (*Runner, error) {
@@ -76,8 +77,8 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 			sink = candidate
 		}
 	}
-	executionContext, stopHeartbeat := context.WithCancel(ctx)
-	defer stopHeartbeat()
+	executionContext, stopHeartbeat := context.WithCancelCause(ctx)
+	defer stopHeartbeat(nil)
 	go r.renewLease(executionContext, run, stopHeartbeat)
 	err = r.executor.Execute(executionContext, run, sink)
 	if err == nil {
@@ -85,6 +86,10 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 			return true, markErr
 		}
 		r.cleanupTerminalCheckpoints(ctx, run.ID)
+		return true, nil
+	}
+	if errors.Is(context.Cause(executionContext), ErrLeaseLost) {
+		slog.WarnContext(ctx, "agent_run_lease_lost", "run_id", run.RunID, "duration_ms", time.Since(started).Milliseconds())
 		return true, nil
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -116,11 +121,15 @@ func (r *Runner) cleanupTerminalCheckpoints(ctx context.Context, runID int64) {
 	}
 }
 
-func (r *Runner) renewLease(ctx context.Context, run Run, cancel context.CancelFunc) {
-	r.renewLeaseWithInterval(ctx, run, leaseHeartbeatInterval, cancel)
+func (r *Runner) renewLease(ctx context.Context, run Run, cancel context.CancelCauseFunc) {
+	interval := r.heartbeatInterval
+	if interval <= 0 {
+		interval = leaseHeartbeatInterval
+	}
+	r.renewLeaseWithInterval(ctx, run, interval, cancel)
 }
 
-func (r *Runner) renewLeaseWithInterval(ctx context.Context, run Run, interval time.Duration, cancel context.CancelFunc) {
+func (r *Runner) renewLeaseWithInterval(ctx context.Context, run Run, interval time.Duration, cancel context.CancelCauseFunc) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -130,7 +139,7 @@ func (r *Runner) renewLeaseWithInterval(ctx context.Context, run Run, interval t
 		case <-ticker.C:
 			if err := r.store.RenewLease(context.WithoutCancel(ctx), run.ID, run.LeaseToken); err != nil {
 				slog.WarnContext(ctx, "agent_run_lease_renew_failed", "run_id", run.RunID, "error", err)
-				cancel()
+				cancel(ErrLeaseLost)
 				return
 			}
 		}

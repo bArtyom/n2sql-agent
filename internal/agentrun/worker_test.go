@@ -106,13 +106,37 @@ func TestRunnerMarksFailedExecution(t *testing.T) {
 func TestRunnerCancelsExecutionWhenLeaseRenewalFails(t *testing.T) {
 	store := &runStoreStub{renewErr: errors.New("lease lost")}
 	runner := &Runner{store: store}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
 
 	runner.renewLeaseWithInterval(ctx, Run{ID: 1, RunID: "run-1", LeaseToken: "lease-a"}, time.Millisecond, cancel)
 	select {
 	case <-ctx.Done():
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("lease renewal failure did not cancel execution")
+	}
+}
+
+func TestRunnerLeavesRunReclaimableWhenLeaseIsLost(t *testing.T) {
+	store := &runStoreStub{
+		run:      Run{ID: 3, RunID: "run-3", LeaseToken: "lease-a"},
+		status:   StatusPending,
+		renewErr: errors.New("lease lost"),
+	}
+	runner, err := NewRunner(store, ExecutorFunc(func(ctx context.Context, _ Run, _ EventSink) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}))
+	if err != nil {
+		t.Fatalf("NewRunner() error = %v", err)
+	}
+	runner.heartbeatInterval = time.Millisecond
+
+	worked, err := runner.RunOnce(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("RunOnce() = (%v, %v), want handled lease loss", worked, err)
+	}
+	if store.status != StatusRunning {
+		t.Fatalf("status = %s, want running for later lease recovery", store.status)
 	}
 }
