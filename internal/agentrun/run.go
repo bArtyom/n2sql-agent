@@ -104,6 +104,7 @@ type ToolCheckpoint struct {
 	AttemptCount  int
 	StepNumber    int
 	ToolCallID    string
+	DecisionID    string
 	ToolName      string
 	Arguments     string
 	ArgumentsHash string
@@ -233,12 +234,14 @@ func (s *PostgresStore) SaveToolCheckpoint(ctx context.Context, checkpoint ToolC
 	envelope := struct {
 		Arguments     string          `json:"arguments,omitempty"`
 		ArgumentsHash string          `json:"arguments_hash"`
+		DecisionID    string          `json:"decision_id,omitempty"`
 		Content       string          `json:"content,omitempty"`
 		ContentRef    string          `json:"content_ref,omitempty"`
 		ContentBytes  int             `json:"content_bytes"`
 		Event         json.RawMessage `json:"event"`
 	}{
 		ArgumentsHash: checkpoint.ArgumentsHash,
+		DecisionID:    checkpoint.DecisionID,
 		ContentBytes:  len(checkpoint.Content),
 		Event:         checkpoint.Payload,
 	}
@@ -296,6 +299,7 @@ func (s *PostgresStore) ListToolCheckpoints(ctx context.Context, agentRunID int6
 		var envelope struct {
 			Arguments     string          `json:"arguments"`
 			ArgumentsHash string          `json:"arguments_hash"`
+			DecisionID    string          `json:"decision_id"`
 			Content       string          `json:"content"`
 			ContentRef    string          `json:"content_ref"`
 			Event         json.RawMessage `json:"event"`
@@ -321,6 +325,7 @@ func (s *PostgresStore) ListToolCheckpoints(ctx context.Context, agentRunID int6
 		checkpoint.AgentRunID = agentRunID
 		checkpoint.Arguments = envelope.Arguments
 		checkpoint.ArgumentsHash = envelope.ArgumentsHash
+		checkpoint.DecisionID = envelope.DecisionID
 		checkpoint.Content = envelope.Content
 		checkpoint.Payload = envelope.Event
 		checkpoints = append(checkpoints, checkpoint)

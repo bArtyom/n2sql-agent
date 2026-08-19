@@ -1015,6 +1015,39 @@ func TestEngineResumesSafeToolConversationWithoutRepeatingModelDecision(t *testi
 	}
 }
 
+func TestEngineRestoresParallelToolCallsInOneAssistantMessage(t *testing.T) {
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(&readOnlyToolStub{}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	argumentsA := `{"query":"年假"}`
+	argumentsB := `{"query":"病假"}`
+	hash := func(arguments string) string {
+		sum := sha256.Sum256([]byte("knowledge_search\x00" + arguments))
+		return hex.EncodeToString(sum[:])
+	}
+	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		if len(messages) != 4 || len(messages[1].ToolCalls) != 2 || messages[2].ToolCallID != "call-a" || messages[3].ToolCallID != "call-b" {
+			t.Fatalf("messages = %#v, want one assistant message with two tool results", messages)
+		}
+		return modelclient.ChatResponse{Message: "已合并两个检索结果"}, nil
+	}}
+	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 2, agentruntime.EngineOptions{ResumeCheckpoints: []agentruntime.ResumeCheckpoint{
+		{ToolCallID: "call-a", DecisionID: "decision-1", ToolName: "knowledge_search", Arguments: argumentsA, ArgumentsHash: hash(argumentsA), Content: "年假结果"},
+		{ToolCallID: "call-b", DecisionID: "decision-1", ToolName: "knowledge_search", Arguments: argumentsB, ArgumentsHash: hash(argumentsB), Content: "病假结果"},
+	}})
+	if err != nil {
+		t.Fatalf("NewEngineWithOptions() error = %v", err)
+	}
+	result, err := engine.Run(context.Background(), "run-resume-parallel", []modelclient.ChatMessage{{Role: "user", Content: "查询假期"}})
+	if err != nil || result.Run.FinalAnswer() != "已合并两个检索结果" {
+		t.Fatalf("Run() = (%#v, %v), want merged answer", result.Run, err)
+	}
+	if got := result.Run.Stats().CheckpointReuses; got != 2 {
+		t.Fatalf("checkpoint reuses = %d, want 2", got)
+	}
+}
+
 func TestEngineDoesNotFeedSideEffectFailureBackForAutomaticRetry(t *testing.T) {
 	wantErr := errors.New("remote write status unknown")
 	registry := agent.NewToolRegistry()

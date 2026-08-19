@@ -124,7 +124,7 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 				}
 				return checkpointStore.SaveToolCheckpoint(ctx, agentrun.ToolCheckpoint{
 					AgentRunID: run.ID, AttemptCount: run.AttemptCount, StepNumber: checkpoint.StepNumber,
-					ToolCallID: checkpoint.ToolCallID, ToolName: checkpoint.ToolName, Arguments: checkpoint.Arguments,
+					ToolCallID: checkpoint.ToolCallID, DecisionID: checkpoint.DecisionID, ToolName: checkpoint.ToolName, Arguments: checkpoint.Arguments,
 					ArgumentsHash: checkpoint.ArgumentsHash, Content: checkpoint.Content, Payload: payload,
 				})
 			}

@@ -98,6 +98,7 @@ type EngineOptions struct {
 
 type ResumeCheckpoint struct {
 	ToolCallID    string
+	DecisionID    string
 	ToolName      string
 	Arguments     string
 	ArgumentsHash string
@@ -107,6 +108,7 @@ type ResumeCheckpoint struct {
 
 type ToolCheckpoint struct {
 	ToolCallID    string
+	DecisionID    string
 	ToolName      string
 	StepNumber    int
 	Arguments     string
@@ -475,7 +477,8 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			}
 			if e.checkpointSink != nil {
 				if err := e.checkpointSink(ctx, ToolCheckpoint{
-					ToolCallID: toolCall.ID, ToolName: toolCall.Function.Name, StepNumber: len(run.Steps()),
+					ToolCallID: toolCall.ID, DecisionID: fmt.Sprintf("%s-decision-%d", runID, step+1),
+					ToolName: toolCall.Function.Name, StepNumber: len(run.Steps()),
 					Arguments:     string(arguments),
 					ArgumentsHash: toolArgumentsHash(toolCall.Function.Name, arguments),
 					// The sink decides whether the result stays inline or is
@@ -1031,28 +1034,40 @@ func (e *Engine) resumeConversation(run *agent.AgentRun) ([]modelclient.ChatMess
 		seen[key] = struct{}{}
 		selected = append(selected, checkpoint)
 	}
-	messages := make([]modelclient.ChatMessage, 0, len(selected)*2)
+	type resumeGroup struct {
+		decisionID  string
+		checkpoints []ResumeCheckpoint
+	}
+	groups := make([]resumeGroup, 0, len(selected))
 	for index := len(selected) - 1; index >= 0; index-- {
 		checkpoint := selected[index]
-		messages = append(messages,
-			modelclient.ChatMessage{
-				Role: "assistant",
-				ToolCalls: []modelclient.ToolCall{{
-					ID: checkpoint.ToolCallID, Type: "function",
-					Function: modelclient.ToolCallFunction{
-						Name:      checkpoint.ToolName,
-						Arguments: checkpoint.Arguments,
-					},
-				}},
-			},
-			modelclient.ChatMessage{
-				Role:       "tool",
-				ToolCallID: checkpoint.ToolCallID,
-				Content:    untrustedToolResultPrefix + checkpoint.Content,
-			},
-		)
 		if err := run.RecordCheckpointReuse(); err != nil {
 			return nil, nil, err
+		}
+		decisionID := checkpoint.DecisionID
+		if decisionID == "" {
+			decisionID = "legacy-" + checkpoint.ToolCallID
+		}
+		if len(groups) == 0 || groups[len(groups)-1].decisionID != decisionID {
+			groups = append(groups, resumeGroup{decisionID: decisionID})
+		}
+		groups[len(groups)-1].checkpoints = append(groups[len(groups)-1].checkpoints, checkpoint)
+	}
+	messages := make([]modelclient.ChatMessage, 0, len(selected)*2)
+	for _, group := range groups {
+		assistant := modelclient.ChatMessage{Role: "assistant", ToolCalls: make([]modelclient.ToolCall, 0, len(group.checkpoints))}
+		for _, checkpoint := range group.checkpoints {
+			assistant.ToolCalls = append(assistant.ToolCalls, modelclient.ToolCall{
+				ID: checkpoint.ToolCallID, Type: "function",
+				Function: modelclient.ToolCallFunction{Name: checkpoint.ToolName, Arguments: checkpoint.Arguments},
+			})
+		}
+		messages = append(messages, assistant)
+		for _, checkpoint := range group.checkpoints {
+			messages = append(messages, modelclient.ChatMessage{
+				Role: "tool", ToolCallID: checkpoint.ToolCallID,
+				Content: untrustedToolResultPrefix + checkpoint.Content,
+			})
 		}
 	}
 	return messages, selected, nil
