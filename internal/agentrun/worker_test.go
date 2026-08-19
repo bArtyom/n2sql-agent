@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 )
@@ -13,6 +14,7 @@ type runStoreStub struct {
 	status   Status
 	failed   string
 	requeued bool
+	deleted  int
 }
 
 func (s *runStoreStub) Create(context.Context, CreateInput) (Run, error) { return s.run, nil }
@@ -41,6 +43,15 @@ func (s *runStoreStub) MarkCanceled(context.Context, int64) error {
 	s.status = StatusCanceled
 	return nil
 }
+func (s *runStoreStub) DeleteToolCheckpoints(_ context.Context, id int64) error {
+	if id > 0 {
+		s.deleted++
+	}
+	return nil
+}
+func (*runStoreStub) CleanupTerminalToolCheckpoints(context.Context, time.Duration) (int64, error) {
+	return 0, nil
+}
 
 func TestRunnerMarksSucceededAfterExecution(t *testing.T) {
 	store := &runStoreStub{run: Run{ID: 1, RunID: "run-1"}, status: StatusPending}
@@ -60,6 +71,9 @@ func TestRunnerMarksSucceededAfterExecution(t *testing.T) {
 	if !store.requeued {
 		t.Fatal("RunOnce() did not requeue expired runs before claiming")
 	}
+	if store.deleted != 1 {
+		t.Fatalf("deleted checkpoints = %d, want 1", store.deleted)
+	}
 }
 
 func TestRunnerMarksFailedExecution(t *testing.T) {
@@ -75,5 +89,8 @@ func TestRunnerMarksFailedExecution(t *testing.T) {
 	}
 	if store.status != StatusFailed || store.failed != "model unavailable" {
 		t.Fatalf("status=%s error=%q, want failed model error", store.status, store.failed)
+	}
+	if store.deleted != 1 {
+		t.Fatalf("deleted checkpoints = %d, want 1", store.deleted)
 	}
 }

@@ -84,6 +84,13 @@ type ToolCheckpointStore interface {
 	ListToolCheckpoints(context.Context, int64) ([]ToolCheckpoint, error)
 }
 
+// ToolCheckpointCleaner removes recovery-only data after a run reaches a
+// terminal state. Checkpoints are not the conversation history or audit log.
+type ToolCheckpointCleaner interface {
+	DeleteToolCheckpoints(context.Context, int64) error
+	CleanupTerminalToolCheckpoints(context.Context, time.Duration) (int64, error)
+}
+
 type ToolCheckpoint struct {
 	AgentRunID    int64
 	AttemptCount  int
@@ -306,6 +313,38 @@ func (s *PostgresStore) ListToolCheckpoints(ctx context.Context, agentRunID int6
 		return nil, fmt.Errorf("iterate agent tool checkpoints: %w", err)
 	}
 	return checkpoints, nil
+}
+
+func (s *PostgresStore) DeleteToolCheckpoints(ctx context.Context, agentRunID int64) error {
+	if agentRunID <= 0 {
+		return ErrInvalidRun
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		DELETE FROM agent_run_checkpoints
+		WHERE agent_run_id = $1`, agentRunID); err != nil {
+		return fmt.Errorf("delete agent tool checkpoints: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) CleanupTerminalToolCheckpoints(ctx context.Context, retention time.Duration) (int64, error) {
+	if retention <= 0 {
+		return 0, ErrInvalidRun
+	}
+	result, err := s.db.ExecContext(ctx, `
+		DELETE FROM agent_run_checkpoints AS checkpoint
+		USING agent_runs AS run
+		WHERE checkpoint.agent_run_id = run.id
+		  AND run.status IN ('succeeded', 'failed', 'canceled')
+		  AND run.updated_at < CURRENT_TIMESTAMP - ($1 * INTERVAL '1 second')`, retention.Seconds())
+	if err != nil {
+		return 0, fmt.Errorf("cleanup terminal agent tool checkpoints: %w", err)
+	}
+	removed, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count cleaned agent tool checkpoints: %w", err)
+	}
+	return removed, nil
 }
 
 func truncateCheckpointText(value string, maxBytes int) string {

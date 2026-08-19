@@ -84,12 +84,14 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 		if markErr := r.store.MarkSucceeded(context.WithoutCancel(ctx), run.ID); markErr != nil {
 			return true, markErr
 		}
+		r.cleanupTerminalCheckpoints(ctx, run.ID)
 		return true, nil
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		if markErr := r.store.MarkCanceled(context.WithoutCancel(ctx), run.ID); markErr != nil {
 			return true, markErr
 		}
+		r.cleanupTerminalCheckpoints(ctx, run.ID)
 		return true, nil
 	}
 	message := err.Error()
@@ -99,8 +101,19 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 	if markErr := r.store.MarkFailed(context.WithoutCancel(ctx), run.ID, message); markErr != nil {
 		return true, markErr
 	}
+	r.cleanupTerminalCheckpoints(ctx, run.ID)
 	slog.ErrorContext(ctx, "agent_run_failed", "run_id", run.RunID, "duration_ms", time.Since(started).Milliseconds(), "error", err)
 	return true, nil
+}
+
+func (r *Runner) cleanupTerminalCheckpoints(ctx context.Context, runID int64) {
+	cleaner, ok := r.store.(ToolCheckpointCleaner)
+	if !ok {
+		return
+	}
+	if err := cleaner.DeleteToolCheckpoints(context.WithoutCancel(ctx), runID); err != nil {
+		slog.WarnContext(ctx, "agent_checkpoint_cleanup_failed", "run_id", runID, "error", err)
+	}
 }
 
 func (r *Runner) renewLease(ctx context.Context, run Run) {

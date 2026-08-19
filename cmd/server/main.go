@@ -235,6 +235,11 @@ func main() {
 			} else if removed > 0 {
 				slog.InfoContext(runContext, "agent_checkpoint_files_cleaned", "removed", removed)
 			}
+			if removed, err := agentRunStore.CleanupTerminalToolCheckpoints(runContext, cfg.AgentCheckpointFileTTL); err != nil {
+				slog.WarnContext(runContext, "agent_checkpoint_metadata_cleanup_failed", "error", err)
+			} else if removed > 0 {
+				slog.InfoContext(runContext, "agent_checkpoint_metadata_cleaned", "removed", removed)
+			}
 		}
 		cleanup()
 		for {
