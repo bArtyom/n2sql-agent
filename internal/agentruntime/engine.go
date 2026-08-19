@@ -238,11 +238,23 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 		return finishError(result, err)
 	}
 	conversation := append([]modelclient.ChatMessage(nil), messages...)
-	resumedMessages, resumeErr := e.resumeConversation(run)
+	resumedMessages, resumedCheckpoints, resumeErr := e.resumeConversation(run)
 	if resumeErr != nil {
 		return finishErrorWithEvents(result, resumeErr, emitter)
 	}
 	conversation = append(conversation, resumedMessages...)
+	for _, checkpoint := range resumedCheckpoints {
+		seenToolCalls[normalizedToolCallKey(checkpoint.ToolName, checkpoint.Arguments)] = struct{}{}
+		if err := emitter.emit(agent.EventToolFinished, checkpoint.StepNumber, map[string]any{
+			"tool_call_id":            checkpoint.ToolCallID,
+			"tool_name":               checkpoint.ToolName,
+			"checkpoint_action":       "resumed_context",
+			"resumed_from_checkpoint": true,
+			"result_summary":          "已从 checkpoint 恢复工具结果",
+		}); err != nil {
+			return finishError(result, err)
+		}
+	}
 	definitions := e.registry.FunctionDefinitions()
 
 	for step := 0; step < e.maxSteps; step++ {
@@ -995,9 +1007,9 @@ func (e *Engine) resumeCheckpoint(toolName string, arguments json.RawMessage) (R
 // the same read-only tool again. Checkpoints without the original arguments
 // remain eligible for the older result-reuse path but cannot be reconstructed
 // into a model conversation.
-func (e *Engine) resumeConversation(run *agent.AgentRun) ([]modelclient.ChatMessage, error) {
+func (e *Engine) resumeConversation(run *agent.AgentRun) ([]modelclient.ChatMessage, []ResumeCheckpoint, error) {
 	if run == nil || len(e.resumeCheckpoints) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	selected := make([]ResumeCheckpoint, 0, len(e.resumeCheckpoints))
 	seen := make(map[string]struct{})
@@ -1040,10 +1052,10 @@ func (e *Engine) resumeConversation(run *agent.AgentRun) ([]modelclient.ChatMess
 			},
 		)
 		if err := run.RecordCheckpointReuse(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	return messages, nil
+	return messages, selected, nil
 }
 
 func addToolFailureWithEvents(result Result, toolName string, err error, emitter *eventEmitter) (Result, error) {

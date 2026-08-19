@@ -989,7 +989,11 @@ func TestEngineResumesSafeToolConversationWithoutRepeatingModelDecision(t *testi
 	if err != nil {
 		t.Fatalf("NewEngineWithOptions() error = %v", err)
 	}
-	result, err := engine.Run(context.Background(), "run-resume-conversation", []modelclient.ChatMessage{{Role: "user", Content: "查询"}})
+	var events []agent.Event
+	result, err := engine.RunWithEvents(context.Background(), "run-resume-conversation", []modelclient.ChatMessage{{Role: "user", Content: "查询"}}, func(event agent.Event) error {
+		events = append(events, event)
+		return nil
+	})
 	if err != nil || result.Run.FinalAnswer() != "根据断点继续回答" {
 		t.Fatalf("Run() = (%#v, %v), want resumed answer", result.Run, err)
 	}
@@ -1001,6 +1005,13 @@ func TestEngineResumesSafeToolConversationWithoutRepeatingModelDecision(t *testi
 	}
 	if got := result.Run.Stats().CheckpointReuses; got != 1 {
 		t.Fatalf("checkpoint reuses = %d, want 1", got)
+	}
+	if len(events) < 2 || events[1].Type != agent.EventToolFinished {
+		t.Fatalf("events = %#v, want resumed tool_finished event", events)
+	}
+	resumedData, ok := events[1].Data.(map[string]any)
+	if !ok || resumedData["checkpoint_action"] != "resumed_context" {
+		t.Fatalf("resumed event data = %#v, want resumed_context", events[1].Data)
 	}
 }
 
