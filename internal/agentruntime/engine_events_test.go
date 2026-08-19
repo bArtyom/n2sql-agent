@@ -12,7 +12,24 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
+	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
+
+type retrievalStatsTool struct{}
+
+func (retrievalStatsTool) Name() string                { return "knowledge_search" }
+func (retrievalStatsTool) Description() string         { return "搜索知识库" }
+func (retrievalStatsTool) Parameters() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (retrievalStatsTool) Call(ctx context.Context, _ json.RawMessage) (agent.ToolResult, error) {
+	if observer := usage.RetrievalObserverFromContext(ctx); observer != nil {
+		observer.ObserveRetrieval(usage.RetrievalObservation{
+			VectorCandidates: 8, KeywordCandidates: 6, KeywordAfterThreshold: 4,
+			DeduplicatedCandidates: 5, RerankBefore: 5, RerankAfter: 3,
+			FinalResults: 3, FinalFiltered: 2,
+		})
+	}
+	return agent.ToolResult{Content: "资料"}, nil
+}
 
 func TestEngineRunWithEventsEmitsDirectAnswerLifecycle(t *testing.T) {
 	chat := chatStub{call: func(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
@@ -145,6 +162,40 @@ func TestEngineRunWithEventsEmitsToolLifecycle(t *testing.T) {
 	}
 	if truncated, ok := toolFinished["truncated"].(bool); !ok || !truncated {
 		t.Fatalf("tool_finished data = %#v, want truncated=true", toolFinished)
+	}
+}
+
+func TestEngineRunWithEventsIncludesRetrievalPipelineStats(t *testing.T) {
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(retrievalStatsTool{}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	callCount := 0
+	chat := chatStub{call: func(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		callCount++
+		if callCount == 1 {
+			return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+				ID: "call-stats", Type: "function",
+				Function: modelclient.ToolCallFunction{Name: "knowledge_search", Arguments: `{}`},
+			}}}, nil
+		}
+		return modelclient.ChatResponse{Message: "最终答案"}, nil
+	}}
+	engine, err := agentruntime.NewEngine(chat, registry, 2)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	var events []agent.Event
+	if _, err := engine.RunWithEvents(context.Background(), "run-retrieval-stats", []modelclient.ChatMessage{{Role: "user", Content: "问题"}}, func(event agent.Event) error {
+		events = append(events, event)
+		return nil
+	}); err != nil {
+		t.Fatalf("RunWithEvents() error = %v", err)
+	}
+	toolFinished := events[2].Data.(map[string]any)
+	stats, ok := toolFinished["retrieval"].(usage.RetrievalObservation)
+	if !ok || stats.VectorCandidates != 8 || stats.FinalFiltered != 2 || stats.RerankAfter != 3 {
+		t.Fatalf("tool_finished retrieval stats = %#v, want bounded pipeline stats", toolFinished["retrieval"])
 	}
 }
 

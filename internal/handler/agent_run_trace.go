@@ -97,5 +97,8 @@ func safeToolEventSummary(event agentstream.Event) map[string]any {
 	if resultSummary, ok := data["result_summary"].(string); ok && strings.TrimSpace(resultSummary) != "" {
 		summary["result_summary"] = resultSummary
 	}
+	if retrievalStats, ok := data["retrieval"]; ok {
+		summary["retrieval"] = retrievalStats
+	}
 	return summary
 }

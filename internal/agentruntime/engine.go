@@ -467,6 +467,11 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			if queryRewrite := run.QueryRewriteSnapshot(); queryRewrite.Enabled {
 				toolFinishedData["query_rewrite"] = queryRewrite
 			}
+			if retrievalStats := run.RetrievalSnapshot(); retrievalStats.HasData() {
+				// Keep only bounded counts and status flags. The query and source
+				// content remain outside this diagnostic event.
+				toolFinishedData["retrieval"] = retrievalStats
+			}
 			toolFinishedData["no_relevant_results"] = toolResult.NoRelevantResults
 			toolFinishedData["result_summary"] = toolResultSummary(toolResult)
 			toolFinishedData["resumed_from_checkpoint"] = resumed
