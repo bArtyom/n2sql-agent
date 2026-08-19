@@ -319,7 +319,8 @@ func resumeCheckpoints(checkpoints []agentrun.ToolCheckpoint) []agentruntime.Res
 	result := make([]agentruntime.ResumeCheckpoint, 0, len(checkpoints))
 	for _, checkpoint := range checkpoints {
 		result = append(result, agentruntime.ResumeCheckpoint{
-			ToolName: checkpoint.ToolName, ArgumentsHash: checkpoint.ArgumentsHash, Content: checkpoint.Content,
+			ToolCallID: checkpoint.ToolCallID, ToolName: checkpoint.ToolName, Arguments: checkpoint.Arguments,
+			ArgumentsHash: checkpoint.ArgumentsHash, StepNumber: checkpoint.StepNumber, Content: checkpoint.Content,
 		})
 	}
 	return result

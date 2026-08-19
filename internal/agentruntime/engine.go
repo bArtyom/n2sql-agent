@@ -97,8 +97,11 @@ type EngineOptions struct {
 }
 
 type ResumeCheckpoint struct {
+	ToolCallID    string
 	ToolName      string
+	Arguments     string
 	ArgumentsHash string
+	StepNumber    int
 	Content       string
 }
 
@@ -106,6 +109,7 @@ type ToolCheckpoint struct {
 	ToolCallID    string
 	ToolName      string
 	StepNumber    int
+	Arguments     string
 	ArgumentsHash string
 	Content       string
 	Payload       any
@@ -234,6 +238,11 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 		return finishError(result, err)
 	}
 	conversation := append([]modelclient.ChatMessage(nil), messages...)
+	resumedMessages, resumeErr := e.resumeConversation(run)
+	if resumeErr != nil {
+		return finishErrorWithEvents(result, resumeErr, emitter)
+	}
+	conversation = append(conversation, resumedMessages...)
 	definitions := e.registry.FunctionDefinitions()
 
 	for step := 0; step < e.maxSteps; step++ {
@@ -455,6 +464,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			if e.checkpointSink != nil {
 				if err := e.checkpointSink(ctx, ToolCheckpoint{
 					ToolCallID: toolCall.ID, ToolName: toolCall.Function.Name, StepNumber: len(run.Steps()),
+					Arguments:     string(arguments),
 					ArgumentsHash: toolArgumentsHash(toolCall.Function.Name, arguments),
 					// The sink decides whether the result stays inline or is
 					// externalized. SSE never receives this content.
@@ -977,6 +987,63 @@ func (e *Engine) resumeCheckpoint(toolName string, arguments json.RawMessage) (R
 		}
 	}
 	return ResumeCheckpoint{}, false
+}
+
+// resumeConversation reconstructs only the safe, completed tool exchanges
+// that were checkpointed before a Worker stopped. The next model call sees
+// those exchanges as existing context, so it does not need to decide to call
+// the same read-only tool again. Checkpoints without the original arguments
+// remain eligible for the older result-reuse path but cannot be reconstructed
+// into a model conversation.
+func (e *Engine) resumeConversation(run *agent.AgentRun) ([]modelclient.ChatMessage, error) {
+	if run == nil || len(e.resumeCheckpoints) == 0 {
+		return nil, nil
+	}
+	selected := make([]ResumeCheckpoint, 0, len(e.resumeCheckpoints))
+	seen := make(map[string]struct{})
+	for index := len(e.resumeCheckpoints) - 1; index >= 0; index-- {
+		checkpoint := e.resumeCheckpoints[index]
+		if checkpoint.ToolCallID == "" || checkpoint.Arguments == "" || checkpoint.Content == "" || !json.Valid([]byte(checkpoint.Arguments)) {
+			continue
+		}
+		if e.registry.RequiresApproval(checkpoint.ToolName) || !e.registry.Retryable(checkpoint.ToolName) {
+			continue
+		}
+		key := checkpoint.ToolName + "\x00" + checkpoint.ArgumentsHash
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		if _, err := e.registry.Find(checkpoint.ToolName); err != nil {
+			continue
+		}
+		seen[key] = struct{}{}
+		selected = append(selected, checkpoint)
+	}
+	messages := make([]modelclient.ChatMessage, 0, len(selected)*2)
+	for index := len(selected) - 1; index >= 0; index-- {
+		checkpoint := selected[index]
+		messages = append(messages,
+			modelclient.ChatMessage{
+				Role: "assistant",
+				ToolCalls: []modelclient.ToolCall{{
+					ID: checkpoint.ToolCallID, Type: "function",
+					Function: modelclient.ToolCallFunction{
+						Name:      checkpoint.ToolName,
+						Arguments: checkpoint.Arguments,
+					},
+				}},
+			},
+			modelclient.ChatMessage{
+				Role:       "tool",
+				ToolCallID: checkpoint.ToolCallID,
+				Content:    untrustedToolResultPrefix + checkpoint.Content,
+			},
+		)
+		if err := run.RecordCheckpointReuse(); err != nil {
+			return nil, err
+		}
+	}
+	return messages, nil
 }
 
 func addToolFailureWithEvents(result Result, toolName string, err error, emitter *eventEmitter) (Result, error) {

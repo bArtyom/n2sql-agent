@@ -30,6 +30,7 @@ var (
 
 const defaultLeaseDuration = 5 * time.Minute
 const maxAgentRunAttempts = 3
+const maxCheckpointArgumentsBytes = 16 * 1024
 
 func shouldRetryExpiredRun(attemptCount int) bool {
 	return attemptCount < maxAgentRunAttempts
@@ -104,6 +105,7 @@ type ToolCheckpoint struct {
 	StepNumber    int
 	ToolCallID    string
 	ToolName      string
+	Arguments     string
 	ArgumentsHash string
 	Content       string
 	Payload       json.RawMessage
@@ -229,6 +231,7 @@ func (s *PostgresStore) SaveToolCheckpoint(ctx context.Context, checkpoint ToolC
 		return ErrInvalidRun
 	}
 	envelope := struct {
+		Arguments     string          `json:"arguments,omitempty"`
 		ArgumentsHash string          `json:"arguments_hash"`
 		Content       string          `json:"content,omitempty"`
 		ContentRef    string          `json:"content_ref,omitempty"`
@@ -238,6 +241,9 @@ func (s *PostgresStore) SaveToolCheckpoint(ctx context.Context, checkpoint ToolC
 		ArgumentsHash: checkpoint.ArgumentsHash,
 		ContentBytes:  len(checkpoint.Content),
 		Event:         checkpoint.Payload,
+	}
+	if len(checkpoint.Arguments) <= maxCheckpointArgumentsBytes && json.Valid([]byte(checkpoint.Arguments)) {
+		envelope.Arguments = checkpoint.Arguments
 	}
 	if s.checkpointBlobs != nil && len(checkpoint.Content) > s.checkpointInline {
 		ref, err := s.checkpointBlobs.Put(ctx,
@@ -288,6 +294,7 @@ func (s *PostgresStore) ListToolCheckpoints(ctx context.Context, agentRunID int6
 	for rows.Next() {
 		var checkpoint ToolCheckpoint
 		var envelope struct {
+			Arguments     string          `json:"arguments"`
 			ArgumentsHash string          `json:"arguments_hash"`
 			Content       string          `json:"content"`
 			ContentRef    string          `json:"content_ref"`
@@ -312,6 +319,7 @@ func (s *PostgresStore) ListToolCheckpoints(ctx context.Context, agentRunID int6
 			envelope.Content = content
 		}
 		checkpoint.AgentRunID = agentRunID
+		checkpoint.Arguments = envelope.Arguments
 		checkpoint.ArgumentsHash = envelope.ArgumentsHash
 		checkpoint.Content = envelope.Content
 		checkpoint.Payload = envelope.Event

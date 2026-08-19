@@ -38,6 +38,7 @@
 - Agent Worker 租约丢失主动停止已补齐：心跳续租失败后立即取消本次执行上下文，旧 Worker 不再继续调用模型或工具；数据库 token fencing 继续作为最终写入保护。
 - Agent Worker 已区分取消原因：用户取消仍进入 `canceled`；心跳导致的 `ErrLeaseLost` 不写终态，保留运行记录等待租约回收后由下一个 Worker 接管，避免把故障恢复误判成用户主动停止。
 - Agent Worker 已增加最大接管次数：租约过期的 Run 最多尝试 3 次；超过次数后进入 `failed` 并记录 `worker lease expired: maximum attempts reached`，避免故障任务无限循环。
+- Agent checkpoint 第一版断点续跑已接入：checkpoint 额外保存有界的原始工具参数；Worker 接管后将最近的安全只读工具调用重建为 `assistant tool_call + tool result` 上下文，直接进入下一次模型决策，减少重复的工具选择；缺少参数的旧 checkpoint 继续使用原有安全结果复用，不恢复副作用工具。
 - Agent 只读工具已覆盖 `knowledge_search`、`document_list`、`document_info`、`document_read`；文档正文读取受知识库、文档、chunk 数量和字节数限制。
 - 异步文档摘要工具 `document_summary` 已接入标准 Agent：后台生成时返回任务状态并立即结束本轮 Agent，不把 pending 占位结果再次交给模型，避免重复工具调用和步数超限；摘要完成后由后续提问读取缓存。
 - Agent 会话记忆改造第一步：历史语义摘要模型调用失败时最多重试 2 次；上下文取消会立即停止重试，最终仍由现有抽取式摘要兜底，不阻断正常问答。

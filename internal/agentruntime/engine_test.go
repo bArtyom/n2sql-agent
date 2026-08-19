@@ -965,6 +965,45 @@ func TestEngineReusesMatchingSafeCheckpointWithoutCallingTool(t *testing.T) {
 	}
 }
 
+func TestEngineResumesSafeToolConversationWithoutRepeatingModelDecision(t *testing.T) {
+	called := false
+	tool := &readOnlyToolStub{toolStub: toolStub{onCall: func(context.Context) { called = true }}}
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(tool); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	arguments := `{"query":"年假"}`
+	sum := sha256.Sum256([]byte("knowledge_search\x00" + arguments))
+	modelCalls := 0
+	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		modelCalls++
+		if len(messages) != 3 || messages[1].Role != "assistant" || len(messages[1].ToolCalls) != 1 || messages[2].ToolCallID != "call-resumed" {
+			t.Fatalf("messages = %#v, want resumed assistant/tool pair", messages)
+		}
+		return modelclient.ChatResponse{Message: "根据断点继续回答"}, nil
+	}}
+	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 2, agentruntime.EngineOptions{ResumeCheckpoints: []agentruntime.ResumeCheckpoint{{
+		ToolCallID: "call-resumed", ToolName: "knowledge_search", Arguments: arguments,
+		ArgumentsHash: hex.EncodeToString(sum[:]), Content: "已保存的检索结果",
+	}}})
+	if err != nil {
+		t.Fatalf("NewEngineWithOptions() error = %v", err)
+	}
+	result, err := engine.Run(context.Background(), "run-resume-conversation", []modelclient.ChatMessage{{Role: "user", Content: "查询"}})
+	if err != nil || result.Run.FinalAnswer() != "根据断点继续回答" {
+		t.Fatalf("Run() = (%#v, %v), want resumed answer", result.Run, err)
+	}
+	if modelCalls != 1 {
+		t.Fatalf("model calls = %d, want 1 continuation call", modelCalls)
+	}
+	if called {
+		t.Fatal("safe checkpoint tool was executed again")
+	}
+	if got := result.Run.Stats().CheckpointReuses; got != 1 {
+		t.Fatalf("checkpoint reuses = %d, want 1", got)
+	}
+}
+
 func TestEngineDoesNotFeedSideEffectFailureBackForAutomaticRetry(t *testing.T) {
 	wantErr := errors.New("remote write status unknown")
 	registry := agent.NewToolRegistry()
