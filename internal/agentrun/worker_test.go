@@ -16,6 +16,7 @@ type runStoreStub struct {
 	requeued    bool
 	deleted     int
 	markedToken string
+	renewErr    error
 }
 
 func (s *runStoreStub) Create(context.Context, CreateInput) (Run, error) { return s.run, nil }
@@ -31,7 +32,7 @@ func (s *runStoreStub) RequeueExpired(context.Context) error {
 	s.requeued = true
 	return nil
 }
-func (*runStoreStub) RenewLease(context.Context, int64, string) error { return nil }
+func (s *runStoreStub) RenewLease(context.Context, int64, string) error { return s.renewErr }
 func (s *runStoreStub) MarkSucceeded(_ context.Context, _ int64, token string) error {
 	s.markedToken = token
 	s.status = StatusSucceeded
@@ -99,5 +100,19 @@ func TestRunnerMarksFailedExecution(t *testing.T) {
 	}
 	if store.deleted != 1 {
 		t.Fatalf("deleted checkpoints = %d, want 1", store.deleted)
+	}
+}
+
+func TestRunnerCancelsExecutionWhenLeaseRenewalFails(t *testing.T) {
+	store := &runStoreStub{renewErr: errors.New("lease lost")}
+	runner := &Runner{store: store}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runner.renewLeaseWithInterval(ctx, Run{ID: 1, RunID: "run-1", LeaseToken: "lease-a"}, time.Millisecond, cancel)
+	select {
+	case <-ctx.Done():
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("lease renewal failure did not cancel execution")
 	}
 }

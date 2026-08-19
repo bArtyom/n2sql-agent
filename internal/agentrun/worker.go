@@ -78,7 +78,7 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 	}
 	executionContext, stopHeartbeat := context.WithCancel(ctx)
 	defer stopHeartbeat()
-	go r.renewLease(executionContext, run)
+	go r.renewLease(executionContext, run, stopHeartbeat)
 	err = r.executor.Execute(executionContext, run, sink)
 	if err == nil {
 		if markErr := r.store.MarkSucceeded(context.WithoutCancel(ctx), run.ID, run.LeaseToken); markErr != nil {
@@ -116,8 +116,12 @@ func (r *Runner) cleanupTerminalCheckpoints(ctx context.Context, runID int64) {
 	}
 }
 
-func (r *Runner) renewLease(ctx context.Context, run Run) {
-	ticker := time.NewTicker(leaseHeartbeatInterval)
+func (r *Runner) renewLease(ctx context.Context, run Run, cancel context.CancelFunc) {
+	r.renewLeaseWithInterval(ctx, run, leaseHeartbeatInterval, cancel)
+}
+
+func (r *Runner) renewLeaseWithInterval(ctx context.Context, run Run, interval time.Duration, cancel context.CancelFunc) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -126,6 +130,8 @@ func (r *Runner) renewLease(ctx context.Context, run Run) {
 		case <-ticker.C:
 			if err := r.store.RenewLease(context.WithoutCancel(ctx), run.ID, run.LeaseToken); err != nil {
 				slog.WarnContext(ctx, "agent_run_lease_renew_failed", "run_id", run.RunID, "error", err)
+				cancel()
+				return
 			}
 		}
 	}
