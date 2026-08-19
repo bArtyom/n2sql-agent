@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type Status string
@@ -74,9 +76,9 @@ type ResultWriter interface {
 	SaveResponse(context.Context, int64, json.RawMessage) error
 }
 
-// ToolCheckpointStore persists the bounded result of a completed tool call.
-// The payload must already be truncated and redacted by the Agent runtime.
-// It is a recovery boundary, not a raw tool-output archive.
+// ToolCheckpointStore persists metadata for a completed tool call. Large
+// results are externalized by the configured blob store instead of being
+// copied into PostgreSQL.
 type ToolCheckpointStore interface {
 	SaveToolCheckpoint(context.Context, ToolCheckpoint) error
 	ListToolCheckpoints(context.Context, int64) ([]ToolCheckpoint, error)
@@ -93,9 +95,22 @@ type ToolCheckpoint struct {
 	Payload       json.RawMessage
 }
 
-type PostgresStore struct{ db *sql.DB }
+type PostgresStore struct {
+	db               *sql.DB
+	checkpointBlobs  *ToolResultFileStore
+	checkpointInline int
+}
 
-func NewPostgresStore(db *sql.DB) *PostgresStore { return &PostgresStore{db: db} }
+func NewPostgresStore(db *sql.DB) *PostgresStore {
+	return &PostgresStore{db: db, checkpointInline: 8 * 1024}
+}
+
+func NewPostgresStoreWithCheckpointFiles(db *sql.DB, blobs *ToolResultFileStore, inlineLimit int) *PostgresStore {
+	if inlineLimit <= 0 {
+		inlineLimit = 8 * 1024
+	}
+	return &PostgresStore{db: db, checkpointBlobs: blobs, checkpointInline: inlineLimit}
+}
 
 func (s *PostgresStore) Get(ctx context.Context, runID string, knowledgeBaseID int64) (Run, error) {
 	if runID == "" || knowledgeBaseID <= 0 {
@@ -198,7 +213,34 @@ func (s *PostgresStore) SaveToolCheckpoint(ctx context.Context, checkpoint ToolC
 		len(checkpoint.Payload) == 0 || !json.Valid(checkpoint.Payload) {
 		return ErrInvalidRun
 	}
-	_, err := s.db.ExecContext(ctx, `
+	envelope := struct {
+		ArgumentsHash string          `json:"arguments_hash"`
+		Content       string          `json:"content,omitempty"`
+		ContentRef    string          `json:"content_ref,omitempty"`
+		ContentBytes  int             `json:"content_bytes"`
+		Event         json.RawMessage `json:"event"`
+	}{
+		ArgumentsHash: checkpoint.ArgumentsHash,
+		ContentBytes:  len(checkpoint.Content),
+		Event:         checkpoint.Payload,
+	}
+	if s.checkpointBlobs != nil && len(checkpoint.Content) > s.checkpointInline {
+		ref, err := s.checkpointBlobs.Put(ctx,
+			fmt.Sprintf("run-%d/attempt-%d/%s", checkpoint.AgentRunID, checkpoint.AttemptCount, checkpoint.ToolCallID),
+			checkpoint.Content)
+		if err != nil {
+			return fmt.Errorf("externalize agent tool checkpoint: %w", err)
+		}
+		envelope.ContentRef = ref
+		envelope.Content = truncateCheckpointText(checkpoint.Content, 4096)
+	} else {
+		envelope.Content = truncateCheckpointText(checkpoint.Content, s.checkpointInline)
+	}
+	payload, err := json.Marshal(envelope)
+	if err != nil {
+		return fmt.Errorf("encode agent tool checkpoint: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO agent_run_checkpoints
 			(agent_run_id, attempt_count, step_number, tool_call_id, tool_name, payload)
 		VALUES ($1, $2, $3, $4, $5, $6)
@@ -207,7 +249,7 @@ func (s *PostgresStore) SaveToolCheckpoint(ctx context.Context, checkpoint ToolC
 		              tool_name = EXCLUDED.tool_name,
 		              payload = EXCLUDED.payload`,
 		checkpoint.AgentRunID, checkpoint.AttemptCount, checkpoint.StepNumber,
-		checkpoint.ToolCallID, checkpoint.ToolName, checkpoint.Payload)
+		checkpoint.ToolCallID, checkpoint.ToolName, payload)
 	if err != nil {
 		return fmt.Errorf("save agent tool checkpoint: %w", err)
 	}
@@ -233,13 +275,26 @@ func (s *PostgresStore) ListToolCheckpoints(ctx context.Context, agentRunID int6
 		var envelope struct {
 			ArgumentsHash string          `json:"arguments_hash"`
 			Content       string          `json:"content"`
+			ContentRef    string          `json:"content_ref"`
 			Event         json.RawMessage `json:"event"`
 		}
 		if err := rows.Scan(&checkpoint.AttemptCount, &checkpoint.StepNumber, &checkpoint.ToolCallID, &checkpoint.ToolName, &checkpoint.Payload); err != nil {
 			return nil, fmt.Errorf("scan agent tool checkpoint: %w", err)
 		}
-		if err := json.Unmarshal(checkpoint.Payload, &envelope); err != nil || envelope.ArgumentsHash == "" || envelope.Content == "" || len(envelope.Event) == 0 {
+		if err := json.Unmarshal(checkpoint.Payload, &envelope); err != nil || envelope.ArgumentsHash == "" || (envelope.Content == "" && envelope.ContentRef == "") || len(envelope.Event) == 0 {
 			continue
+		}
+		if envelope.ContentRef != "" {
+			if s.checkpointBlobs == nil {
+				continue
+			}
+			content, err := s.checkpointBlobs.Get(ctx, envelope.ContentRef)
+			if err != nil {
+				// A missing temporary blob is a cache miss. The Worker will
+				// safely re-run a read-only tool instead of using a partial result.
+				continue
+			}
+			envelope.Content = content
 		}
 		checkpoint.AgentRunID = agentRunID
 		checkpoint.ArgumentsHash = envelope.ArgumentsHash
@@ -251,6 +306,20 @@ func (s *PostgresStore) ListToolCheckpoints(ctx context.Context, agentRunID int6
 		return nil, fmt.Errorf("iterate agent tool checkpoints: %w", err)
 	}
 	return checkpoints, nil
+}
+
+func truncateCheckpointText(value string, maxBytes int) string {
+	if maxBytes <= 0 || len(value) <= maxBytes {
+		return value
+	}
+	if maxBytes <= 3 {
+		return value[:maxBytes]
+	}
+	limit := maxBytes - len("...")
+	for limit > 0 && !utf8.ValidString(value[:limit]) {
+		limit--
+	}
+	return strings.TrimSpace(value[:limit]) + "..."
 }
 
 func (s *PostgresStore) RequeueExpired(ctx context.Context) error {

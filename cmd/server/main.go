@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/a2a"
 	"github.com/bArtyom/n2sql-agent/internal/agent"
@@ -75,7 +76,11 @@ func main() {
 	processor := worker.NewEmbeddingHierarchicalChunkingProcessor(extractor, parentSplitter, childSplitter, chunkStore, embeddingService)
 	metricsRegistry := metrics.New()
 	agentStreamHub := agentstream.NewHub()
-	agentRunStore := agentrun.NewPostgresStore(db)
+	checkpointFiles, err := agentrun.NewToolResultFileStore(cfg.AgentCheckpointDir, cfg.AgentCheckpointFileTTL)
+	if err != nil {
+		log.Fatal(err)
+	}
+	agentRunStore := agentrun.NewPostgresStoreWithCheckpointFiles(db, checkpointFiles, cfg.AgentCheckpointInlineBytes)
 	var agentEventStore agentrun.EventStore = agentrun.NewPostgresEventStore(db)
 	if cfg.AgentStreamRedisURL != "" {
 		redisEventStore, redisErr := agentrun.NewRedisEventStore(
@@ -219,6 +224,28 @@ func main() {
 	}
 	workerDone := make(chan struct{})
 	agentRunDone := make(chan struct{})
+	checkpointCleanupDone := make(chan struct{})
+	go func() {
+		defer close(checkpointCleanupDone)
+		ticker := time.NewTicker(cfg.AgentCheckpointCleanup)
+		defer ticker.Stop()
+		cleanup := func() {
+			if removed, err := checkpointFiles.Cleanup(runContext); err != nil {
+				slog.WarnContext(runContext, "agent_checkpoint_cleanup_failed", "error", err)
+			} else if removed > 0 {
+				slog.InfoContext(runContext, "agent_checkpoint_files_cleaned", "removed", removed)
+			}
+		}
+		cleanup()
+		for {
+			select {
+			case <-runContext.Done():
+				return
+			case <-ticker.C:
+				cleanup()
+			}
+		}
+	}()
 	a2aRunner := a2a.NewRunnerWithCleanup(a2aStore, multiAgentAnswers, cfg.AgentTimeout, cfg.A2ATaskRetention, cfg.A2ACleanupInterval, metricsRegistry)
 	a2aDone := make(chan struct{})
 	go func() {
@@ -246,6 +273,7 @@ func main() {
 	<-workerDone
 	<-agentRunDone
 	<-a2aDone
+	<-checkpointCleanupDone
 	if pprofDone != nil {
 		<-pprofDone
 	}

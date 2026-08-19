@@ -33,6 +33,10 @@ const (
 	defaultRetrievalCacheTTL          = 2 * time.Minute
 	defaultAgentStreamTTL             = time.Hour
 	defaultAgentStreamMaxLen          = 4096
+	defaultAgentCheckpointDir         = "./.data/agent-checkpoints"
+	defaultAgentCheckpointInlineBytes = 8 * 1024
+	defaultAgentCheckpointFileTTL     = time.Hour
+	defaultAgentCheckpointCleanup     = 10 * time.Minute
 )
 
 type Config struct {
@@ -68,6 +72,10 @@ type Config struct {
 	AgentStreamRedisURL        string
 	AgentStreamTTL             time.Duration
 	AgentStreamMaxLen          int
+	AgentCheckpointDir         string
+	AgentCheckpointInlineBytes int
+	AgentCheckpointFileTTL     time.Duration
+	AgentCheckpointCleanup     time.Duration
 	SecureCookies              bool
 }
 
@@ -118,6 +126,10 @@ func Load() Config {
 		AgentStreamRedisURL:        strings.TrimSpace(os.Getenv("AGENT_STREAM_REDIS_URL")),
 		AgentStreamTTL:             durationEnv("AGENT_STREAM_TTL", defaultAgentStreamTTL),
 		AgentStreamMaxLen:          positiveIntEnv("AGENT_STREAM_MAX_LEN", defaultAgentStreamMaxLen),
+		AgentCheckpointDir:         agentCheckpointDir(),
+		AgentCheckpointInlineBytes: positiveIntEnv("AGENT_CHECKPOINT_INLINE_BYTES", defaultAgentCheckpointInlineBytes),
+		AgentCheckpointFileTTL:     durationEnv("AGENT_CHECKPOINT_FILE_TTL", defaultAgentCheckpointFileTTL),
+		AgentCheckpointCleanup:     durationEnv("AGENT_CHECKPOINT_CLEANUP_INTERVAL", defaultAgentCheckpointCleanup),
 		SecureCookies:              boolEnv("SECURE_COOKIES", false),
 	}
 }
@@ -155,6 +167,13 @@ func uploadDir() string {
 		return value
 	}
 	return defaultUploadDir
+}
+
+func agentCheckpointDir() string {
+	if value := strings.TrimSpace(os.Getenv("AGENT_CHECKPOINT_DIR")); value != "" {
+		return value
+	}
+	return defaultAgentCheckpointDir
 }
 
 func splitHosts(value string) []string {

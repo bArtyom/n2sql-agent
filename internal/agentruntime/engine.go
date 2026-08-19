@@ -448,7 +448,9 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				if err := e.checkpointSink(ctx, ToolCheckpoint{
 					ToolCallID: toolCall.ID, ToolName: toolCall.Function.Name, StepNumber: len(run.Steps()),
 					ArgumentsHash: toolArgumentsHash(toolCall.Function.Name, arguments),
-					Content:       truncateUTF8(toolResult.Content, 32*1024), Payload: toolFinishedData,
+					// The sink decides whether the result stays inline or is
+					// externalized. SSE never receives this content.
+					Content: toolResult.Content, Payload: toolFinishedData,
 				}); err != nil {
 					return finishErrorWithEvents(result, err, emitter)
 				}

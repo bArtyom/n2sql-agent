@@ -102,6 +102,21 @@ func TestLoadReadsAgentStreamRedisSettings(t *testing.T) {
 	}
 }
 
+func TestLoadReadsAgentCheckpointSettings(t *testing.T) {
+	t.Setenv("AGENT_CHECKPOINT_DIR", "./tmp/checkpoints")
+	t.Setenv("AGENT_CHECKPOINT_INLINE_BYTES", "4096")
+	t.Setenv("AGENT_CHECKPOINT_FILE_TTL", "30m")
+	t.Setenv("AGENT_CHECKPOINT_CLEANUP_INTERVAL", "5m")
+
+	cfg := config.Load()
+	if cfg.AgentCheckpointDir != "./tmp/checkpoints" || cfg.AgentCheckpointInlineBytes != 4096 {
+		t.Fatalf("checkpoint directory/inline bytes = %q/%d", cfg.AgentCheckpointDir, cfg.AgentCheckpointInlineBytes)
+	}
+	if cfg.AgentCheckpointFileTTL != 30*time.Minute || cfg.AgentCheckpointCleanup != 5*time.Minute {
+		t.Fatalf("checkpoint cleanup settings = %s/%s", cfg.AgentCheckpointFileTTL, cfg.AgentCheckpointCleanup)
+	}
+}
+
 func TestLoadReadsA2ACleanupSettings(t *testing.T) {
 	t.Setenv("A2A_TASK_RETENTION", "48h")
 	t.Setenv("A2A_CLEANUP_INTERVAL", "15m")

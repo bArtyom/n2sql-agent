@@ -118,13 +118,9 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 		request.RecoveryCheckpoints = run.Checkpoints
 		if checkpointStore != nil {
 			request.CheckpointSink = func(ctx context.Context, checkpoint agentruntime.ToolCheckpoint) error {
-				payload, err := json.Marshal(map[string]any{
-					"arguments_hash": checkpoint.ArgumentsHash,
-					"content":        checkpoint.Content,
-					"event":          checkpoint.Payload,
-				})
+				payload, err := json.Marshal(checkpoint.Payload)
 				if err != nil {
-					return fmt.Errorf("encode tool checkpoint payload: %w", err)
+					return fmt.Errorf("encode tool checkpoint event: %w", err)
 				}
 				return checkpointStore.SaveToolCheckpoint(ctx, agentrun.ToolCheckpoint{
 					AgentRunID: run.ID, AttemptCount: run.AttemptCount, StepNumber: checkpoint.StepNumber,

@@ -31,7 +31,7 @@
 - Agent 中间事件支持可选 Redis 短期流：配置 `AGENT_STREAM_REDIS_URL` 后使用 Redis Stream 的有界长度与 TTL，SSE 可跨实例重放并持续订阅；未配置时回退 PostgreSQL 事件表。最终答案、运行状态和会话消息仍持久化到 PostgreSQL。
 - Agent SSE 已增加事件版本、稳定事件 ID、`Last-Event-ID` 续传和 `stream_replay_gap` 恢复；前端遇到事件窗口缺口时改读 PostgreSQL 最终答案。工具 checkpoint 目前完成边界设计，仍保持租约过期后从头重试，不宣称断点续跑。
 - 工具安全重试原则已落地：普通工具默认允许失败后反馈模型重试；实现 `RequiresApproval()` 的副作用工具默认禁止自动重试，只有同时显式实现 `Retryable() bool { return true }` 才允许，便于未来接入业务幂等键后安全恢复。
-- Agent 工具 checkpoint 已接入安全复用：新增 `agent_run_checkpoints` 表，标准异步 Worker 在 `tool_finished` 边界保存已截断、脱敏的工具结果；恢复时按工具名和规范化参数哈希匹配，只有不需审批且允许重试的工具才复用，副作用工具不会绕过审批；旧/不完整 checkpoint 自动降级为重新调用。
+- Agent 工具 checkpoint 已接入安全复用：新增 `agent_run_checkpoints` 表，标准异步 Worker 在 `tool_finished` 边界保存脱敏结果；小结果以内联元数据保存，大结果写入带 TTL 的本地临时文件，PostgreSQL 只保存引用、预览和参数哈希；恢复时按工具名和规范化参数哈希匹配，只有不需审批且允许重试的工具才复用，副作用工具不会绕过审批，临时文件过期则只读工具降级为重新调用。
 - Agent 只读工具已覆盖 `knowledge_search`、`document_list`、`document_info`、`document_read`；文档正文读取受知识库、文档、chunk 数量和字节数限制。
 - 异步文档摘要工具 `document_summary` 已接入标准 Agent：后台生成时返回任务状态并立即结束本轮 Agent，不把 pending 占位结果再次交给模型，避免重复工具调用和步数超限；摘要完成后由后续提问读取缓存。
 - Agent 会话记忆改造第一步：历史语义摘要模型调用失败时最多重试 2 次；上下文取消会立即停止重试，最终仍由现有抽取式摘要兜底，不阻断正常问答。
