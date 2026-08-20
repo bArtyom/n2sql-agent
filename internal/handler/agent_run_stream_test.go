@@ -76,6 +76,30 @@ func TestAgentRunStreamReplaysChildEvent(t *testing.T) {
 	}
 }
 
+func TestAgentRunStreamReplaysWaitingChildrenEvent(t *testing.T) {
+	hub := agentstream.NewHub()
+	if err := hub.Start("parent-1", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.Publish(agentstream.Event{ID: "parent-1-transport-1", RunID: "parent-1", Type: "waiting_children"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.Publish(agentstream.Event{ID: "parent-1-finished", RunID: "parent-1", Type: "run_finished"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.Finish("parent-1"); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/7/agent-runs/parent-1/stream", nil)
+	request.SetPathValue("id", "7")
+	request.SetPathValue("runID", "parent-1")
+	response := httptest.NewRecorder()
+	handler.NewAgentRunStream(hub).ServeHTTP(response, request)
+	if !strings.Contains(response.Body.String(), "event: waiting_children\n") {
+		t.Fatalf("body=%q, want waiting_children event", response.Body.String())
+	}
+}
+
 func TestAgentRunStreamResumesAfterLastEventID(t *testing.T) {
 	hub := agentstream.NewHub()
 	if err := hub.Start("run-1", 7); err != nil {

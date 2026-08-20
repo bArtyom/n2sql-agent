@@ -2187,6 +2187,15 @@ function consumeSSEBlock(block: string, answerIndex: number) {
         answer.streamGap = true;
         answer.activity = "中间事件已过期，正在恢复最终答案…";
         break;
+      case "waiting_children":
+        answer.activity = "正在等待子 Agent 完成…";
+        void fetchAgentRunStatus(answer).then((statusPayload) => {
+          if (statusPayload?.status !== "waiting_children") return;
+          const count = statusPayload.children?.length ?? 0;
+          answer.activity = count > 0 ? `正在等待 ${count} 个子 Agent 完成…` : "正在等待子 Agent 完成…";
+          void loadAgentRunTree(answer);
+        });
+        break;
       case "sources":
         answer.sources = mergeSources(answer.sources ?? [], parseSources(payload.sources));
         if (payload.retrieval) answer.retrieval = payload.retrieval;

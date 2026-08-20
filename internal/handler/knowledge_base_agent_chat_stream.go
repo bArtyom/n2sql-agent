@@ -384,6 +384,7 @@ func NewAgentRunStreamWithStore(hub *agentstream.Hub, eventStore agentrun.EventS
 func writeAgentSSEEvent(w http.ResponseWriter, flusher http.Flusher, eventType string, value any) error {
 	switch eventType {
 	case "error",
+		"waiting_children",
 		"conversation_saved",
 		"conversation_save_failed",
 		"conversation_replayed",

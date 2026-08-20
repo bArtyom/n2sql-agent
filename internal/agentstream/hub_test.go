@@ -58,6 +58,24 @@ func TestHubAcceptsChildEventsOnParentStream(t *testing.T) {
 	}
 }
 
+func TestHubAcceptsWaitingChildrenTransportEvent(t *testing.T) {
+	hub := agentstream.NewHub()
+	if err := hub.Start("parent-1", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.Publish(agentstream.Event{ID: "parent-1-transport-1", RunID: "parent-1", Type: "waiting_children"}); err != nil {
+		t.Fatalf("Publish(waiting_children) error = %v", err)
+	}
+	snapshot, _, cancel, _, err := hub.Subscribe("parent-1", 7, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	if len(snapshot) != 1 || snapshot[0].Type != "waiting_children" {
+		t.Fatalf("snapshot = %#v, want waiting_children", snapshot)
+	}
+}
+
 func TestHubDoesNotCrossKnowledgeBases(t *testing.T) {
 	hub := agentstream.NewHub()
 	if err := hub.Start("run-1", 7); err != nil {

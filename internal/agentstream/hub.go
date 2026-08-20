@@ -346,7 +346,7 @@ func (h *Hub) SubscribeFrom(runID string, knowledgeBaseID int64, afterEventID st
 
 func validEventType(eventType string) bool {
 	switch eventType {
-	case "error", "conversation_saved", "conversation_save_failed", "conversation_replayed",
+	case "error", "conversation_saved", "conversation_save_failed", "conversation_replayed", "waiting_children",
 		string(agent.EventRunStarted), string(agent.EventStepStarted), string(agent.EventToolCalled),
 		string(agent.EventToolFinished), string(agent.EventApprovalRequired), string(agent.EventApprovalResolved),
 		string(agent.EventApprovalExpired), string(agent.EventReasoningDelta), string(agent.EventMessageDelta),
