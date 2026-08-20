@@ -106,3 +106,31 @@ func TestDelegateResearchToolPersistsChildLifecycleWhenConfigured(t *testing.T) 
 		t.Fatal("child lifecycle was not completed")
 	}
 }
+
+func TestDelegateResearchToolPublishesAssociatedChildEvents(t *testing.T) {
+	tool, err := NewDelegateResearchTool(&delegateChatStub{}, delegateSearcherStub{}, 7, 4096, 3, nil, false, retrieval.DefaultKeywordThreshold)
+	if err != nil {
+		t.Fatalf("NewDelegateResearchTool() error = %v", err)
+	}
+	tool.SetParentRun(42, "parent-run")
+	var events []agent.Event
+	tool.SetChildEventSink(func(event agent.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if _, err := tool.Call(context.Background(), json.RawMessage(`{"question":"研究年假"}`)); err != nil {
+		t.Fatalf("Call() error = %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("child event sink received no events")
+	}
+	for _, event := range events {
+		if event.Type != agent.EventChildEvent || event.RunID != "parent-run" {
+			t.Fatalf("child event = %#v", event)
+		}
+		data, ok := event.Data.(map[string]any)
+		if !ok || data["child_run_id"] == "" || data["parent_run_id"] != "parent-run" {
+			t.Fatalf("child event data = %#v", event.Data)
+		}
+	}
+}

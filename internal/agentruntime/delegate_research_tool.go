@@ -44,6 +44,7 @@ type DelegateResearchTool struct {
 	parentRunPublicID string
 	lifecycle         ChildRunLifecycle
 	scheduler         ChildScheduler
+	childEventSink    EventSink
 	sequence          atomic.Uint64
 }
 
@@ -75,6 +76,12 @@ func (t *DelegateResearchTool) SetChildRunLifecycle(lifecycle ChildRunLifecycle)
 func (t *DelegateResearchTool) SetChildScheduler(scheduler ChildScheduler) {
 	if t != nil {
 		t.scheduler = scheduler
+	}
+}
+
+func (t *DelegateResearchTool) SetChildEventSink(sink EventSink) {
+	if t != nil {
+		t.childEventSink = sink
 	}
 }
 
@@ -169,6 +176,19 @@ func (t *DelegateResearchTool) Call(ctx context.Context, raw json.RawMessage) (a
 	runChild := func(childCtx context.Context) error {
 		var runErr error
 		result, runErr = child.RunWithEvents(childCtx, childRunID, childMessages, func(event agent.Event) error {
+			if t.childEventSink != nil {
+				if err := t.childEventSink(agent.Event{
+					Version:    agent.EventSchemaVersion,
+					ID:         fmt.Sprintf("%s-child-%s", childRunID, event.ID),
+					RunID:      t.parentRunPublicID,
+					Type:       agent.EventChildEvent,
+					StepNumber: event.StepNumber,
+					Data:       childEventSummary(childRunID, t.parentRunPublicID, event),
+					CreatedAt:  event.CreatedAt,
+				}); err != nil {
+					return err
+				}
+			}
 			if len(childEvents) < 8 {
 				item := map[string]any{"type": string(event.Type), "step_number": event.StepNumber}
 				if data, ok := event.Data.(map[string]any); ok {
@@ -226,6 +246,23 @@ func (t *DelegateResearchTool) Call(ctx context.Context, raw json.RawMessage) (a
 		}
 	}
 	return toolResult, nil
+}
+
+func childEventSummary(childRunID, parentRunID string, event agent.Event) map[string]any {
+	data := map[string]any{
+		"child_run_id":     childRunID,
+		"parent_run_id":    parentRunID,
+		"child_event_type": string(event.Type),
+		"child_step":       event.StepNumber,
+	}
+	if values, ok := event.Data.(map[string]any); ok {
+		for _, key := range []string{"tool_name", "result_summary", "failed"} {
+			if value, exists := values[key]; exists {
+				data[key] = value
+			}
+		}
+	}
+	return data
 }
 
 func uniqueDelegateSources(results []retrieval.Result) []retrieval.Result {

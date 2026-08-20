@@ -67,7 +67,7 @@ func safeAgentRunEvents(events []agentstream.Event) []safeAgentRunEvent {
 		switch event.Type {
 		case string(agent.EventRunStarted), string(agent.EventRunFinished), string(agent.EventRunFailed), string(agent.EventRunCanceled):
 			// Lifecycle type and timing are enough for the diagnostic timeline.
-		case string(agent.EventToolCalled), string(agent.EventToolFinished):
+		case string(agent.EventToolCalled), string(agent.EventToolFinished), string(agent.EventChildEvent):
 			item.Summary = safeToolEventSummary(event)
 		default:
 			// Reasoning and message delta events are intentionally not exposed.
@@ -81,6 +81,14 @@ func safeAgentRunEvents(events []agentstream.Event) []safeAgentRunEvent {
 func safeToolEventSummary(event agentstream.Event) map[string]any {
 	data, _ := event.Data.(map[string]any)
 	summary := make(map[string]any, 3)
+	if event.Type == string(agent.EventChildEvent) {
+		for _, key := range []string{"child_run_id", "parent_run_id", "child_event_type", "child_step", "tool_name", "result_summary", "failed"} {
+			if value, ok := data[key]; ok {
+				summary[key] = value
+			}
+		}
+		return summary
+	}
 	if toolName, ok := data["tool_name"].(string); ok && strings.TrimSpace(toolName) != "" {
 		summary["tool_name"] = toolName
 	}

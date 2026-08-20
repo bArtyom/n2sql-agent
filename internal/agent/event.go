@@ -25,6 +25,7 @@ const (
 	EventRunFinished      EventType = "run_finished"
 	EventRunFailed        EventType = "run_failed"
 	EventRunCanceled      EventType = "run_canceled"
+	EventChildEvent       EventType = "child_event"
 )
 
 // Event is an observable occurrence in one Agent run.
@@ -71,7 +72,8 @@ func validEventType(eventType EventType) bool {
 		EventMessageDelta,
 		EventRunFinished,
 		EventRunFailed,
-		EventRunCanceled:
+		EventRunCanceled,
+		EventChildEvent:
 		return true
 	default:
 		return false

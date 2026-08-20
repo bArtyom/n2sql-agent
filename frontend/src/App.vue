@@ -2134,6 +2134,16 @@ function consumeSSEBlock(block: string, answerIndex: number) {
         }
         answer.activity = agentToolActivity(dataString("tool_name"));
         break;
+      case "child_event":
+        {
+          const childEventType = dataString("child_event_type");
+          const toolName = dataString("tool_name");
+          const detail = toolName
+            ? `${toolFinishedLabel(toolName)} · ${childEventType || "子 Agent 事件"}`
+            : (childEventType || "子 Agent 事件");
+          recordAgentEvent(answer, event, `子 Agent：${detail}`, `运行 ${dataString("child_run_id") || "进行中"}`, payload.step_number, "done");
+        }
+        break;
       case "tool_finished":
         {
           const sources = parseSources(eventData.sources);
