@@ -41,6 +41,13 @@ type RetryableTool interface {
 	Retryable() bool
 }
 
+// ParallelSafeTool explicitly opts a tool into concurrent execution when the
+// model returns multiple calls in one response. The default is false: a tool
+// must prove that calls are independent and do not share mutable state.
+type ParallelSafeTool interface {
+	ParallelSafe() bool
+}
+
 // ToolResult is the normalized result returned by a tool.
 type ToolResult struct {
 	Content           string         `json:"content"`
@@ -159,6 +166,18 @@ func (r *ToolRegistry) Retryable(name string) bool {
 		return retryable.Retryable()
 	}
 	return !r.RequiresApproval(name)
+}
+
+// ParallelSafe reports whether a tool has explicitly opted into same-turn
+// parallel execution. Unknown tools and tools without the marker are kept
+// sequentially for safety.
+func (r *ToolRegistry) ParallelSafe(name string) bool {
+	tool, ok := r.Get(name)
+	if !ok {
+		return false
+	}
+	parallel, ok := tool.(ParallelSafeTool)
+	return ok && parallel.ParallelSafe()
 }
 
 func (r *ToolRegistry) isAllowed(name string) bool {

@@ -583,7 +583,7 @@ func (e *Engine) precomputeReadOnlyToolCalls(ctx context.Context, calls []modelc
 			continue
 		}
 		tool, err := e.registry.Find(call.Function.Name)
-		if err != nil || e.registry.RequiresApproval(call.Function.Name) {
+		if err != nil || e.registry.RequiresApproval(call.Function.Name) || !e.registry.ParallelSafe(call.Function.Name) {
 			continue
 		}
 		if _, ok := e.resumeCheckpoint(call.Function.Name, json.RawMessage(call.Function.Arguments)); ok {

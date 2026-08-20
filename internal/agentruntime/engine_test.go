@@ -59,6 +59,8 @@ func (timeoutToolStub) Call(ctx context.Context, _ json.RawMessage) (agent.ToolR
 
 func (t parallelToolStub) Name() string { return t.name }
 
+func (t parallelToolStub) ParallelSafe() bool { return true }
+
 func (t parallelToolStub) Description() string { return "parallel read-only tool" }
 
 func (t parallelToolStub) Parameters() json.RawMessage {

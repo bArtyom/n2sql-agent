@@ -132,6 +132,11 @@ func NewDelegateResearchTool(chat modelruntime.ToolChatRunner, searcher retrieva
 
 func (t *DelegateResearchTool) Name() string { return delegateResearchToolName }
 
+// ParallelSafe marks each delegate_research call as an independent research
+// scope. Dependent follow-up work must be expressed as a later parent turn,
+// not as another same-turn child call.
+func (t *DelegateResearchTool) ParallelSafe() bool { return true }
+
 func (t *DelegateResearchTool) Description() string {
 	return "仅在需要隔离上下文的独立研究任务中委派一个只读研究子 Agent；不要用于依赖前一步结果的连续步骤。多个独立问题可以并发委派，子 Agent 会返回简短结论"
 }
