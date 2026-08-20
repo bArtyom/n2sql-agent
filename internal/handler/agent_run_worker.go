@@ -249,6 +249,9 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 				_ = publish("waiting_children", map[string]any{"run_id": run.RunID})
 				return err
 			}
+			if response.Stats != nil && response.Stats.FailureCategory != agent.FailureNone {
+				err = &agentrun.CategorizedError{Err: err, Category: response.Stats.FailureCategory}
+			}
 			if !replayed {
 				message, _ := knowledgeBaseAgentChatError(err)
 				_ = publish("error", map[string]string{"error": message})

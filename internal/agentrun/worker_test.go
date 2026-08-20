@@ -11,17 +11,18 @@ import (
 )
 
 type runStoreStub struct {
-	run           Run
-	status        Status
-	failed        string
-	requeued      bool
-	deleted       int
-	markedToken   string
-	renewErr      error
-	checkpointErr error
-	waiting       bool
-	resumedParent int64
-	parentRun     Run
+	run             Run
+	status          Status
+	failed          string
+	failureCategory agent.FailureCategory
+	requeued        bool
+	deleted         int
+	markedToken     string
+	renewErr        error
+	checkpointErr   error
+	waiting         bool
+	resumedParent   int64
+	parentRun       Run
 }
 
 func (s *runStoreStub) Get(context.Context, string, int64) (Run, error) {
@@ -64,6 +65,11 @@ func (s *runStoreStub) MarkSucceeded(_ context.Context, _ int64, token string) e
 func (s *runStoreStub) MarkFailed(_ context.Context, _ int64, message, token string) error {
 	s.markedToken = token
 	s.status, s.failed = StatusFailed, message
+	return nil
+}
+func (s *runStoreStub) MarkFailedWithCategory(_ context.Context, _ int64, message string, category agent.FailureCategory, token string) error {
+	s.markedToken = token
+	s.status, s.failed, s.failureCategory = StatusFailed, message, category
 	return nil
 }
 func (s *runStoreStub) MarkCanceled(_ context.Context, _ int64, token string) error {
@@ -146,6 +152,22 @@ func TestRunnerMarksFailedExecution(t *testing.T) {
 	}
 	if store.deleted != 1 {
 		t.Fatalf("deleted checkpoints = %d, want 1", store.deleted)
+	}
+}
+
+func TestRunnerPersistsCategorizedFailureWhenStoreSupportsIt(t *testing.T) {
+	store := &runStoreStub{run: Run{ID: 3, RunID: "run-3"}, status: StatusPending}
+	runner, err := NewRunner(store, ExecutorFunc(func(context.Context, Run, EventSink) error {
+		return &CategorizedError{Err: errors.New("provider rejected request"), Category: agent.FailureModel}
+	}))
+	if err != nil {
+		t.Fatalf("NewRunner() error = %v", err)
+	}
+	if _, err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+	if store.failureCategory != agent.FailureModel {
+		t.Fatalf("failure category = %q, want %q", store.failureCategory, agent.FailureModel)
 	}
 }
 
