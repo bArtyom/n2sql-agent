@@ -106,6 +106,11 @@ type Reader interface {
 	Get(context.Context, string, int64) (Run, error)
 }
 
+// ChildReader exposes safe parent/child Run metadata for execution trees.
+type ChildReader interface {
+	ListChildren(context.Context, int64, int64) ([]Run, error)
+}
+
 type ResultWriter interface {
 	SaveResponse(context.Context, int64, json.RawMessage) error
 }
@@ -299,6 +304,41 @@ func (s *PostgresStore) ClaimNext(ctx context.Context) (Run, error) {
 		return Run{}, fmt.Errorf("claim agent run: %w", err)
 	}
 	return run, nil
+}
+
+func (s *PostgresStore) ListChildren(ctx context.Context, parentRunID, knowledgeBaseID int64) ([]Run, error) {
+	if parentRunID <= 0 || knowledgeBaseID <= 0 {
+		return nil, ErrInvalidRun
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, run_id, knowledge_base_id, COALESCE(conversation_id, 0),
+			COALESCE(parent_run_id, 0), run_kind, response, status, attempt_count,
+			COALESCE(error_message, ''), created_at, started_at, finished_at,
+			lease_until, heartbeat_at, updated_at
+		FROM agent_runs
+		WHERE parent_run_id = $1 AND knowledge_base_id = $2
+		ORDER BY created_at, id`, parentRunID, knowledgeBaseID)
+	if err != nil {
+		return nil, fmt.Errorf("list child agent runs: %w", err)
+	}
+	defer rows.Close()
+	children := make([]Run, 0)
+	for rows.Next() {
+		var run Run
+		if err := rows.Scan(
+			&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID,
+			&run.ParentRunID, &run.RunKind, &run.Response, &run.Status, &run.AttemptCount,
+			&run.ErrorMessage, &run.CreatedAt, &run.StartedAt, &run.FinishedAt,
+			&run.LeaseUntil, &run.HeartbeatAt, &run.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan child agent run: %w", err)
+		}
+		children = append(children, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate child agent runs: %w", err)
+	}
+	return children, nil
 }
 
 func (s *PostgresStore) SaveResponse(ctx context.Context, id int64, response json.RawMessage) error {

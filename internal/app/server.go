@@ -27,37 +27,37 @@ import (
 )
 
 type Dependencies struct {
-	Providers                  modelprovider.Store
-	KnowledgeBases             knowledgebase.Store
-	Documents                  document.Uploader
-	ChunkReader                documentchunk.Reader
-	ConnectionChecker          modelclient.ConnectionChecker
-	Embeddings                 modelruntime.EmbeddingRunner
-	Chat                       modelruntime.ChatRunner
-	Search                     retrieval.Searcher
-	Answers                    rag.Answerer
-	StreamingAnswers           rag.StreamAnswerer
-	AgentAnswers               agentservice.Answerer
-	AgentStreamingAnswers      agentservice.EventAnswerer
-	AgentStreamHub             *agentstream.Hub
-	AgentRuns                  agentrun.Store
-	AgentRunReader             agentrun.Reader
-	AgentEventStore            agentrun.EventStore
-	AgentRunExecutor           agentrun.Executor
-	MCPKnowledgeSearch         retrieval.Searcher
-	MCPDocuments               document.Reader
-	MCPKnowledgeBases          knowledgebase.Store
-	Conversations              *conversation.Service
-	AgentMaxToolResultBytes    int
-	AgentMaxHistoryBytes       int
-	FollowUpSuggestions        followup.Suggester
-	DocumentSummary            *documentsummary.Service
-	Memories                   memory.Store
-	MemoryProfile              memory.ProfileStore
-	APIKeyEnvVar               string
-	Auth                       auth.Store
-	SecureCookies              bool
-	Metrics                    *metrics.Registry
+	Providers               modelprovider.Store
+	KnowledgeBases          knowledgebase.Store
+	Documents               document.Uploader
+	ChunkReader             documentchunk.Reader
+	ConnectionChecker       modelclient.ConnectionChecker
+	Embeddings              modelruntime.EmbeddingRunner
+	Chat                    modelruntime.ChatRunner
+	Search                  retrieval.Searcher
+	Answers                 rag.Answerer
+	StreamingAnswers        rag.StreamAnswerer
+	AgentAnswers            agentservice.Answerer
+	AgentStreamingAnswers   agentservice.EventAnswerer
+	AgentStreamHub          *agentstream.Hub
+	AgentRuns               agentrun.Store
+	AgentRunReader          agentrun.Reader
+	AgentEventStore         agentrun.EventStore
+	AgentRunExecutor        agentrun.Executor
+	MCPKnowledgeSearch      retrieval.Searcher
+	MCPDocuments            document.Reader
+	MCPKnowledgeBases       knowledgebase.Store
+	Conversations           *conversation.Service
+	AgentMaxToolResultBytes int
+	AgentMaxHistoryBytes    int
+	FollowUpSuggestions     followup.Suggester
+	DocumentSummary         *documentsummary.Service
+	Memories                memory.Store
+	MemoryProfile           memory.ProfileStore
+	APIKeyEnvVar            string
+	Auth                    auth.Store
+	SecureCookies           bool
+	Metrics                 *metrics.Registry
 }
 
 func New(dependencies Dependencies) http.Handler {
@@ -153,6 +153,7 @@ func New(dependencies Dependencies) http.Handler {
 		}
 		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}/stream", handler.NewAgentRunStreamWithStore(hub, dependencies.AgentEventStore))
 		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}", handler.NewAgentRunStatus(dependencies.AgentRunReader))
+		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}/children", handler.NewAgentRunChildren(dependencies.AgentRunReader))
 		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}/trace", handler.NewAgentRunTrace(dependencies.AgentEventStore))
 		mux.Handle("POST /api/knowledge-bases/{id}/agent-runs/{runID}/stop", handler.NewAgentRunStop(hub))
 		mux.Handle("POST /api/knowledge-bases/{id}/agent-runs/{runID}/approval", handler.NewAgentRunApproval(hub))

@@ -54,6 +54,7 @@
 - 动态子 Agent 第一阶段已完成：`agent_runs` 增加 `parent_run_id` 与 `run_kind`；标准 Worker 会把父 Run 数据库 ID传入 Agent 请求，`delegate_research` 可同步创建并持久化 child Run，保存子 Agent 结果并更新 succeeded/failed/canceled 状态。父工具完成事件会透传有界的 child Run 标识、状态、步数和事件摘要；子 Run 当前仍在父 Run 的工具调用内执行，独立事件流和独立 Worker 调度后置。
 - 动态子 Agent 并发调度已补齐：Agent Engine 原有同轮只读工具并行执行能力继续保留；新增进程级共享 `BoundedChildScheduler`，所有父 Run 的子 Agent 共用最多 3 个执行槽位，槽位满时等待，父 context 取消时等待中的子任务立即退出，避免无限 goroutine 和模型并发失控。子 Run 仍保留 PostgreSQL 持久化，暂不拆成独立数据库 Worker。
 - 动态子 Agent 事件关联已补齐：子 Agent 关键事件通过 `child_event` 进入父 Run 的现有事件存储、Redis/SSE 和前端轨迹，事件携带 `child_run_id`、`parent_run_id`、子事件类型和有界摘要；不会把完整工具结果重复写入父事件。独立 child SSE 订阅和完整树状折叠仍后置。
+- 父子 Run 查询已补齐：新增 `GET /api/knowledge-bases/{id}/agent-runs/{runID}/children`，按 `parent_run_id` 递归返回最多 8 层安全执行树，包含状态、尝试次数、时间、错误和最终 response，不暴露请求快照、租约 token；数据库查询按知识库隔离。
 - 前端已支持会话、引用卡片与懒加载原文、检索统计、Agent 工具轨迹折叠、断线恢复、正文分页预览、固定起步问题和按需生成追问建议。
 - 最新停止生成切片：标准 Agent 流式回答期间输入栏显示“停止生成”按钮，调用 `POST /api/knowledge-bases/{id}/agent-runs/{runID}/stop` 取消执行上下文；引擎发 `run_canceled` 事件，前端标记独立 stopped 终态（保留部分内容、不显示重新生成、不写会话历史）；断线恢复与用户停止语义分离；停止按知识库 ID 隔离。
 - 最新会话置顶切片：`conversations.is_pinned` 列 + 排序索引；列表按置顶优先、组内按更新时间排序；`PATCH /conversations/{id}` 支持 `{"is_pinned": true/false}`（与重命名共用端点，跨库 404）；前端会话列表按「置顶 + 今天/昨天/N 天前」分组，置顶项 📌 标记与置顶/取消置顶按钮。
@@ -86,7 +87,7 @@
 
 后续按双主线推进：Agent Runtime 先读 DeerFlow，再用 WeKnora 校准工具、会话和用户可见交互；RAG 以 WeKnora 的文档处理、混合检索、引用和知识库交互为主。每轮选择一个小而完整的功能切片，完成后端链路、必要前端反馈、测试和学习记录；不要因为参考仓库已有复杂能力就直接扩展成完整协议或大规模系统。
 
-下一轮候选：为动态子 Agent 增加独立事件流/树状轨迹，并补充父子 Run 查询接口，方便调试和运维查看委派链路。
+下一轮候选：把父子 Run 树接入前端折叠视图，再评估是否需要独立 child SSE 订阅；同时继续补 child checkpoint 恢复。
 
 ## 交付要求
 
