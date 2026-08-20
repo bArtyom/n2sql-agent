@@ -278,10 +278,11 @@ func (t *DelegateResearchTool) Call(ctx context.Context, raw json.RawMessage) (a
 }
 
 func delegatePartialFailureResult(err error, childRunID string, childEvents []map[string]any, sources []retrieval.Result) agent.ToolResult {
-	content := "子 Agent 未完成最终总结。"
-	if len(sources) > 0 {
-		content = fmt.Sprintf("子 Agent 未完成最终总结，但已检索到 %d 条资料。请基于这些资料继续回答；如果信息不足，再缩小问题后重新委派。\n\n%s", len(sources), delegateSourcePreview(sources))
+	if len(sources) == 0 {
+		return agent.ToolResult{}
 	}
+	content := "子 Agent 未完成最终总结。"
+	content = fmt.Sprintf("子 Agent 未完成最终总结，但已检索到 %d 条资料。请基于这些资料继续回答；如果信息不足，再缩小问题后重新委派。\n\n%s", len(sources), delegateSourcePreview(sources))
 	if err != nil {
 		content += fmt.Sprintf("\n\n失败原因：%s", security.RedactText(strings.TrimSpace(err.Error())))
 	}
