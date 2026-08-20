@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
+	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
 )
 
 type Executor interface {
@@ -87,6 +88,16 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 		}
 		r.resumeParentAfterChild(ctx, run)
 		r.cleanupTerminalCheckpoints(ctx, run.ID)
+		return true, nil
+	}
+	if errors.Is(err, agentruntime.ErrAgentWaitingChildren) {
+		coordinator, ok := r.store.(ParentRunCoordinator)
+		if !ok {
+			return true, fmt.Errorf("agent requested child wait but store cannot park parent: %w", err)
+		}
+		if markErr := coordinator.MarkWaitingChildren(context.WithoutCancel(ctx), run.ID, run.LeaseToken); markErr != nil {
+			return true, fmt.Errorf("mark agent run waiting for children: %w", markErr)
+		}
 		return true, nil
 	}
 	if errors.Is(context.Cause(executionContext), ErrLeaseLost) {

@@ -28,6 +28,7 @@ var (
 	ErrEmptyFinalAnswer     = errors.New("agent final answer is empty")
 	ErrInvalidToolCall      = errors.New("invalid agent tool call")
 	ErrInvalidToolResult    = errors.New("invalid agent tool result")
+	ErrAgentWaitingChildren = errors.New("agent is waiting for child runs")
 	ErrRepeatedToolCall     = errors.New("repeated identical agent tool call")
 	ErrInvalidToolTimeout   = errors.New("agent tool timeout must not be negative")
 	ErrInvalidParallelLimit = errors.New("agent parallel tool limit must be positive")
@@ -527,6 +528,9 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			// model to call the same tool repeatedly while the task is running.
 			if pending, _ := toolResult.Metadata["pending"].(bool); pending {
 				return completeWithAnswer(result, emitter, toolResult.Content)
+			}
+			if waiting, _ := toolResult.Metadata["waiting_children"].(bool); waiting {
+				return result, ErrAgentWaitingChildren
 			}
 			toolContent, err := markUntrustedToolResult(toolResult.Content)
 			if err != nil {

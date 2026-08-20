@@ -56,15 +56,27 @@ type DelegateResearchTool struct {
 }
 
 type ChildRunSpec struct {
-	RunID           string
-	ParentRunID     int64
-	KnowledgeBaseID int64
-	Question        string
+	RunID             string
+	ParentRunID       int64
+	ParentRunPublicID string
+	KnowledgeBaseID   int64
+	Question          string
+	DocumentIDs       []int64
+	QueryRewrite      bool
+	TopK              int
+	KeywordThreshold  float64
 }
 
 type ChildRunLifecycle interface {
 	StartChild(context.Context, ChildRunSpec) (string, error)
 	FinishChild(context.Context, ChildRunSpec, agent.ToolResult, error) error
+}
+
+// AsyncChildRunLifecycle lets the parent enqueue a child instead of executing
+// it inline. A terminal result is returned on a later parent attempt; a
+// pending/running child is represented by ready=false.
+type AsyncChildRunLifecycle interface {
+	EnqueueChild(context.Context, ChildRunSpec) (runID string, ready bool, result agent.ToolResult, err error)
 }
 
 type ChildCheckpointLifecycle interface {
@@ -183,7 +195,23 @@ func (t *DelegateResearchTool) Call(ctx context.Context, raw json.RawMessage) (a
 		return agent.ToolResult{}, fmt.Errorf("create child research registry: %w", err)
 	}
 	childRunID := t.newChildRunID(input.Question)
-	childSpec := ChildRunSpec{RunID: childRunID, ParentRunID: t.parentRunID, KnowledgeBaseID: t.knowledgeBaseID, Question: input.Question}
+	childSpec := ChildRunSpec{RunID: childRunID, ParentRunID: t.parentRunID, ParentRunPublicID: t.parentRunPublicID, KnowledgeBaseID: t.knowledgeBaseID, Question: input.Question, DocumentIDs: append([]int64(nil), t.documentIDs...), QueryRewrite: t.queryRewrite, TopK: retrieval.DefaultResults, KeywordThreshold: t.keywordThreshold}
+	if asyncLifecycle, ok := t.lifecycle.(AsyncChildRunLifecycle); ok && t.parentRunID > 0 {
+		startedID, ready, asyncResult, asyncErr := asyncLifecycle.EnqueueChild(ctx, childSpec)
+		if asyncErr != nil {
+			return agent.ToolResult{}, fmt.Errorf("enqueue child research run: %w", asyncErr)
+		}
+		if ready {
+			if asyncResult.Metadata == nil {
+				asyncResult.Metadata = map[string]any{}
+			}
+			asyncResult.Metadata["child_run_id"] = startedID
+			return asyncResult, nil
+		}
+		return agent.ToolResult{Content: "子 Agent 已进入后台执行，等待其完成后继续。", Metadata: map[string]any{
+			"child_run_id": startedID, "child_status": "pending", "waiting_children": true,
+		}}, nil
+	}
 	if t.lifecycle != nil && t.parentRunID > 0 {
 		startedID, startErr := t.lifecycle.StartChild(ctx, childSpec)
 		if startErr != nil {

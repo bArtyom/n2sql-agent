@@ -10,6 +10,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/agentrun"
 	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
+	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 )
 
 // PersistentChildRunLifecycle records the synchronous child Agent as a
@@ -25,6 +26,8 @@ func NewPersistentChildRunLifecycle(store agentrun.ChildRunStore) *PersistentChi
 }
 
 var _ agentruntime.ChildRunLifecycle = (*PersistentChildRunLifecycle)(nil)
+
+var _ agentruntime.AsyncChildRunLifecycle = (*PersistentChildRunLifecycle)(nil)
 
 type persistentChildCheckpointStore interface {
 	Get(context.Context, string, int64) (agentrun.Run, error)
@@ -54,6 +57,51 @@ func (l *PersistentChildRunLifecycle) StartChild(ctx context.Context, spec agent
 		return "", err
 	}
 	return run.RunID, nil
+}
+
+func (l *PersistentChildRunLifecycle) EnqueueChild(ctx context.Context, spec agentruntime.ChildRunSpec) (string, bool, agent.ToolResult, error) {
+	if l == nil || l.store == nil {
+		return "", false, agent.ToolResult{}, agentrun.ErrInvalidRun
+	}
+	store, ok := l.store.(agentrun.AsyncChildRunStore)
+	if !ok || spec.ParentRunID <= 0 || spec.KnowledgeBaseID <= 0 || strings.TrimSpace(spec.RunID) == "" || strings.TrimSpace(spec.Question) == "" {
+		return "", false, agent.ToolResult{}, agentrun.ErrInvalidRun
+	}
+	snapshot, err := json.Marshal(struct {
+		Request ChatRequest `json:"request"`
+	}{Request: ChatRequest{
+		Message: spec.Question, RunID: spec.RunID, ParentRunDatabaseID: spec.ParentRunID,
+		ParentRunPublicID: spec.ParentRunPublicID, DocumentIDs: append([]int64(nil), spec.DocumentIDs...),
+		QueryRewrite: spec.QueryRewrite, TopK: spec.TopK, KeywordThreshold: spec.KeywordThreshold, ChildMode: true,
+	}})
+	if err != nil {
+		return "", false, agent.ToolResult{}, fmt.Errorf("encode async child run snapshot: %w", err)
+	}
+	run, err := store.CreatePendingChild(ctx, agentrun.ChildCreateInput{RunID: spec.RunID, ParentRunID: spec.ParentRunID, KnowledgeBaseID: spec.KnowledgeBaseID, Request: snapshot})
+	if err != nil {
+		return "", false, agent.ToolResult{}, err
+	}
+	if !agentrun.IsTerminalStatus(run.Status) {
+		return run.RunID, false, agent.ToolResult{}, nil
+	}
+	result := agent.ToolResult{Metadata: map[string]any{"child_run_id": run.RunID, "child_status": string(run.Status)}}
+	if len(run.Response) > 0 {
+		var payload struct {
+			Answer  string             `json:"answer"`
+			Sources []retrieval.Result `json:"sources"`
+			Partial bool               `json:"partial"`
+		}
+		if err := json.Unmarshal(run.Response, &payload); err != nil {
+			return "", false, agent.ToolResult{}, fmt.Errorf("decode async child response: %w", err)
+		}
+		result.Content = payload.Answer
+		result.Metadata["sources"] = payload.Sources
+		result.Metadata["partial_result"] = payload.Partial
+	}
+	if run.Status == agentrun.StatusFailed && strings.TrimSpace(result.Content) == "" {
+		result.Content = fmt.Sprintf("子 Agent 已失败：%s", run.ErrorMessage)
+	}
+	return run.RunID, true, result, nil
 }
 
 func (l *PersistentChildRunLifecycle) FinishChild(ctx context.Context, spec agentruntime.ChildRunSpec, result agent.ToolResult, runErr error) error {

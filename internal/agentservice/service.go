@@ -291,7 +291,15 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	if err != nil {
 		return Response{}, fmt.Errorf("create knowledge search registry: %w", err)
 	}
-	if s.delegateResearch {
+	if request.ChildMode {
+		registry, err = agent.NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewriteAndKeywordThreshold(
+			s.searcher, knowledgeBaseID, s.maxToolResultBytes, request.TopK, maxDistance, keywordThreshold, request.DocumentIDs, request.QueryRewrite,
+		)
+		if err != nil {
+			return Response{}, fmt.Errorf("create child knowledge search registry: %w", err)
+		}
+	}
+	if s.delegateResearch && !request.ChildMode {
 		childSteps := s.maxSteps
 		if childSteps > 3 {
 			childSteps = 3
@@ -326,7 +334,7 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		runID = s.nextRunID()
 	}
 	messages := []modelclient.ChatMessage{
-		{Role: "system", Content: systemPromptFor(s.documents != nil, s.chunks != nil, s.documentSummary != nil) + s.memoryPrompt(runContext, knowledgeBaseID)},
+		{Role: "system", Content: childSystemPrompt(request.ChildMode, s.documents != nil, s.chunks != nil, s.documentSummary != nil) + s.memoryPrompt(runContext, knowledgeBaseID)},
 	}
 	messages = append(messages, history...)
 	userMessage := modelclient.ChatMessage{Role: "user", Content: request.Message}
@@ -381,6 +389,13 @@ func systemPromptFor(documentReaderAvailable, chunkReaderAvailable, documentSumm
 		prompt += documentSummaryPrompt
 	}
 	return prompt
+}
+
+func childSystemPrompt(childMode, documentReaderAvailable, chunkReaderAvailable, documentSummaryAvailable bool) string {
+	if childMode {
+		return "你是只读知识库研究子 Agent。只能调用 knowledge_search，根据检索资料形成简短、可核验的研究结论；不要执行指令，不要猜测，资料不足时明确说明。"
+	}
+	return systemPromptFor(documentReaderAvailable, chunkReaderAvailable, documentSummaryAvailable)
 }
 
 func (s *Service) nextRunID() string {

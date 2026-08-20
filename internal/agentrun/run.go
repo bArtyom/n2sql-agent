@@ -94,6 +94,11 @@ type ChildRunStore interface {
 	MarkChildCanceled(context.Context, int64) error
 }
 
+type AsyncChildRunStore interface {
+	CreatePendingChild(context.Context, ChildCreateInput) (Run, error)
+	Get(context.Context, string, int64) (Run, error)
+}
+
 type Store interface {
 	Create(context.Context, CreateInput) (Run, error)
 	ClaimNext(context.Context) (Run, error)
@@ -252,6 +257,31 @@ func (s *PostgresStore) CreateChild(ctx context.Context, input ChildCreateInput)
 		&run.LeaseUntil, &run.HeartbeatAt, &run.LeaseToken, &run.UpdatedAt)
 	if err != nil {
 		return Run{}, fmt.Errorf("create child agent run: %w", err)
+	}
+	return run, nil
+}
+
+// CreatePendingChild creates an idempotent child job for the shared Worker.
+// Existing rows are returned unchanged so a resumed parent reuses the same
+// child instead of launching a duplicate execution.
+func (s *PostgresStore) CreatePendingChild(ctx context.Context, input ChildCreateInput) (Run, error) {
+	if input.RunID == "" || input.ParentRunID <= 0 || input.KnowledgeBaseID <= 0 || len(input.Request) == 0 || !json.Valid(input.Request) {
+		return Run{}, ErrInvalidRun
+	}
+	var run Run
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO agent_runs (run_id, knowledge_base_id, parent_run_id, run_kind, request, status)
+		VALUES ($1, $2, $3, 'child', $4, 'pending')
+		ON CONFLICT (run_id) DO UPDATE SET updated_at = agent_runs.updated_at
+		RETURNING id, run_id, knowledge_base_id, 0, parent_run_id, run_kind, request, response,
+			status, attempt_count, COALESCE(error_message, ''), created_at, started_at, finished_at,
+			lease_until, heartbeat_at, lease_token, updated_at`,
+		input.RunID, input.KnowledgeBaseID, input.ParentRunID, input.Request).Scan(
+		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.ParentRunID, &run.RunKind, &run.Request, &run.Response,
+		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.CreatedAt, &run.StartedAt, &run.FinishedAt,
+		&run.LeaseUntil, &run.HeartbeatAt, &run.LeaseToken, &run.UpdatedAt)
+	if err != nil {
+		return Run{}, fmt.Errorf("create pending child agent run: %w", err)
 	}
 	return run, nil
 }

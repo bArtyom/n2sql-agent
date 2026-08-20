@@ -133,14 +133,16 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 
 		executionContext, stopRun := context.WithCancel(ctx)
 		defer stopRun()
-		if err := hub.RegisterCancel(run.RunID, stopRun); err != nil {
-			return fmt.Errorf("register agent run cancel: %w", err)
-		}
-		defer func() {
-			if err := hub.Finish(run.RunID); err != nil && !errors.Is(err, agentstream.ErrRunNotFound) {
-				slog.WarnContext(ctx, "agent_stream_finish_failed", "run_id", run.RunID, "error", err)
+		if !request.ChildMode {
+			if err := hub.RegisterCancel(run.RunID, stopRun); err != nil {
+				return fmt.Errorf("register agent run cancel: %w", err)
 			}
-		}()
+			defer func() {
+				if err := hub.Finish(run.RunID); err != nil && !errors.Is(err, agentstream.ErrRunNotFound) {
+					slog.WarnContext(ctx, "agent_stream_finish_failed", "run_id", run.RunID, "error", err)
+				}
+			}()
+		}
 
 		transportEventNumber := 0
 		publish := func(eventType string, value any) error {
@@ -161,9 +163,15 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 		}
 		emit := func(event agent.Event) error {
 			event.RunID = run.RunID
+			if request.ChildMode && request.ParentRunPublicID != "" {
+				event.RunID = request.ParentRunPublicID
+			}
 			event.Version = agent.EventSchemaVersion
 			if sink != nil {
 				return sink(event)
+			}
+			if request.ChildMode {
+				return nil
 			}
 			return hub.PublishAgent(event)
 		}
@@ -177,49 +185,58 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 		started := time.Now()
 		var response agentservice.Response
 		var replayed bool
-		err := withConversationSummaryLock(executionContext, conversations, run.KnowledgeBaseID, request.ConversationID, func() error {
-			if snapshot.IdempotencyKey != "" {
-				stored, found, err := loadIdempotentResponse(executionContext, conversations, run.KnowledgeBaseID, request.ConversationID, snapshot.IdempotencyKey, snapshot.RequestHash)
+		var err error
+		if request.ChildMode {
+			response, err = answerer.AnswerWithEvents(executionContext, run.KnowledgeBaseID, request, emit)
+		} else {
+			err = withConversationSummaryLock(executionContext, conversations, run.KnowledgeBaseID, request.ConversationID, func() error {
+				if snapshot.IdempotencyKey != "" {
+					stored, found, err := loadIdempotentResponse(executionContext, conversations, run.KnowledgeBaseID, request.ConversationID, snapshot.IdempotencyKey, snapshot.RequestHash)
+					if err != nil {
+						return err
+					}
+					if found {
+						replayed = true
+						response = stored
+						return publish("conversation_replayed", map[string]any{"response": response})
+					}
+				}
+				if err := loadConversationHistory(executionContext, conversations, run.KnowledgeBaseID, &request); err != nil {
+					return err
+				}
+				var err error
+				response, err = answerer.AnswerWithEvents(executionContext, run.KnowledgeBaseID, request, emit)
 				if err != nil {
 					return err
 				}
-				if found {
-					replayed = true
-					response = stored
-					return publish("conversation_replayed", map[string]any{"response": response})
-				}
-			}
-			if err := loadConversationHistory(executionContext, conversations, run.KnowledgeBaseID, &request); err != nil {
-				return err
-			}
-			var err error
-			response, err = answerer.AnswerWithEvents(executionContext, run.KnowledgeBaseID, request, emit)
-			if err != nil {
-				return err
-			}
-			assistantMessageID, err := saveConversationExchange(executionContext, conversations, run.KnowledgeBaseID, request, response)
-			if err != nil {
-				return err
-			}
-			if err := saveConversationSummary(executionContext, conversations, run.KnowledgeBaseID, request, response); err != nil {
-				slog.WarnContext(executionContext, "conversation_summary_save_failed", "run_id", run.RunID, "error", err)
-			}
-			if snapshot.IdempotencyKey != "" {
-				if err := saveIdempotentResponse(executionContext, conversations, run.KnowledgeBaseID, request.ConversationID, snapshot.IdempotencyKey, snapshot.RequestHash, response); err != nil {
-					slog.WarnContext(executionContext, "conversation_idempotent_response_save_failed", "run_id", run.RunID, "error", err)
-				}
-			}
-			if request.ConversationID != 0 {
-				if err := publish("conversation_saved", map[string]any{
-					"conversation_id":      request.ConversationID,
-					"assistant_message_id": assistantMessageID,
-				}); err != nil {
+				assistantMessageID, err := saveConversationExchange(executionContext, conversations, run.KnowledgeBaseID, request, response)
+				if err != nil {
 					return err
 				}
-			}
-			return nil
-		})
+				if err := saveConversationSummary(executionContext, conversations, run.KnowledgeBaseID, request, response); err != nil {
+					slog.WarnContext(executionContext, "conversation_summary_save_failed", "run_id", run.RunID, "error", err)
+				}
+				if snapshot.IdempotencyKey != "" {
+					if err := saveIdempotentResponse(executionContext, conversations, run.KnowledgeBaseID, request.ConversationID, snapshot.IdempotencyKey, snapshot.RequestHash, response); err != nil {
+						slog.WarnContext(executionContext, "conversation_idempotent_response_save_failed", "run_id", run.RunID, "error", err)
+					}
+				}
+				if request.ConversationID != 0 {
+					if err := publish("conversation_saved", map[string]any{
+						"conversation_id":      request.ConversationID,
+						"assistant_message_id": assistantMessageID,
+					}); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+		}
 		if err != nil {
+			if errors.Is(err, agentruntime.ErrAgentWaitingChildren) {
+				_ = publish("waiting_children", map[string]any{"run_id": run.RunID})
+				return err
+			}
 			if !replayed {
 				message, _ := knowledgeBaseAgentChatError(err)
 				_ = publish("error", map[string]string{"error": message})

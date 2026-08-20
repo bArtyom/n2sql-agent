@@ -60,6 +60,8 @@ type ChatRequest struct {
 	CachedSummary       *CachedHistorySummary           `json:"-"`
 	RecoveryCheckpoints []agentrun.ToolCheckpoint       `json:"-"`
 	CheckpointSink      agentruntime.ToolCheckpointSink `json:"-"`
+	ChildMode           bool                            `json:"child_mode,omitempty"`
+	ParentRunPublicID   string                          `json:"parent_run_public_id,omitempty"`
 }
 
 type HistorySummaryStats struct {
