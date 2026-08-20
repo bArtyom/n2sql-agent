@@ -104,6 +104,8 @@ type AgentEvent = {
   documentInfo?: AgentDocument | null;
   pending?: boolean;
   taskID?: string;
+  childRunID?: string;
+  childEventType?: string;
   status: "running" | "done" | "error";
 };
 type AgentRunTree = {
@@ -1906,7 +1908,7 @@ function recordAgentEvent(
   detail = "",
   step?: number,
   status: AgentEvent["status"] = "done",
-  extra: Pick<AgentEvent, "toolCallID" | "arguments" | "resultSummary" | "pending" | "taskID"> = {},
+  extra: Pick<AgentEvent, "toolCallID" | "arguments" | "resultSummary" | "pending" | "taskID" | "childRunID" | "childEventType"> = {},
 ) {
   answer.agentEvents ??= [];
   answer.agentEvents.push({ type, step, label, detail: detail.slice(0, 140), status, ...extra });
@@ -1996,6 +1998,24 @@ function finishLastAgentToolEvent(
     latest.taskID = options.taskID;
     if (options.documents?.length) latest.documents = options.documents;
     if (options.documentInfo) latest.documentInfo = options.documentInfo;
+  }
+}
+
+function childEventState(eventType: string): AgentEvent["status"] {
+  if (eventType === "run_failed" || eventType === "run_canceled") return "error";
+  if (eventType === "run_started" || eventType === "step_started" || eventType === "tool_called" || eventType === "reasoning_delta" || eventType === "message_delta") return "running";
+  return "done";
+}
+
+function childEventLabel(eventType: string, toolName: string) {
+  if (toolName) return `子 Agent：${displayAgentToolName(toolName)}`;
+  switch (eventType) {
+    case "run_started": return "子 Agent 开始运行";
+    case "run_finished": return "子 Agent 完成";
+    case "run_failed": return "子 Agent 运行失败";
+    case "run_canceled": return "子 Agent 已取消";
+    case "step_started": return "子 Agent 分析问题";
+    default: return "子 Agent 执行中";
   }
 }
 
@@ -2186,10 +2206,15 @@ function consumeSSEBlock(block: string, answerIndex: number) {
         {
           const childEventType = dataString("child_event_type");
           const toolName = dataString("tool_name");
-          const detail = toolName
-            ? `${toolFinishedLabel(toolName)} · ${childEventType || "子 Agent 事件"}`
-            : (childEventType || "子 Agent 事件");
-          recordAgentEvent(answer, event, `子 Agent：${detail}`, `运行 ${dataString("child_run_id") || "进行中"}`, payload.step_number, "done");
+          const childRunID = dataString("child_run_id");
+          const status = childEventState(childEventType);
+          const resultSummary = dataString("result_summary");
+          const detail = resultSummary || (childRunID ? `运行 ${childRunID}` : "异步子任务");
+          recordAgentEvent(answer, event, childEventLabel(childEventType, toolName), detail, payload.step_number, status, {
+            childRunID: childRunID || undefined,
+            childEventType: childEventType || undefined,
+            resultSummary: resultSummary || undefined,
+          });
         }
         break;
       case "tool_finished":
@@ -2688,7 +2713,7 @@ onUnmounted(() => {
                     <small v-if="row.node.error">{{ row.node.error }}</small>
                   </div>
                 </details>
-                <div v-for="(trace, traceIndex) in message.agentEvents" :key="agentTraceKey(trace, traceIndex)" class="agent-trace-row" :class="`agent-trace-row--${trace.status}`">
+                <div v-for="(trace, traceIndex) in message.agentEvents" :key="agentTraceKey(trace, traceIndex)" class="agent-trace-row" :class="[`agent-trace-row--${trace.status}`, { 'agent-trace-row--child': trace.type === 'child_event' }]">
                   <span class="agent-trace-marker">{{ trace.status === 'done' ? '✓' : trace.status === 'error' ? '!' : '·' }}</span>
                   <button
                     v-if="isAgentTraceExpandable(trace)"
@@ -2704,6 +2729,7 @@ onUnmounted(() => {
                   <span class="agent-trace-label">{{ trace.label }}</span>
                   <span class="agent-trace-copy">
                     <small v-if="trace.detail">{{ trace.detail }}</small>
+                    <small v-if="trace.childRunID" class="agent-trace-child-id">{{ trace.childRunID }}</small>
                     <template v-if="isAgentTraceExpanded(message, trace, traceIndex)">
                       <small v-if="trace.arguments">参数：{{ trace.arguments }}</small>
                       <small v-if="trace.resultSummary && trace.resultSummary !== trace.detail">结果：{{ trace.resultSummary }}</small>
