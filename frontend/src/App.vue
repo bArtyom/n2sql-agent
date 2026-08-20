@@ -53,6 +53,7 @@ type ChatMessage = {
   mode?: "agent";
   retryable?: boolean;
   runID?: string;
+  childRunTree?: AgentRunTree;
   lastEventID?: string;
   streamGap?: boolean;
   seenEventIDs?: Set<string>;
@@ -104,6 +105,16 @@ type AgentEvent = {
   pending?: boolean;
   taskID?: string;
   status: "running" | "done" | "error";
+};
+type AgentRunTree = {
+  run_id: string;
+  parent_run_id?: string;
+  run_kind: string;
+  status: string;
+  attempt_count?: number;
+  error?: string;
+  response?: { answer?: string };
+  children?: AgentRunTree[];
 };
 type AgentRunStats = {
   status?: string;
@@ -1657,6 +1668,42 @@ async function fetchAgentRunStatus(answer: ChatMessage): Promise<AgentRunStatusP
   return await statusResponse.json() as AgentRunStatusPayload;
 }
 
+async function loadAgentRunTree(answer: ChatMessage) {
+  if (!selectedKnowledgeBaseId.value || !answer.runID) return;
+  try {
+    const response = await fetch(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/agent-runs/${encodeURIComponent(answer.runID)}/children`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) return;
+    answer.childRunTree = await response.json() as AgentRunTree;
+  } catch {
+    // 执行树只是诊断信息，加载失败不能覆盖已经生成的答案。
+  }
+}
+
+function childRunTreeRows(message: ChatMessage) {
+  const rows: { node: AgentRunTree; depth: number }[] = [];
+  const visit = (nodes: AgentRunTree[] | undefined, depth: number) => {
+    for (const node of nodes ?? []) {
+      rows.push({ node, depth });
+      visit(node.children, depth + 1);
+    }
+  };
+  visit(message.childRunTree?.children, 0);
+  return rows;
+}
+
+function childRunStatusLabel(status: string) {
+  switch (status) {
+    case "succeeded": return "已完成";
+    case "failed": return "失败";
+    case "canceled": return "已取消";
+    case "running": return "运行中";
+    default: return "等待中";
+  }
+}
+
 async function recoverPersistedAgentResponse(answer: ChatMessage): Promise<boolean> {
   if (!selectedKnowledgeBaseId.value || !answer.runID) return false;
   for (let attempt = 0; attempt < 60; attempt += 1) {
@@ -1699,6 +1746,7 @@ function applyPersistedAgentResponse(answer: ChatMessage, payload: AgentRunStatu
   answer.activity = "已从持久化结果恢复";
   answer.status = payload.status === "canceled" ? "stopped" : payload.status === "failed" ? "error" : "done";
   answer.retryable = answer.status === "error";
+  void loadAgentRunTree(answer);
 }
 
 // 页面刷新后尝试恢复上次未完成的 Agent 运行（仅标准 Agent 模式）。
@@ -2241,6 +2289,7 @@ function consumeSSEBlock(block: string, answerIndex: number) {
         answer.activity = "";
         answer.status = "done";
         answer.retryable = false;
+        void loadAgentRunTree(answer);
         break;
       case "conversation_saved":
         if (typeof eventData.assistant_message_id === "number") answer.id = eventData.assistant_message_id;
@@ -2624,6 +2673,21 @@ onUnmounted(() => {
               </div>
               <div v-if="message.role === 'assistant' && message.agentEvents?.length" class="agent-trace">
                 <div class="agent-trace-head"><span>Agent 运行轨迹</span><small>{{ agentTraceStatus(message) || agentTraceSummary(message) }}</small></div>
+                <details v-if="childRunTreeRows(message).length" class="agent-child-tree">
+                  <summary>子 Agent 执行树 <small>{{ childRunTreeRows(message).length }} 个任务</small></summary>
+                  <div
+                    v-for="row in childRunTreeRows(message)"
+                    :key="row.node.run_id"
+                    class="agent-child-tree-row"
+                    :style="{ paddingLeft: `${row.depth * 16 + 6}px` }"
+                  >
+                    <span class="agent-child-tree-branch" aria-hidden="true">↳</span>
+                    <strong>{{ row.node.run_kind === "child" ? "子 Agent" : "Agent" }}</strong>
+                    <code>{{ row.node.run_id }}</code>
+                    <span class="agent-child-tree-status">{{ childRunStatusLabel(row.node.status) }}</span>
+                    <small v-if="row.node.error">{{ row.node.error }}</small>
+                  </div>
+                </details>
                 <div v-for="(trace, traceIndex) in message.agentEvents" :key="agentTraceKey(trace, traceIndex)" class="agent-trace-row" :class="`agent-trace-row--${trace.status}`">
                   <span class="agent-trace-marker">{{ trace.status === 'done' ? '✓' : trace.status === 'error' ? '!' : '·' }}</span>
                   <button

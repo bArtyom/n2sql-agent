@@ -53,7 +53,7 @@
 - 旧 `internal/multiagent`、`internal/a2a`、相关路由、任务存储、后台循环、指标和配置已清理；新增迁移会删除已有数据库中的 `a2a_tasks` 表。
 - 动态子 Agent 第一阶段已完成：`agent_runs` 增加 `parent_run_id` 与 `run_kind`；标准 Worker 会把父 Run 数据库 ID传入 Agent 请求，`delegate_research` 可同步创建并持久化 child Run，保存子 Agent 结果并更新 succeeded/failed/canceled 状态。父工具完成事件会透传有界的 child Run 标识、状态、步数和事件摘要；子 Run 当前仍在父 Run 的工具调用内执行，独立事件流和独立 Worker 调度后置。
 - 动态子 Agent 并发调度已补齐：Agent Engine 原有同轮只读工具并行执行能力继续保留；新增进程级共享 `BoundedChildScheduler`，所有父 Run 的子 Agent 共用最多 3 个执行槽位，槽位满时等待，父 context 取消时等待中的子任务立即退出，避免无限 goroutine 和模型并发失控。子 Run 仍保留 PostgreSQL 持久化，暂不拆成独立数据库 Worker。
-- 动态子 Agent 事件关联已补齐：子 Agent 关键事件通过 `child_event` 进入父 Run 的现有事件存储、Redis/SSE 和前端轨迹，事件携带 `child_run_id`、`parent_run_id`、子事件类型和有界摘要；不会把完整工具结果重复写入父事件。独立 child SSE 订阅和完整树状折叠仍后置。
+- 动态子 Agent 事件关联已补齐：子 Agent 关键事件通过 `child_event` 进入父 Run 的现有事件存储、Redis/SSE 和前端轨迹，事件携带 `child_run_id`、`parent_run_id`、子事件类型和有界摘要；不会把完整工具结果重复写入父事件。前端不新增 child SSE，而是在父 Run 结束后拉取安全的父子执行树并用折叠视图展示。
 - 父子 Run 查询已补齐：新增 `GET /api/knowledge-bases/{id}/agent-runs/{runID}/children`，按 `parent_run_id` 递归返回最多 8 层安全执行树，包含状态、尝试次数、时间、错误和最终 response，不暴露请求快照、租约 token；数据库查询按知识库隔离。
 - 子 Agent checkpoint 复用已补齐：持久化 child Run 使用“父 Run + 研究问题”生成稳定 ID，重试时通过同一个 child Run 读取最新 attempt 的 `agent_run_checkpoints`；子 Agent Engine 复用安全只读工具结果并继续模型决策，checkpoint 仍使用现有表、临时大结果文件和参数哈希策略，不新增存储体系。
 - 前端已支持会话、引用卡片与懒加载原文、检索统计、Agent 工具轨迹折叠、断线恢复、正文分页预览、固定起步问题和按需生成追问建议。
@@ -88,7 +88,7 @@
 
 后续按双主线推进：Agent Runtime 先读 DeerFlow，再用 WeKnora 校准工具、会话和用户可见交互；RAG 以 WeKnora 的文档处理、混合检索、引用和知识库交互为主。每轮选择一个小而完整的功能切片，完成后端链路、必要前端反馈、测试和学习记录；不要因为参考仓库已有复杂能力就直接扩展成完整协议或大规模系统。
 
-下一轮候选：把父子 Run 树查询接入前端折叠视图，并补充子 Agent 失败后的父 Agent 重试/恢复场景测试。
+下一轮候选：补充子 Agent 失败后的父 Agent 重试/恢复场景测试，并验证父子执行树在历史消息恢复时的展示。
 
 ## 交付要求
 
