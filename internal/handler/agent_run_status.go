@@ -48,6 +48,20 @@ func NewAgentRunStatus(reader agentrun.Reader) http.Handler {
 			"finished_at":   run.FinishedAt,
 			"updated_at":    run.UpdatedAt,
 		}
+		if childReader, ok := reader.(agentrun.ChildReader); ok {
+			if children, childErr := childReader.ListChildren(r.Context(), run.ID, run.KnowledgeBaseID); childErr == nil {
+				items := make([]map[string]any, 0, len(children))
+				for _, child := range children {
+					items = append(items, map[string]any{
+						"run_id":        child.RunID,
+						"status":        child.Status,
+						"attempt_count": child.AttemptCount,
+						"updated_at":    child.UpdatedAt,
+					})
+				}
+				payload["children"] = items
+			}
+		}
 		if len(run.Response) > 0 {
 			var response any
 			if err := json.Unmarshal(run.Response, &response); err == nil {

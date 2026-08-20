@@ -13,12 +13,17 @@ import (
 )
 
 type agentRunReaderStub struct {
-	run agentrun.Run
-	err error
+	run      agentrun.Run
+	err      error
+	children []agentrun.Run
 }
 
 func (s agentRunReaderStub) Get(context.Context, string, int64) (agentrun.Run, error) {
 	return s.run, s.err
+}
+
+func (s agentRunReaderStub) ListChildren(context.Context, int64, int64) ([]agentrun.Run, error) {
+	return s.children, nil
 }
 
 func TestAgentRunStatusDoesNotExposeRequestSnapshot(t *testing.T) {
@@ -65,5 +70,26 @@ func TestAgentRunStatusScopesNotFound(t *testing.T) {
 
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
+func TestAgentRunStatusIncludesSafeChildSummaries(t *testing.T) {
+	created := time.Date(2026, time.August, 20, 12, 0, 0, 0, time.UTC)
+	endpoint := handler.NewAgentRunStatus(agentRunReaderStub{
+		run:      agentrun.Run{ID: 10, RunID: "parent-1", KnowledgeBaseID: 7, Status: agentrun.StatusWaitingChildren, UpdatedAt: created},
+		children: []agentrun.Run{{RunID: "child-1", Status: agentrun.StatusRunning, AttemptCount: 1, ErrorMessage: "secret provider detail", UpdatedAt: created}},
+	})
+	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/7/agent-runs/parent-1", nil)
+	request.SetPathValue("id", "7")
+	request.SetPathValue("runID", "parent-1")
+	response := httptest.NewRecorder()
+
+	endpoint.ServeHTTP(response, request)
+	body := response.Body.String()
+	if !strings.Contains(body, `"status":"waiting_children"`) || !strings.Contains(body, `"run_id":"child-1"`) {
+		t.Fatalf("body = %q, want parent and child status", body)
+	}
+	if strings.Contains(body, "secret provider detail") {
+		t.Fatalf("body = %q, must not expose child error details", body)
 	}
 }

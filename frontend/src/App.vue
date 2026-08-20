@@ -1632,6 +1632,10 @@ async function resumeAgentStream(answer: ChatMessage, answerIndex: number) {
       answer.activity = "中间事件已过期，正在订阅最新进度…";
       const tailResult = await connectAgentStream(answer, answerIndex, false);
       if (tailResult === "completed") return;
+    } else if (statusPayload?.status === "waiting_children") {
+      const count = statusPayload.children?.length ?? 0;
+      answer.activity = count > 0 ? `正在等待 ${count} 个子 Agent 完成…` : "正在等待子 Agent 完成…";
+      await loadAgentRunTree(answer);
     }
   }
   if (await recoverPersistedAgentResponse(answer)) return;
@@ -1658,6 +1662,7 @@ type AgentRunStatusPayload = {
   status?: string;
   error?: string;
   response?: Record<string, unknown>;
+  children?: { run_id?: string; status?: string; attempt_count?: number; updated_at?: string }[];
 };
 
 async function fetchAgentRunStatus(answer: ChatMessage): Promise<AgentRunStatusPayload | null> {
@@ -1715,6 +1720,11 @@ async function recoverPersistedAgentResponse(answer: ChatMessage): Promise<boole
     });
     if (!statusResponse.ok) return false;
     const statusPayload = await statusResponse.json() as AgentRunStatusPayload;
+    if (statusPayload.status === "waiting_children") {
+      const count = statusPayload.children?.length ?? 0;
+      answer.activity = count > 0 ? `正在等待 ${count} 个子 Agent 完成…` : "正在等待子 Agent 完成…";
+      if (attempt === 0 || attempt % 4 === 0) void loadAgentRunTree(answer);
+    }
     if (statusPayload.response && typeof statusPayload.response === "object") {
       applyPersistedAgentResponse(answer, statusPayload);
       return true;
