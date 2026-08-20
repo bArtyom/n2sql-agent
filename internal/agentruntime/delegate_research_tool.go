@@ -24,7 +24,9 @@ const (
 	delegateResearchToolName = "delegate_research"
 	maxDelegateQuestionBytes = 8000
 	maxDelegateAnswerBytes   = 12000
-	DefaultChildAgentTimeout = 5 * time.Minute
+	// Keep the default suitable for deep research while still guaranteeing a
+	// terminal state. Individual model/tool calls remain separately bounded.
+	DefaultChildAgentTimeout = 30 * time.Minute
 )
 
 var (

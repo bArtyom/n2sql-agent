@@ -85,6 +85,7 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 		if markErr := r.store.MarkSucceeded(context.WithoutCancel(ctx), run.ID, run.LeaseToken); markErr != nil {
 			return true, markErr
 		}
+		r.resumeParentAfterChild(ctx, run)
 		r.cleanupTerminalCheckpoints(ctx, run.ID)
 		return true, nil
 	}
@@ -96,6 +97,7 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 		if markErr := r.store.MarkCanceled(context.WithoutCancel(ctx), run.ID, run.LeaseToken); markErr != nil {
 			return true, markErr
 		}
+		r.resumeParentAfterChild(ctx, run)
 		r.cleanupTerminalCheckpoints(ctx, run.ID)
 		return true, nil
 	}
@@ -106,9 +108,28 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 	if markErr := r.store.MarkFailed(context.WithoutCancel(ctx), run.ID, message, run.LeaseToken); markErr != nil {
 		return true, markErr
 	}
+	r.resumeParentAfterChild(ctx, run)
 	r.cleanupTerminalCheckpoints(ctx, run.ID)
 	slog.ErrorContext(ctx, "agent_run_failed", "run_id", run.RunID, "duration_ms", time.Since(started).Milliseconds(), "error", err)
 	return true, nil
+}
+
+func (r *Runner) resumeParentAfterChild(ctx context.Context, run Run) {
+	if run.RunKind != KindChild || run.ParentRunID <= 0 {
+		return
+	}
+	coordinator, ok := r.store.(ParentRunCoordinator)
+	if !ok {
+		return
+	}
+	resumed, err := coordinator.ResumeParentIfChildrenTerminal(context.WithoutCancel(ctx), run.ParentRunID)
+	if err != nil {
+		slog.WarnContext(ctx, "agent_parent_resume_failed", "child_run_id", run.RunID, "parent_run_id", run.ParentRunID, "error", err)
+		return
+	}
+	if resumed {
+		slog.InfoContext(ctx, "agent_parent_requeued", "child_run_id", run.RunID, "parent_run_id", run.ParentRunID)
+	}
 }
 
 func (r *Runner) cleanupTerminalCheckpoints(ctx context.Context, runID int64) {

@@ -14,11 +14,12 @@ import (
 type Status string
 
 const (
-	StatusPending   Status = "pending"
-	StatusRunning   Status = "running"
-	StatusSucceeded Status = "succeeded"
-	StatusFailed    Status = "failed"
-	StatusCanceled  Status = "canceled"
+	StatusPending         Status = "pending"
+	StatusRunning         Status = "running"
+	StatusWaitingChildren Status = "waiting_children"
+	StatusSucceeded       Status = "succeeded"
+	StatusFailed          Status = "failed"
+	StatusCanceled        Status = "canceled"
 )
 
 type Kind string
@@ -38,6 +39,10 @@ var (
 const defaultLeaseDuration = 5 * time.Minute
 const maxAgentRunAttempts = 3
 const maxCheckpointArgumentsBytes = 16 * 1024
+
+func IsTerminalStatus(status Status) bool {
+	return status == StatusSucceeded || status == StatusFailed || status == StatusCanceled
+}
 
 func shouldRetryExpiredRun(attemptCount int) bool {
 	return attemptCount < maxAgentRunAttempts
@@ -97,6 +102,14 @@ type Store interface {
 	MarkSucceeded(context.Context, int64, string) error
 	MarkFailed(context.Context, int64, string, string) error
 	MarkCanceled(context.Context, int64, string) error
+}
+
+// ParentRunCoordinator is implemented by durable stores that can park a
+// parent while independent children run and put it back in the pending queue
+// once every child has reached a terminal state.
+type ParentRunCoordinator interface {
+	MarkWaitingChildren(context.Context, int64, string) error
+	ResumeParentIfChildrenTerminal(context.Context, int64) (bool, error)
 }
 
 // Reader exposes safe run metadata without exposing the persisted request
@@ -592,4 +605,66 @@ func (s *PostgresStore) markFinished(ctx context.Context, id int64, leaseToken s
 		return fmt.Errorf("mark agent run %s: no running row", status)
 	}
 	return nil
+}
+
+func (s *PostgresStore) MarkWaitingChildren(ctx context.Context, id int64, leaseToken string) error {
+	if id <= 0 || strings.TrimSpace(leaseToken) == "" {
+		return ErrInvalidRun
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE agent_runs
+		SET status = 'waiting_children', lease_until = NULL, lease_token = NULL,
+			heartbeat_at = NULL, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1 AND status = 'running' AND lease_token = $2`, id, leaseToken)
+	if err != nil {
+		return fmt.Errorf("mark agent run waiting for children: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return ErrRunNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) ResumeParentIfChildrenTerminal(ctx context.Context, parentID int64) (bool, error) {
+	if parentID <= 0 {
+		return false, ErrInvalidRun
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin parent resume transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var status Status
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM agent_runs WHERE id = $1 FOR UPDATE`, parentID).Scan(&status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, ErrRunNotFound
+		}
+		return false, fmt.Errorf("lock parent agent run: %w", err)
+	}
+	if status != StatusWaitingChildren {
+		return false, nil
+	}
+	var unfinished bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM agent_runs
+			WHERE parent_run_id = $1
+			  AND status NOT IN ('succeeded', 'failed', 'canceled')
+		)`, parentID).Scan(&unfinished); err != nil {
+		return false, fmt.Errorf("check child agent runs: %w", err)
+	}
+	if unfinished {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE agent_runs
+		SET status = 'pending', started_at = NULL, finished_at = NULL,
+			error_message = NULL, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1 AND status = 'waiting_children'`, parentID); err != nil {
+		return false, fmt.Errorf("requeue parent agent run: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit parent agent resume: %w", err)
+	}
+	return true, nil
 }
