@@ -73,6 +73,7 @@ type Service struct {
 	profileStore       memory.ProfileStore
 	delegateResearch   bool
 	childLifecycle     agentruntime.ChildRunLifecycle
+	childScheduler     agentruntime.ChildScheduler
 	sequence           atomic.Uint64
 }
 
@@ -99,6 +100,12 @@ func (s *Service) SetDelegateResearchEnabled(enabled bool) {
 func (s *Service) SetChildRunLifecycle(lifecycle agentruntime.ChildRunLifecycle) {
 	if s != nil {
 		s.childLifecycle = lifecycle
+	}
+}
+
+func (s *Service) SetChildScheduler(scheduler agentruntime.ChildScheduler) {
+	if s != nil {
+		s.childScheduler = scheduler
 	}
 }
 
@@ -155,6 +162,7 @@ func NewServiceWithLimitsAndSummarizerAndDocumentsAndChunksAndSummary(chat model
 	if maxHistoryBytes <= 0 {
 		return nil, ErrInvalidMaxHistoryBytes
 	}
+	childScheduler, _ := agentruntime.NewBoundedChildScheduler(agentruntime.DefaultChildAgentConcurrency)
 	return &Service{
 		chat:               chat,
 		searcher:           searcher,
@@ -167,6 +175,7 @@ func NewServiceWithLimitsAndSummarizerAndDocumentsAndChunksAndSummary(chat model
 		documents:          documents,
 		chunks:             chunks,
 		documentSummary:    documentSummary,
+		childScheduler:     childScheduler,
 	}, nil
 }
 
@@ -293,6 +302,7 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		}
 		delegate.SetParentRun(request.ParentRunDatabaseID, request.RunID)
 		delegate.SetChildRunLifecycle(s.childLifecycle)
+		delegate.SetChildScheduler(s.childScheduler)
 		if err := registry.AllowAndRegister(delegate); err != nil {
 			return Response{}, fmt.Errorf("register delegate research tool: %w", err)
 		}

@@ -43,6 +43,7 @@ type DelegateResearchTool struct {
 	parentRunID       int64
 	parentRunPublicID string
 	lifecycle         ChildRunLifecycle
+	scheduler         ChildScheduler
 	sequence          atomic.Uint64
 }
 
@@ -71,6 +72,12 @@ func (t *DelegateResearchTool) SetChildRunLifecycle(lifecycle ChildRunLifecycle)
 	}
 }
 
+func (t *DelegateResearchTool) SetChildScheduler(scheduler ChildScheduler) {
+	if t != nil {
+		t.scheduler = scheduler
+	}
+}
+
 func NewDelegateResearchTool(chat modelruntime.ToolChatRunner, searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxSteps int, documentIDs []int64, queryRewrite bool, keywordThreshold float64) (*DelegateResearchTool, error) {
 	if chat == nil || searcher == nil || knowledgeBaseID <= 0 || maxResultBytes < 2 || maxSteps <= 0 {
 		return nil, ErrInvalidDelegateResearch
@@ -78,6 +85,7 @@ func NewDelegateResearchTool(chat modelruntime.ToolChatRunner, searcher retrieva
 	if err := retrieval.ValidateKeywordThreshold(keywordThreshold); err != nil {
 		return nil, ErrInvalidDelegateResearch
 	}
+	scheduler, _ := NewBoundedChildScheduler(DefaultChildAgentConcurrency)
 	return &DelegateResearchTool{
 		chat:             chat,
 		searcher:         searcher,
@@ -87,6 +95,7 @@ func NewDelegateResearchTool(chat modelruntime.ToolChatRunner, searcher retrieva
 		documentIDs:      append([]int64(nil), documentIDs...),
 		queryRewrite:     queryRewrite,
 		keywordThreshold: keywordThreshold,
+		scheduler:        scheduler,
 	}, nil
 }
 
@@ -156,28 +165,38 @@ func (t *DelegateResearchTool) Call(ctx context.Context, raw json.RawMessage) (a
 
 	var sources []retrieval.Result
 	childEvents := make([]map[string]any, 0, 8)
-	result, err := child.RunWithEvents(ctx, childRunID, childMessages, func(event agent.Event) error {
-		if len(childEvents) < 8 {
-			item := map[string]any{"type": string(event.Type), "step_number": event.StepNumber}
-			if data, ok := event.Data.(map[string]any); ok {
-				if toolName, ok := data["tool_name"].(string); ok {
-					item["tool_name"] = toolName
+	var result Result
+	runChild := func(childCtx context.Context) error {
+		var runErr error
+		result, runErr = child.RunWithEvents(childCtx, childRunID, childMessages, func(event agent.Event) error {
+			if len(childEvents) < 8 {
+				item := map[string]any{"type": string(event.Type), "step_number": event.StepNumber}
+				if data, ok := event.Data.(map[string]any); ok {
+					if toolName, ok := data["tool_name"].(string); ok {
+						item["tool_name"] = toolName
+					}
 				}
+				childEvents = append(childEvents, item)
 			}
-			childEvents = append(childEvents, item)
-		}
-		if event.Type != agent.EventToolFinished {
+			if event.Type != agent.EventToolFinished {
+				return nil
+			}
+			data, ok := event.Data.(map[string]any)
+			if !ok {
+				return nil
+			}
+			if values, ok := data["sources"].([]retrieval.Result); ok {
+				sources = append(sources, values...)
+			}
 			return nil
-		}
-		data, ok := event.Data.(map[string]any)
-		if !ok {
-			return nil
-		}
-		if values, ok := data["sources"].([]retrieval.Result); ok {
-			sources = append(sources, values...)
-		}
-		return nil
-	})
+		})
+		return runErr
+	}
+	if t.scheduler != nil {
+		err = t.scheduler.Run(ctx, runChild)
+	} else {
+		err = runChild(ctx)
+	}
 	if err != nil {
 		if t.lifecycle != nil {
 			_ = t.lifecycle.FinishChild(context.WithoutCancel(ctx), ChildRunSpec{RunID: childRunID, ParentRunID: t.parentRunID, KnowledgeBaseID: t.knowledgeBaseID, Question: input.Question}, agent.ToolResult{}, err)
