@@ -133,6 +133,7 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 
 		executionContext, stopRun := context.WithCancel(ctx)
 		defer stopRun()
+		keepStreamOpen := false
 		if request.ChildMode {
 			if err := hub.Start(run.RunID, run.KnowledgeBaseID); err != nil && !errors.Is(err, agentstream.ErrRunAlreadyStarted) {
 				return fmt.Errorf("start child agent stream: %w", err)
@@ -142,6 +143,9 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 			return fmt.Errorf("register agent run cancel: %w", err)
 		}
 		defer func() {
+			if keepStreamOpen {
+				return
+			}
 			if err := hub.Finish(run.RunID); err != nil && !errors.Is(err, agentstream.ErrRunNotFound) {
 				slog.WarnContext(ctx, "agent_stream_finish_failed", "run_id", run.RunID, "error", err)
 			}
@@ -241,6 +245,7 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 		}
 		if err != nil {
 			if errors.Is(err, agentruntime.ErrAgentWaitingChildren) {
+				keepStreamOpen = true
 				_ = publish("waiting_children", map[string]any{"run_id": run.RunID})
 				return err
 			}

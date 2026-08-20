@@ -3,12 +3,15 @@ package handler_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/bArtyom/n2sql-agent/internal/agentrun"
+	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
+	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/agentstream"
 	"github.com/bArtyom/n2sql-agent/internal/handler"
 )
@@ -58,5 +61,45 @@ func TestPersistentAgentRunSubmissionReturnsRunIDWithoutExecuting(t *testing.T) 
 	}
 	if !strings.Contains(response.Header().Get("X-Agent-Run-ID"), store.created.RunID) {
 		t.Fatalf("missing run header: %q", response.Header().Get("X-Agent-Run-ID"))
+	}
+}
+
+type waitingChildrenAnswerer struct{}
+
+func (waitingChildrenAnswerer) AnswerWithEvents(context.Context, int64, agentservice.ChatRequest, agentruntime.EventSink) (agentservice.Response, error) {
+	return agentservice.Response{}, agentruntime.ErrAgentWaitingChildren
+}
+
+func TestPersistentAgentExecutorKeepsHubOpenWhileWaitingForChildren(t *testing.T) {
+	hub := agentstream.NewHub()
+	if err := hub.Start("parent-waiting", 7); err != nil {
+		t.Fatal(err)
+	}
+	request, err := json.Marshal(agentservice.ChatRequest{Message: "研究问题", ChildMode: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := handler.NewPersistentAgentExecutorWithCheckpoint(waitingChildrenAnswerer{}, nil, hub, nil, nil, nil, nil)
+	err = executor.Execute(context.Background(), agentrun.Run{
+		ID:              1,
+		RunID:           "parent-waiting",
+		KnowledgeBaseID: 7,
+		LeaseToken:      "lease-1",
+		Request:         request,
+	}, nil)
+	if !errors.Is(err, agentruntime.ErrAgentWaitingChildren) {
+		t.Fatalf("Execute() error = %v, want waiting-children error", err)
+	}
+
+	snapshot, _, cancel, done, err := hub.Subscribe("parent-waiting", 7, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	if done {
+		t.Fatal("parent stream closed while waiting for children")
+	}
+	if len(snapshot) == 0 || snapshot[len(snapshot)-1].Type != "waiting_children" {
+		t.Fatalf("snapshot = %#v, want waiting_children event", snapshot)
 	}
 }
