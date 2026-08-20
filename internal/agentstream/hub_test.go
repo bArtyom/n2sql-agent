@@ -56,9 +56,6 @@ func TestHubAcceptsChildEventsOnParentStream(t *testing.T) {
 	if len(snapshot) != 1 || snapshot[0].Type != string(agent.EventChildEvent) {
 		t.Fatalf("snapshot = %#v, want one child event", snapshot)
 	}
-	if snapshot[0].Mode != agent.StreamModeCustom {
-		t.Fatalf("child event mode = %q, want %q", snapshot[0].Mode, agent.StreamModeCustom)
-	}
 }
 
 func TestHubAcceptsWaitingChildrenTransportEvent(t *testing.T) {
@@ -76,27 +73,6 @@ func TestHubAcceptsWaitingChildrenTransportEvent(t *testing.T) {
 	defer cancel()
 	if len(snapshot) != 1 || snapshot[0].Type != "waiting_children" {
 		t.Fatalf("snapshot = %#v, want waiting_children", snapshot)
-	}
-	if snapshot[0].Mode != agent.StreamModeValues {
-		t.Fatalf("waiting event mode = %q, want %q", snapshot[0].Mode, agent.StreamModeValues)
-	}
-}
-
-func TestHubAssignsMessageModeToTransportEvent(t *testing.T) {
-	hub := agentstream.NewHub()
-	if err := hub.Start("run-1", 7); err != nil {
-		t.Fatal(err)
-	}
-	if err := hub.Publish(agentstream.Event{ID: "event-1", RunID: "run-1", Type: "message_delta"}); err != nil {
-		t.Fatal(err)
-	}
-	snapshot, _, cancel, _, err := hub.Subscribe("run-1", 7, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cancel()
-	if len(snapshot) != 1 || snapshot[0].Mode != agent.StreamModeMessages {
-		t.Fatalf("snapshot = %#v, want one messages-mode event", snapshot)
 	}
 }
 

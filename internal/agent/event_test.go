@@ -1,26 +1,29 @@
 package agent
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
-func TestNewEventAssignsDeerFlowStreamMode(t *testing.T) {
-	tests := []struct {
-		name      string
-		eventType EventType
-		mode      StreamMode
-	}{
-		{name: "state", eventType: EventRunStarted, mode: StreamModeValues},
-		{name: "model messages", eventType: EventMessageDelta, mode: StreamModeMessages},
-		{name: "application progress", eventType: EventToolFinished, mode: StreamModeCustom},
+func TestNewEventKeepsWireEnvelopeMinimal(t *testing.T) {
+	event, err := NewEvent("event-1", "run-1", EventMessageDelta, map[string]string{"content": "回答"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			event, err := NewEvent("event-1", "run-1", test.eventType, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if event.Mode != test.mode {
-				t.Fatalf("mode = %q, want %q", event.Mode, test.mode)
-			}
-		})
+	payload, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if string(payload) == "" || containsJSONField(payload, "mode") {
+		t.Fatalf("event payload = %s, must not contain derived mode field", payload)
+	}
+}
+
+func containsJSONField(payload []byte, field string) bool {
+	var values map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &values); err != nil {
+		return false
+	}
+	_, ok := values[field]
+	return ok
 }

@@ -32,14 +32,13 @@ const (
 // Event is the small transport-neutral event envelope used by the HTTP
 // handler. Agent events and handler-only events share the same replay path.
 type Event struct {
-	Version    int              `json:"version"`
-	ID         string           `json:"id"`
-	RunID      string           `json:"run_id"`
-	Type       string           `json:"type"`
-	Mode       agent.StreamMode `json:"mode,omitempty"`
-	StepNumber int              `json:"step_number,omitempty"`
-	Data       any              `json:"data,omitempty"`
-	CreatedAt  time.Time        `json:"created_at"`
+	Version    int       `json:"version"`
+	ID         string    `json:"id"`
+	RunID      string    `json:"run_id"`
+	Type       string    `json:"type"`
+	StepNumber int       `json:"step_number,omitempty"`
+	Data       any       `json:"data,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 type run struct {
@@ -161,18 +160,10 @@ func (h *Hub) PublishAgent(event agent.Event) error {
 		ID:         event.ID,
 		RunID:      event.RunID,
 		Type:       string(event.Type),
-		Mode:       eventMode(event),
 		StepNumber: event.StepNumber,
 		Data:       event.Data,
 		CreatedAt:  event.CreatedAt,
 	})
-}
-
-func eventMode(event agent.Event) agent.StreamMode {
-	if event.Mode != "" {
-		return event.Mode
-	}
-	return event.Type.StreamMode()
 }
 
 func (h *Hub) Publish(event Event) error {
@@ -181,13 +172,6 @@ func (h *Hub) Publish(event Event) error {
 	}
 	if event.Version == 0 {
 		event.Version = EventSchemaVersion
-	}
-	if event.Mode == "" {
-		if eventType := agent.EventType(event.Type); eventType != "" {
-			event.Mode = eventType.StreamMode()
-		} else {
-			event.Mode = agent.StreamModeCustom
-		}
 	}
 	if event.Version != EventSchemaVersion || !validEventType(event.Type) {
 		return ErrInvalidEvent

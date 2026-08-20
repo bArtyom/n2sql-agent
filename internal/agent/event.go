@@ -10,18 +10,6 @@ var ErrInvalidEvent = errors.New("invalid agent event")
 
 const EventSchemaVersion = 1
 
-// StreamMode follows the three useful layers in DeerFlow's stream contract:
-// state snapshots, model message deltas, and application-defined progress.
-// The mode is transport metadata; the event Type remains the stable UI/API
-// contract used by existing consumers.
-type StreamMode string
-
-const (
-	StreamModeValues   StreamMode = "values"
-	StreamModeMessages StreamMode = "messages"
-	StreamModeCustom   StreamMode = "custom"
-)
-
 type EventType string
 
 const (
@@ -40,28 +28,15 @@ const (
 	EventChildEvent       EventType = "child_event"
 )
 
-func (eventType EventType) StreamMode() StreamMode {
-	switch eventType {
-	case EventReasoningDelta, EventMessageDelta:
-		return StreamModeMessages
-	case EventToolCalled, EventToolFinished, EventApprovalRequired, EventApprovalResolved,
-		EventApprovalExpired, EventChildEvent:
-		return StreamModeCustom
-	default:
-		return StreamModeValues
-	}
-}
-
 // Event is an observable occurrence in one Agent run.
 type Event struct {
-	Version    int        `json:"version"`
-	ID         string     `json:"id"`
-	RunID      string     `json:"run_id"`
-	Type       EventType  `json:"type"`
-	Mode       StreamMode `json:"mode,omitempty"`
-	StepNumber int        `json:"step_number,omitempty"`
-	Data       any        `json:"data,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
+	Version    int       `json:"version"`
+	ID         string    `json:"id"`
+	RunID      string    `json:"run_id"`
+	Type       EventType `json:"type"`
+	StepNumber int       `json:"step_number,omitempty"`
+	Data       any       `json:"data,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 func NewEvent(id, runID string, eventType EventType, data any) (Event, error) {
@@ -79,7 +54,6 @@ func NewEvent(id, runID string, eventType EventType, data any) (Event, error) {
 		ID:        id,
 		RunID:     runID,
 		Type:      eventType,
-		Mode:      eventType.StreamMode(),
 		Data:      data,
 		CreatedAt: time.Now().UTC(),
 	}, nil
