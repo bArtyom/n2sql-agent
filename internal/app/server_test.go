@@ -275,31 +275,6 @@ func TestServerRoutesKnowledgeBaseAgentChatStream(t *testing.T) {
 	}
 }
 
-func TestServerRoutesKnowledgeBaseMultiAgentChat(t *testing.T) {
-	response := httptest.NewRecorder()
-	server := app.New(app.Dependencies{MultiAgentAnswers: multiAgentAnswererStub{}})
-
-	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/multi-agent-chat", strings.NewReader(`{"message":"问题"}`)))
-
-	if response.Code != http.StatusOK {
-		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
-	}
-}
-
-func TestServerRoutesKnowledgeBaseMultiAgentChatStream(t *testing.T) {
-	response := httptest.NewRecorder()
-	server := app.New(app.Dependencies{MultiAgentStreamingAnswers: multiAgentAnswererStub{}})
-
-	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/multi-agent-chat/stream", strings.NewReader(`{"message":"问题"}`)))
-
-	if response.Code != http.StatusOK {
-		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
-	}
-	if contentType := response.Header().Get("Content-Type"); contentType != "text/event-stream" {
-		t.Fatalf("content type = %q, want text/event-stream", contentType)
-	}
-}
-
 func TestServerRoutesKnowledgeBaseMCP(t *testing.T) {
 	response := httptest.NewRecorder()
 	server := app.New(app.Dependencies{MCPKnowledgeSearch: searcherStub{}, MCPDocuments: documentUploaderStub{}, MCPKnowledgeBases: mcpKnowledgeBaseStoreStub{}})

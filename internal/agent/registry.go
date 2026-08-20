@@ -108,6 +108,19 @@ func (r *ToolRegistry) Register(tool Tool) error {
 	return nil
 }
 
+// AllowAndRegister adds a tool to a deliberately scoped registry. It is used
+// by service composition code when a registry was created with an allowlist
+// and an optional, read-only capability is enabled for that request.
+func (r *ToolRegistry) AllowAndRegister(tool Tool) error {
+	if r == nil || tool == nil {
+		return ErrInvalidTool
+	}
+	if r.allowedTools != nil {
+		r.allowedTools[tool.Name()] = struct{}{}
+	}
+	return r.Register(tool)
+}
+
 func (r *ToolRegistry) Get(name string) (Tool, bool) {
 	tool, ok := r.tools[name]
 	return tool, ok

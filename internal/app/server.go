@@ -47,8 +47,6 @@ type Dependencies struct {
 	AgentRunReader             agentrun.Reader
 	AgentEventStore            agentrun.EventStore
 	AgentRunExecutor           agentrun.Executor
-	MultiAgentAnswers          multiagent.Answerer
-	MultiAgentStreamingAnswers multiagent.EventAnswerer
 	A2AAnswers                 multiagent.Answerer
 	A2AStore                   a2a.TaskStore
 	A2ATaskTimeout             time.Duration
@@ -164,12 +162,6 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}/trace", handler.NewAgentRunTrace(dependencies.AgentEventStore))
 		mux.Handle("POST /api/knowledge-bases/{id}/agent-runs/{runID}/stop", handler.NewAgentRunStop(hub))
 		mux.Handle("POST /api/knowledge-bases/{id}/agent-runs/{runID}/approval", handler.NewAgentRunApproval(hub))
-	}
-	if dependencies.MultiAgentAnswers != nil {
-		mux.Handle("POST /api/knowledge-bases/{id}/multi-agent-chat", handler.NewMultiAgentChat(dependencies.MultiAgentAnswers))
-	}
-	if dependencies.MultiAgentStreamingAnswers != nil {
-		mux.Handle("POST /api/knowledge-bases/{id}/multi-agent-chat/stream", handler.NewMultiAgentChatStream(dependencies.MultiAgentStreamingAnswers))
 	}
 	if dependencies.FollowUpSuggestions != nil {
 		mux.Handle("POST /api/knowledge-bases/{id}/follow-up-suggestions", handler.NewFollowUpSuggestions(dependencies.FollowUpSuggestions))

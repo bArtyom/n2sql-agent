@@ -155,6 +155,7 @@ func main() {
 		log.Fatal(err)
 	}
 	agentAnswerService.SetMemoryStore(memoryStore)
+	agentAnswerService.SetDelegateResearchEnabled(true)
 	knowledgeResearcher, err := multiagent.NewAutonomousKnowledgeSearchResearcher(chatService, searchService, cfg.AgentMaxSteps, cfg.AgentMaxToolResultBytes)
 	if err != nil {
 		log.Fatal(err)
@@ -188,8 +189,6 @@ func main() {
 			AgentRunReader:             agentRunStore,
 			AgentEventStore:            agentEventStore,
 			AgentRunExecutor:           agentRunExecutor,
-			MultiAgentAnswers:          multiAgentAnswers,
-			MultiAgentStreamingAnswers: multiAgentAnswers,
 			A2AAnswers:                 multiAgentAnswers,
 			A2AStore:                   a2aStore,
 			A2ATaskTimeout:             cfg.AgentTimeout,

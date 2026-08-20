@@ -22,7 +22,7 @@
 ## 当前代码状态
 
 - 最新提交：`0aab837 fix: fence agent worker leases`；Agent/RAG 主线最近完成 Worker 租约 fencing，避免旧 Worker 在任务被接管后继续续租或覆盖新 Worker 的终态。
-- 当前工作区在该提交后保持干净。
+- 当前工作区正在开发“标准 Agent 动态委派”切片；README.md 保留用户本地启动记录改动，不参与本切片提交。
 - 第一阶段知识库问答底座已完成：知识库、文档上传和 Worker、Markdown/TXT/PDF 提取、OCR 最小骨架、父子 chunk、embedding、混合检索、Rerank、引用和普通 RAG/SSE。
 - Agent Runtime 最小闭环已完成：Tool Registry、Function Calling、受限 ReAct、最大步数/超时/取消、工具失败安全降级、SSE 事件、上下文摘要、会话历史、幂等和运行摘要。
 - Agent 异步运行已接入主聊天链路：标准 Agent 提交接口先持久化 `agent_runs` 并返回 `run_id`，后台 Worker 领取并执行请求快照，执行事件经进程内 Hub 由独立 SSE 连接流式转发；会话保存、审批等待和错误事件均在 Worker 执行上下文中完成。Worker 已增加 5 分钟租约、约 100 秒心跳和过期 `running` 任务回收；旧的同步 POST SSE 逻辑仍保留为无持久化依赖时的回退路径。
@@ -49,8 +49,9 @@
 - Agent Runtime 增加重复工具调用保护：按工具名和规范化后的 JSON 参数去重，同一轮重复调用会安全结束，避免重复检索和步数浪费。
 - Agent Runtime 增加运行内上下文预算：单轮模型上下文超过 64KB 时保留系统提示、当前问题和最近工具结果，省略较早内容，避免多步检索结果累积撑爆上下文。
 - 检索已具备向量 + PostgreSQL 关键词、RRF 融合、关键词阈值、可选 Rerank、Query Rewrite、缓存、父块上下文去重、HNSW 和检索统计。
-- Multi-Agent、只读 MCP 和 PostgreSQL 持久化 A2A 已有最小可运行适配；它们不是完整官方协议或生产级多租户方案。
-- 前端已支持会话、引用卡片与懒加载原文、检索统计、Agent 工具轨迹折叠、断线恢复、A2A/协作研究模式、正文分页预览、固定起步问题和按需生成追问建议。
+- 固定“协作研究”Multi-Agent 用户模式已删除：前端不再显示该模式，`/multi-agent-chat` 和 `/multi-agent-chat/stream` 路由、处理器及路由测试已移除。普通 Agent 改为按需调用只读 `delegate_research` 子 Agent；子 Agent 只暴露 `knowledge_search`，不会递归委派或执行副作用工具。A2A 作为独立异步协议入口暂时保留。
+- Multi-Agent 的旧固定 Supervisor 仍仅被现有 A2A 适配使用；后续若要彻底清理 `internal/multiagent`，需要先把 A2A Runner/Store 迁移到 `agentservice.Answerer`。
+- 前端已支持会话、引用卡片与懒加载原文、检索统计、Agent 工具轨迹折叠、断线恢复、A2A 异步任务模式、正文分页预览、固定起步问题和按需生成追问建议。
 - 最新停止生成切片：标准 Agent 流式回答期间输入栏显示“停止生成”按钮，调用 `POST /api/knowledge-bases/{id}/agent-runs/{runID}/stop` 取消执行上下文；引擎发 `run_canceled` 事件，前端标记独立 stopped 终态（保留部分内容、不显示重新生成、不写会话历史）；断线恢复与用户停止语义分离；停止按知识库 ID 隔离。
 - 最新会话置顶切片：`conversations.is_pinned` 列 + 排序索引；列表按置顶优先、组内按更新时间排序；`PATCH /conversations/{id}` 支持 `{"is_pinned": true/false}`（与重命名共用端点，跨库 404）；前端会话列表按「置顶 + 今天/昨天/N 天前」分组，置顶项 📌 标记与置顶/取消置顶按钮。
 - 会话体验四连切片：①自动标题——首轮问答后若仍是默认标题，用问题摘要（30 字截断）重命名，不覆盖用户已命名；②追问"换一批"——生成建议后按钮变为换一批，接口无状态直接再次调用；③会话更多菜单——"⋯"菜单（置顶/改名/清空消息/复制 Markdown/删除），清空走 `DELETE /conversations/{id}/messages`（事务删消息/摘要/幂等键，保留会话），复制为纯前端拼 Markdown；④正文内引用标记——提示词要求模型输出 `<kb doc_id pos/>`，前端渲染成可点击引用 pill（事件委托打开原文抽屉），流式显示"〔引用〕"，模型不输出标签时行为不变（来源卡片照旧）。
@@ -82,7 +83,7 @@
 
 后续按双主线推进：Agent Runtime 先读 DeerFlow，再用 WeKnora 校准工具、会话和用户可见交互；RAG 以 WeKnora 的文档处理、混合检索、引用和知识库交互为主。每轮选择一个小而完整的功能切片，完成后端链路、必要前端反馈、测试和学习记录；不要因为参考仓库已有复杂能力就直接扩展成完整协议或大规模系统。
 
-下一轮候选：对照盘点小/中切片已完成（#1 停止生成、#2 置顶分组、#3 自动标题、#4 换一批、#7 更多菜单、#5 正文引用、#9 断流续传、#8 消息分页、#6 实时检索进度、#12 工具结果类型化渲染、#11 会话内模型切换、#13 深度思考展示、#10 聊天附件/图片、#14 会话搜索、#16 工具审批）。剩余：Web 搜索（#15，边界外）。建议下一步在真实 Provider 环境验收思考参数、视觉模型、会话搜索和审批流程，再评估供应商专属 thinking budget。
+下一轮候选：完成 A2A 从固定 Supervisor 到标准 Agent 的适配，随后删除 `internal/multiagent` 残余代码；再进入 Agent 计划中的动态子 Agent 持久化、子任务事件关联和并行委派。
 
 ## 交付要求
 

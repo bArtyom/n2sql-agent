@@ -44,7 +44,6 @@ type ChatMessage = {
   activity?: string;
   reasoningContent?: string;
   reasoningExpanded?: boolean;
-  researchEvents?: ResearchEvent[];
   agentEvents?: AgentEvent[];
   queryRewrite?: QueryRewriteStatus;
   retrieval?: RetrievalStats;
@@ -90,7 +89,6 @@ type RetrievalStats = {
   final_filtered: number;
   rerank_fallback: boolean;
 };
-type ResearchEvent = { type: string; round?: number; label: string; detail?: string };
 type AgentDocument = { id: number; original_filename?: string; content_type?: string; size_bytes?: number; processing_status?: string };
 type AgentEvent = {
   type: string;
@@ -128,7 +126,7 @@ type StoredAgentTrace = {
   steps?: { number?: number; kind?: string; status?: string; tool_name?: string }[];
   events?: { type?: string; step?: number; tool_call_id?: string; tool_name?: string; arguments?: string; result_summary?: string; source_keys?: string[]; status?: string }[];
 };
-type ChatMode = "agent" | "research" | "a2a";
+type ChatMode = "agent" | "a2a";
 type A2ATask = {
   id: string;
   status: "submitted" | "working" | "completed" | "failed" | string;
@@ -676,7 +674,7 @@ function sourceKey(source: Source): string {
 }
 
 function toggleDocument(documentID: number) {
-  if (chatMode.value !== "agent" && chatMode.value !== "research" && chatMode.value !== "a2a") return;
+  if (chatMode.value !== "agent" && chatMode.value !== "a2a") return;
   selectedDocumentIDs.value = selectedDocumentIDs.value.includes(documentID)
     ? selectedDocumentIDs.value.filter((id) => id !== documentID)
     : [...selectedDocumentIDs.value, documentID];
@@ -1496,16 +1494,15 @@ function clearChatAttachments() {
 async function askQuestion() {
   const prompt = question.value.trim();
   if (!prompt || !selectedKnowledgeBaseId.value || streaming.value) return;
-  const useResearchMode = chatMode.value === "research";
   const useA2AMode = chatMode.value === "a2a";
   const outgoingAttachments = [...chatAttachments.value];
-  if ((useResearchMode || useA2AMode) && outgoingAttachments.length > 0) {
+  if (useA2AMode && outgoingAttachments.length > 0) {
     errorMessage.value = "附件目前只支持标准 Agent 模式。";
     return;
   }
   let activeConversationID: number | null = null;
   try {
-    if (!useResearchMode && !useA2AMode) activeConversationID = await ensureConversation(prompt);
+    if (!useA2AMode) activeConversationID = await ensureConversation(prompt);
   } catch (error) {
     showError(error);
     return;
@@ -1537,7 +1534,7 @@ async function askQuestion() {
       await askA2ATask(prompt, answerIndex);
       return;
     }
-    await streamAgentQuestion(prompt, answerIndex, activeConversationID, useResearchMode, outgoingAttachments);
+    await streamAgentQuestion(prompt, answerIndex, activeConversationID, outgoingAttachments);
   } catch (error) {
     markAnswerFailure(answerIndex, error);
     showError(error);
@@ -1548,42 +1545,34 @@ async function askQuestion() {
   }
 }
 
-async function streamAgentQuestion(prompt: string, answerIndex: number, activeConversationID: number | null, researchMode: boolean, attachments: ChatAttachmentDraft[] = []) {
+async function streamAgentQuestion(prompt: string, answerIndex: number, activeConversationID: number | null, attachments: ChatAttachmentDraft[] = []) {
   if (!selectedKnowledgeBaseId.value) throw new Error("请先选择知识库。");
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Accept: "text/event-stream",
   };
-  if (!researchMode) headers["Idempotency-Key"] = crypto.randomUUID();
-  const streamPath = researchMode ? "multi-agent-chat/stream" : "agent-chat/stream";
-  const response = await fetch(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/${streamPath}`, {
+  headers["Idempotency-Key"] = crypto.randomUUID();
+  const response = await fetch(`/api/knowledge-bases/${selectedKnowledgeBaseId.value}/agent-chat/stream`, {
     method: "POST",
     headers,
-    body: JSON.stringify(researchMode
-      ? { message: prompt, topK: topK.value, document_ids: selectedDocumentIDs.value, query_rewrite: queryRewrite.value, keyword_threshold: keywordThreshold.value }
-      : {
-          message: prompt,
-          chat_model: selectedChatModel.value || undefined,
-          top_k: topK.value,
-          similarity_threshold: similarityThreshold.value,
-          document_ids: selectedDocumentIDs.value,
-          query_rewrite: queryRewrite.value,
-          keyword_threshold: keywordThreshold.value,
-          conversation_id: activeConversationID,
-          thinking_mode: thinkingMode.value,
-          attachments: attachments.map(({ filename, contentType, dataBase64 }) => ({ filename, content_type: contentType, data_base64: dataBase64 })),
-        }),
+    body: JSON.stringify({
+      message: prompt,
+      chat_model: selectedChatModel.value || undefined,
+      top_k: topK.value,
+      similarity_threshold: similarityThreshold.value,
+      document_ids: selectedDocumentIDs.value,
+      query_rewrite: queryRewrite.value,
+      keyword_threshold: keywordThreshold.value,
+      conversation_id: activeConversationID,
+      thinking_mode: thinkingMode.value,
+      attachments: attachments.map(({ filename, contentType, dataBase64 }) => ({ filename, content_type: contentType, data_base64: dataBase64 })),
+    }),
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
     throw new Error(payload?.error || "问答服务暂不可用");
   }
   try {
-    if (researchMode) {
-      if (!response.body) throw new Error("问答服务没有返回流式内容。");
-      await readAgentSSE(response, answerIndex, true);
-      return;
-    }
     const payload = await response.json() as { run_id?: string; stream_url?: string };
     const initialRunID = payload.run_id || response.headers.get("X-Agent-Run-ID");
     if (!initialRunID) throw new Error("问答服务没有返回运行 ID。");
@@ -1597,14 +1586,14 @@ async function streamAgentQuestion(prompt: string, answerIndex: number, activeCo
     if (initialRunID) {
       messages.value[answerIndex].runID = initialRunID;
       // 记住未完成运行：刷新后可以重连 Hub 恢复，而不用重新调用模型。
-      if (!researchMode && activeConversationID) {
+      if (activeConversationID) {
         savePendingRun({ knowledgeBaseId: selectedKnowledgeBaseId.value, runID: initialRunID, conversationId: activeConversationID });
       }
     }
-    await readAgentSSE(streamResponse, answerIndex, false);
+    await readAgentSSE(streamResponse, answerIndex);
   } catch (error) {
     const currentAnswer = messages.value[answerIndex];
-    if (!researchMode && currentAnswer?.runID) {
+    if (currentAnswer?.runID) {
       try {
         await resumeAgentStream(currentAnswer, answerIndex);
       } catch {
@@ -1616,20 +1605,20 @@ async function streamAgentQuestion(prompt: string, answerIndex: number, activeCo
   }
   const currentAnswer = messages.value[answerIndex];
   if (currentAnswer?.status === "streaming") {
-    if (!researchMode && currentAnswer.runID) {
+    if (currentAnswer.runID) {
       await resumeAgentStream(currentAnswer, answerIndex);
     }
     if (currentAnswer.status === "streaming") {
       currentAnswer.status = "error";
-      currentAnswer.retryable = !researchMode;
+      currentAnswer.retryable = true;
       currentAnswer.activity = "";
       currentAnswer.content = currentAnswer.content || "流式响应提前结束，请重试。";
     }
   }
-  if (!researchMode) clearPendingRun();
+  clearPendingRun();
 }
 
-async function readAgentSSE(response: Response, answerIndex: number, researchMode: boolean) {
+async function readAgentSSE(response: Response, answerIndex: number) {
   if (!response.body) throw new Error("问答服务没有返回流式内容。");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -1639,10 +1628,10 @@ async function readAgentSSE(response: Response, answerIndex: number, researchMod
     buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
     const blocks = buffer.split(/\r?\n\r?\n/);
     buffer = blocks.pop() ?? "";
-    blocks.forEach((block) => consumeSSEBlock(block, answerIndex, researchMode));
+    blocks.forEach((block) => consumeSSEBlock(block, answerIndex));
     if (done) break;
   }
-  if (buffer.trim()) consumeSSEBlock(buffer, answerIndex, researchMode);
+  if (buffer.trim()) consumeSSEBlock(buffer, answerIndex);
 }
 
 async function resumeAgentStream(answer: ChatMessage, answerIndex: number) {
@@ -1675,7 +1664,7 @@ async function connectAgentStream(answer: ChatMessage, answerIndex: number, with
     headers,
   });
   if (!response.ok || !response.body) return "unavailable";
-  await readAgentSSE(response, answerIndex, false);
+  await readAgentSSE(response, answerIndex);
   return answer.streamGap ? "gap" : "completed";
 }
 
@@ -1795,7 +1784,7 @@ async function retryAnswer(answer: ChatMessage, answerIndex: number) {
   closeDocumentPreview();
   streaming.value = true;
   try {
-    await streamAgentQuestion(answer.requestMessage, answerIndex, answer.conversationId ?? conversationId.value, false);
+    await streamAgentQuestion(answer.requestMessage, answerIndex, answer.conversationId ?? conversationId.value);
   } catch (error) {
     markAnswerFailure(answerIndex, error);
     showError(error);
@@ -1875,14 +1864,9 @@ async function askA2ATask(prompt: string, answerIndex: number) {
   }
 }
 
-function recordResearchEvent(answer: ChatMessage, type: string, label: string, detail = "", round?: number) {
-  answer.researchEvents ??= [];
-  answer.researchEvents.push({ type, label, detail: detail.slice(0, 140), round });
-  if (answer.researchEvents.length > 12) answer.researchEvents.shift();
-}
-
 const agentToolLabels: Record<string, string> = {
   knowledge_search: "检索知识库",
+  delegate_research: "委派只读研究",
   document_list: "查看文档列表",
   document_info: "查看文档状态",
   document_read: "读取文档正文",
@@ -2175,7 +2159,7 @@ function toggleReasoning(message: ChatMessage) {
   message.reasoningExpanded = !message.reasoningExpanded;
 }
 
-function consumeSSEBlock(block: string, answerIndex: number, researchMode = false) {
+function consumeSSEBlock(block: string, answerIndex: number) {
   const answer = messages.value[answerIndex];
   if (!answer) return;
   let event = "message";
@@ -2213,52 +2197,11 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         answer.content += payload.delta ?? "";
         break;
       case "run_started":
-        if (!researchMode) recordAgentEvent(answer, event, "Agent 开始运行", "正在分析问题", payload.step_number, "running");
-        answer.activity = researchMode ? "协作研究已启动…" : "正在理解问题…";
-        break;
-      case "research_started":
-        recordResearchEvent(answer, event, "研究员开始工作", "正在规划检索", payload.round);
-        answer.activity = "研究员正在查找资料…";
-        break;
-      case "research_tool_called":
-        recordResearchEvent(answer, event, "发起知识库检索", dataString("tool_name") || "knowledge_search", payload.round);
-        answer.activity = "研究员正在查找资料…";
-        break;
-      case "research_tool_finished": {
-        const sources = parseSources(eventData.sources);
-        answer.sources = mergeSources(answer.sources ?? [], sources);
-        const rewrite = eventData.query_rewrite;
-        if (rewrite && typeof rewrite === "object" && (rewrite as Record<string, unknown>).enabled === true) {
-          answer.queryRewrite = rewrite as QueryRewriteStatus;
-        }
-        recordResearchEvent(answer, event, "检索完成", sources.length ? `${sources.length} 条引用` : "继续评估当前证据", payload.round);
-        answer.activity = "研究员正在判断是否需要继续…";
-        break;
-      }
-      case "research_summary":
-        recordResearchEvent(answer, event, "研究员形成摘要", dataString("content") || payload.content || "已形成阶段性结论", payload.round);
-        answer.activity = "研究员已完成检索，准备交给回答者…";
-        break;
-      case "research_finished": {
-        const sources = parseSources(eventData.sources);
-        answer.sources = mergeSources(answer.sources ?? [], sources);
-        recordResearchEvent(answer, event, "研究员完成", eventData.no_relevant_results ? "资料不足，安全结束" : `${answer.sources?.length ?? 0} 条引用`, payload.round);
-        answer.activity = eventData.no_relevant_results ? "资料不足，正在结束…" : "回答者正在组织答案…";
-        break;
-      }
-      case "answerer_started":
-        recordResearchEvent(answer, event, "回答者开始组织答案", "基于研究摘要和原始片段", payload.round);
-        answer.activity = "回答者正在组织答案…";
-        break;
-      case "answerer_finished":
-        recordResearchEvent(answer, event, "回答者完成", "最终答案即将返回", payload.round);
-        break;
-      case "answerer_skipped":
-        recordResearchEvent(answer, event, "回答者跳过", "知识库没有足够证据", payload.round);
-        answer.activity = "资料不足，已安全结束。";
+        recordAgentEvent(answer, event, "Agent 开始运行", "正在分析问题", payload.step_number, "running");
+        answer.activity = "正在理解问题…";
         break;
       case "tool_called":
-        if (!researchMode) {
+        {
           const toolName = dataString("tool_name") || "knowledge_search";
           recordAgentEvent(answer, event, displayAgentToolName(toolName), "", payload.step_number, "running", {
             toolCallID: dataString("tool_call_id"),
@@ -2268,7 +2211,7 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         answer.activity = agentToolActivity(dataString("tool_name"));
         break;
       case "tool_finished":
-        if (!researchMode) {
+        {
           const sources = parseSources(eventData.sources);
           answer.sources = mergeSources(answer.sources ?? [], sources);
           const toolName = dataString("tool_name") || "knowledge_search";
@@ -2300,7 +2243,7 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
           : "资料查找完成，正在组织答案…";
         break;
       case "approval_required":
-        if (!researchMode && answer.runID && selectedKnowledgeBaseId.value) {
+        if (answer.runID && selectedKnowledgeBaseId.value) {
           pendingApproval.value = {
             knowledgeBaseId: selectedKnowledgeBaseId.value,
             runID: answer.runID,
@@ -2318,7 +2261,7 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         answer.activity = "审批已超时，本轮运行已结束。";
         break;
       case "reasoning_delta":
-        if (!researchMode) {
+        {
           const reasoning = dataString("content");
           if (reasoning) {
             answer.reasoningContent = `${answer.reasoningContent ?? ""}${reasoning}`.slice(0, 12 * 1024);
@@ -2327,7 +2270,7 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         }
         break;
       case "message_delta":
-        if (!researchMode && !answer.agentEvents?.some((item) => item.type === "answer_started")) {
+        if (!answer.agentEvents?.some((item) => item.type === "answer_started")) {
           recordAgentEvent(answer, "answer_started", "开始生成答案", "模型正在根据检索结果组织回答", payload.step_number, "running");
         }
         answer.content += dataString("content") || payload.content || "";
@@ -2336,21 +2279,15 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
       case "run_finished":
         if (pendingApproval.value?.runID === answer.runID) pendingApproval.value = null;
         clearPendingRun();
-        if (!researchMode) {
-          for (const agentEvent of answer.agentEvents ?? []) {
-            if (agentEvent.status === "running") agentEvent.status = "done";
-          }
-          const answerEvent = answer.agentEvents?.find((item) => item.type === "answer_started");
-          if (answerEvent) {
-            answerEvent.detail = "最终回答已生成";
-            answerEvent.status = "done";
-          }
-          recordAgentEvent(answer, event, "Agent 完成", "本轮运行成功", payload.step_number, "done");
+        for (const agentEvent of answer.agentEvents ?? []) {
+          if (agentEvent.status === "running") agentEvent.status = "done";
         }
-        if (researchMode) answer.sources = mergeSources(answer.sources ?? [], parseSources(eventData.sources));
-        if (researchMode && eventData.retrieval && typeof eventData.retrieval === "object") {
-          answer.retrieval = eventData.retrieval as RetrievalStats;
+        const answerEvent = answer.agentEvents?.find((item) => item.type === "answer_started");
+        if (answerEvent) {
+          answerEvent.detail = "最终回答已生成";
+          answerEvent.status = "done";
         }
+        recordAgentEvent(answer, event, "Agent 完成", "本轮运行成功", payload.step_number, "done");
         if (payload.query_rewrite) answer.queryRewrite = payload.query_rewrite;
         const runStats = eventData.stats;
         if (!answer.queryRewrite && runStats && typeof runStats === "object") {
@@ -2412,12 +2349,10 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
         // 用户主动停止后引擎已发 run_canceled；后续通用 error 事件不应覆盖已停止状态。
         if (answer.status === "stopped") break;
         clearPendingRun();
-        if (!researchMode) {
-          for (const agentEvent of answer.agentEvents ?? []) {
-            if (agentEvent.status === "running") agentEvent.status = "error";
-          }
-          recordAgentEvent(answer, event, "Agent 运行失败", dataString("error") || payload.error || "执行失败", payload.step_number, "error");
+        for (const agentEvent of answer.agentEvents ?? []) {
+          if (agentEvent.status === "running") agentEvent.status = "error";
         }
+        recordAgentEvent(answer, event, "Agent 运行失败", dataString("error") || payload.error || "执行失败", payload.step_number, "error");
         answer.status = "error";
         answer.retryable = true;
         answer.activity = "";
@@ -2426,12 +2361,10 @@ function consumeSSEBlock(block: string, answerIndex: number, researchMode = fals
       case "run_canceled":
         if (pendingApproval.value?.runID === answer.runID) pendingApproval.value = null;
         clearPendingRun();
-        if (!researchMode) {
-          for (const agentEvent of answer.agentEvents ?? []) {
-            if (agentEvent.status === "running") agentEvent.status = "error";
-          }
-          recordAgentEvent(answer, event, "Agent 已停止", "用户停止生成", payload.step_number, "error");
+        for (const agentEvent of answer.agentEvents ?? []) {
+          if (agentEvent.status === "running") agentEvent.status = "error";
         }
+        recordAgentEvent(answer, event, "Agent 已停止", "用户停止生成", payload.step_number, "error");
         answer.status = "stopped";
         answer.retryable = false;
         answer.activity = "";
@@ -2653,14 +2586,12 @@ onUnmounted(() => {
             </div>
             <div class="chat-mode-switch" role="group" aria-label="问答模式">
               <button type="button" :class="{ 'chat-mode--active': chatMode === 'agent' }" :aria-pressed="chatMode === 'agent'" :disabled="streaming" @click="chatMode = 'agent'">标准 Agent</button>
-              <button type="button" :class="{ 'chat-mode--active': chatMode === 'research' }" :aria-pressed="chatMode === 'research'" :disabled="streaming" @click="chatMode = 'research'">协作研究</button>
               <button type="button" :class="{ 'chat-mode--active': chatMode === 'a2a' }" :aria-pressed="chatMode === 'a2a'" :disabled="streaming" @click="chatMode = 'a2a'">异步任务</button>
             </div>
           </div>
-          <p v-if="chatMode === 'research'" class="chat-mode-note">协作研究会根据证据多轮检索；本次结果只在当前页面展示，不写入会话历史。</p>
-          <p v-else-if="chatMode === 'a2a'" class="chat-mode-note">异步任务会交给后台 Agent 执行；页面会自动跟踪任务状态，完成后展示答案和引用，不写入会话历史。</p>
+          <p v-if="chatMode === 'a2a'" class="chat-mode-note">异步任务会交给后台 Agent 执行；页面会自动跟踪任务状态，完成后展示答案和引用，不写入会话历史。</p>
           <div class="retrieval-controls">
-            <div><strong>检索范围</strong><span>{{ selectedDocumentIDs.length ? `${chatMode === 'research' ? '协作研究' : chatMode === 'a2a' ? '异步任务' : '标准 Agent'} 仅检索 ${selectedDocumentIDs.length} 份已选文档；` : "当前模式检索整个知识库；" }}控制召回数量和证据相关度</span></div>
+            <div><strong>检索范围</strong><span>{{ selectedDocumentIDs.length ? `${chatMode === 'a2a' ? '异步任务' : '标准 Agent'} 仅检索 ${selectedDocumentIDs.length} 份已选文档；` : "当前模式检索整个知识库；" }}控制召回数量和证据相关度</span></div>
             <label>召回片段数<select v-model.number="topK" :disabled="streaming"><option v-for="value in [3, 5, 8, 12, 20]" :key="value" :value="value">{{ value }} 条</option></select></label>
             <label class="rewrite-control"><input v-model="queryRewrite" type="checkbox" :disabled="streaming" /> 多查询改写</label>
             <label v-if="chatMode !== 'a2a'" class="threshold-control">关键词下限
@@ -2807,14 +2738,6 @@ onUnmounted(() => {
                       </div>
                     </template>
                   </span>
-                </div>
-              </div>
-              <div v-if="message.role === 'assistant' && message.researchEvents?.length" class="research-trace">
-                <div class="research-trace-head"><span>研究轨迹</span><small>{{ message.researchEvents.length }} EVENTS</small></div>
-                <div v-for="trace in message.researchEvents" :key="`${trace.type}-${trace.round}-${trace.label}-${trace.detail}`" class="research-trace-row">
-                  <span class="research-trace-dot" />
-                  <span class="research-trace-label">{{ trace.label }}</span>
-                  <small v-if="trace.detail">{{ trace.detail }}</small>
                 </div>
               </div>
               <div v-if="message.role === 'user' && message.attachments?.length" class="message-attachments" aria-label="本轮附件">

@@ -71,6 +71,7 @@ type Service struct {
 	documentSummary    agent.DocumentSummaryRequester
 	memoryStore        memory.Store
 	profileStore       memory.ProfileStore
+	delegateResearch   bool
 	sequence           atomic.Uint64
 }
 
@@ -82,6 +83,15 @@ func (s *Service) SetMemoryStore(store memory.Store) {
 		if profileStore, ok := store.(memory.ProfileStore); ok {
 			s.profileStore = profileStore
 		}
+	}
+}
+
+// SetDelegateResearchEnabled enables the standard Agent's optional,
+// read-only child research tool. The child is scoped per request and does not
+// inherit the parent's other tools.
+func (s *Service) SetDelegateResearchEnabled(enabled bool) {
+	if s != nil {
+		s.delegateResearch = enabled
 	}
 }
 
@@ -264,6 +274,19 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	}
 	if err != nil {
 		return Response{}, fmt.Errorf("create knowledge search registry: %w", err)
+	}
+	if s.delegateResearch {
+		childSteps := s.maxSteps
+		if childSteps > 3 {
+			childSteps = 3
+		}
+		delegate, delegateErr := agentruntime.NewDelegateResearchTool(chatRunner, s.searcher, knowledgeBaseID, s.maxToolResultBytes, childSteps, request.DocumentIDs, request.QueryRewrite, keywordThreshold)
+		if delegateErr != nil {
+			return Response{}, fmt.Errorf("create delegate research tool: %w", delegateErr)
+		}
+		if err := registry.AllowAndRegister(delegate); err != nil {
+			return Response{}, fmt.Errorf("register delegate research tool: %w", err)
+		}
 	}
 	var contextSummarizer modelruntime.MessageChatRunner
 	if candidate, ok := s.chat.(modelruntime.MessageChatRunner); ok {
