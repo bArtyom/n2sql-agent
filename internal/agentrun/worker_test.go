@@ -200,7 +200,7 @@ func TestRunnerPublishesParentResumeEventAfterLastChild(t *testing.T) {
 		t.Fatalf("resume events = %#v, want one parent child_event", events)
 	}
 	data, ok := events[0].Data.(map[string]any)
-	if !ok || data["child_run_id"] != "child-9" || data["parent_resumed"] != true {
+	if !ok || data["child_run_id"] != "child-9" || data["child_status"] != string(StatusSucceeded) || data["parent_resumed"] != true {
 		t.Fatalf("resume event data = %#v", events[0].Data)
 	}
 }

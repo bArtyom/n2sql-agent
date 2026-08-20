@@ -102,6 +102,7 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 		if markErr := r.store.MarkSucceeded(context.WithoutCancel(ctx), run.ID, run.LeaseToken); markErr != nil {
 			return true, markErr
 		}
+		run.Status = StatusSucceeded
 		r.resumeParentAfterChild(ctx, run)
 		r.cleanupTerminalCheckpoints(ctx, run.ID)
 		return true, nil
@@ -125,6 +126,7 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 		if markErr := r.store.MarkFailed(context.WithoutCancel(ctx), run.ID, message, run.LeaseToken); markErr != nil {
 			return true, markErr
 		}
+		run.Status = StatusFailed
 		r.resumeParentAfterChild(ctx, run)
 		r.cleanupTerminalCheckpoints(ctx, run.ID)
 		slog.WarnContext(ctx, "child_agent_timed_out", "run_id", run.RunID, "duration_ms", time.Since(started).Milliseconds(), "timeout", r.childTimeout)
@@ -134,6 +136,7 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 		if markErr := r.store.MarkCanceled(context.WithoutCancel(ctx), run.ID, run.LeaseToken); markErr != nil {
 			return true, markErr
 		}
+		run.Status = StatusCanceled
 		r.resumeParentAfterChild(ctx, run)
 		r.cleanupTerminalCheckpoints(ctx, run.ID)
 		return true, nil
@@ -145,6 +148,7 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 	if markErr := r.store.MarkFailed(context.WithoutCancel(ctx), run.ID, message, run.LeaseToken); markErr != nil {
 		return true, markErr
 	}
+	run.Status = StatusFailed
 	r.resumeParentAfterChild(ctx, run)
 	r.cleanupTerminalCheckpoints(ctx, run.ID)
 	slog.ErrorContext(ctx, "agent_run_failed", "run_id", run.RunID, "duration_ms", time.Since(started).Milliseconds(), "error", err)
