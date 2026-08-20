@@ -91,6 +91,26 @@ func (readOnlyToolStub) RequiresApproval() bool { return false }
 
 func (readOnlyToolStub) Retryable() bool { return true }
 
+type flakyChildTool struct {
+	callCount int
+}
+
+func (t *flakyChildTool) Name() string { return "delegate_research" }
+
+func (t *flakyChildTool) Description() string { return "delegate a read-only child agent" }
+
+func (t *flakyChildTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{"question":{"type":"string"}},"required":["question"]}`)
+}
+
+func (t *flakyChildTool) Call(context.Context, json.RawMessage) (agent.ToolResult, error) {
+	t.callCount++
+	if t.callCount == 1 {
+		return agent.ToolResult{}, errors.New("child worker temporarily unavailable")
+	}
+	return agent.ToolResult{Content: "子 Agent 恢复后返回：年假按入职年限计算"}, nil
+}
+
 func (t *toolStub) Description() string { return "search the knowledge base" }
 
 func (t *toolStub) Parameters() json.RawMessage {
@@ -110,6 +130,46 @@ func (t *toolStub) Call(ctx context.Context, args json.RawMessage) (agent.ToolRe
 		content = `[{"content":"annual leave policy"}]`
 	}
 	return agent.ToolResult{Content: content, Metadata: t.metadata, NoRelevantResults: t.noRelevant, FallbackAnswer: t.fallback}, nil
+}
+
+func TestEngineLetsParentReconsiderFailedChildAgent(t *testing.T) {
+	childTool := &flakyChildTool{}
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(childTool); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	modelCalls := 0
+	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		modelCalls++
+		switch modelCalls {
+		case 1:
+			return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+				ID: "child-call-1", Type: "function",
+				Function: modelclient.ToolCallFunction{Name: "delegate_research", Arguments: `{"question":"研究年假"}`},
+			}}}, nil
+		case 2:
+			if len(messages) < 3 || !strings.Contains(messages[len(messages)-1].Content, "执行失败") {
+				t.Fatalf("parent did not receive child failure feedback: %#v", messages)
+			}
+			return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+				ID: "child-call-2", Type: "function",
+				Function: modelclient.ToolCallFunction{Name: "delegate_research", Arguments: `{"question":"研究年假"}`},
+			}}}, nil
+		default:
+			return modelclient.ChatResponse{Message: "年假按入职年限计算。"}, nil
+		}
+	}}
+	engine, err := agentruntime.NewEngine(chat, registry, 4)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	result, err := engine.Run(context.Background(), "parent-run", []modelclient.ChatMessage{{Role: "user", Content: "请研究年假"}})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Run.FinalAnswer() != "年假按入职年限计算。" || childTool.callCount != 2 || modelCalls != 3 {
+		t.Fatalf("answer=%q child_calls=%d model_calls=%d, want parent recovery", result.Run.FinalAnswer(), childTool.callCount, modelCalls)
+	}
 }
 
 func TestEngineRunsIndependentReadOnlyToolsInParallel(t *testing.T) {
