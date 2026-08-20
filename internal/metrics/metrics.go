@@ -23,11 +23,6 @@ const (
 	WorkerStatusStatusUpdateFailed = "status_update_failed"
 	WorkerStatusRetryScheduled     = "retry_scheduled"
 	WorkerStatusDeadLetter         = "dead_letter"
-
-	A2AStatusSubmitted = "submitted"
-	A2AStatusStarted   = "working"
-	A2AStatusCompleted = "completed"
-	A2AStatusFailed    = "failed"
 )
 
 type HTTPObservation struct {
@@ -75,11 +70,6 @@ type Registry struct {
 	workerRetries           atomic.Uint64
 	workerDeadLetters       atomic.Uint64
 	workerDurationMSTotal   atomic.Uint64
-	a2aTasksSubmitted       atomic.Uint64
-	a2aTasksStarted         atomic.Uint64
-	a2aTasksCompleted       atomic.Uint64
-	a2aTasksFailed          atomic.Uint64
-	a2aTaskDurationMSTotal  atomic.Uint64
 }
 
 func New() *Registry { return &Registry{} }
@@ -154,25 +144,6 @@ func (r *Registry) ObserveWorkerDuration(duration time.Duration) {
 	r.workerDurationMSTotal.Add(durationMilliseconds(duration))
 }
 
-// ObserveA2ATask records one A2A task lifecycle event.
-func (r *Registry) ObserveA2ATask(status string, duration time.Duration) {
-	if r == nil {
-		return
-	}
-	switch status {
-	case A2AStatusSubmitted:
-		r.a2aTasksSubmitted.Add(1)
-	case A2AStatusStarted:
-		r.a2aTasksStarted.Add(1)
-	case A2AStatusCompleted:
-		r.a2aTasksCompleted.Add(1)
-		r.a2aTaskDurationMSTotal.Add(durationMilliseconds(duration))
-	case A2AStatusFailed:
-		r.a2aTasksFailed.Add(1)
-		r.a2aTaskDurationMSTotal.Add(durationMilliseconds(duration))
-	}
-}
-
 func (r *Registry) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
@@ -211,11 +182,6 @@ func (r *Registry) write(w io.Writer) error {
 		{"worker_retries_total", r.workerRetries.Load()},
 		{"worker_dead_letters_total", r.workerDeadLetters.Load()},
 		{"worker_task_duration_ms_total", r.workerDurationMSTotal.Load()},
-		{"a2a_tasks_submitted_total", r.a2aTasksSubmitted.Load()},
-		{"a2a_tasks_started_total", r.a2aTasksStarted.Load()},
-		{"a2a_tasks_completed_total", r.a2aTasksCompleted.Load()},
-		{"a2a_tasks_failed_total", r.a2aTasksFailed.Load()},
-		{"a2a_task_duration_ms_total", r.a2aTaskDurationMSTotal.Load()},
 	}
 	for _, line := range lines {
 		if _, err := fmt.Fprintf(w, "%s %d\n", line.name, line.value); err != nil {

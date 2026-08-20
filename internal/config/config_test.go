@@ -117,16 +117,6 @@ func TestLoadReadsAgentCheckpointSettings(t *testing.T) {
 	}
 }
 
-func TestLoadReadsA2ACleanupSettings(t *testing.T) {
-	t.Setenv("A2A_TASK_RETENTION", "48h")
-	t.Setenv("A2A_CLEANUP_INTERVAL", "15m")
-
-	cfg := config.Load()
-	if cfg.A2ATaskRetention != 48*time.Hour || cfg.A2ACleanupInterval != 15*time.Minute {
-		t.Fatalf("A2A cleanup settings = %s/%s, want 48h/15m", cfg.A2ATaskRetention, cfg.A2ACleanupInterval)
-	}
-}
-
 func TestLoadReadsPprofAddress(t *testing.T) {
 	t.Setenv("PPROF_ADDRESS", "127.0.0.1:6060")
 
@@ -142,16 +132,6 @@ func TestLoadDisablesPprofByDefault(t *testing.T) {
 	cfg := config.Load()
 	if cfg.PprofAddress != "" {
 		t.Fatalf("pprof address = %q, want disabled", cfg.PprofAddress)
-	}
-}
-
-func TestLoadUsesDefaultA2ACleanupSettingsForInvalidValues(t *testing.T) {
-	t.Setenv("A2A_TASK_RETENTION", "not-a-duration")
-	t.Setenv("A2A_CLEANUP_INTERVAL", "0s")
-
-	cfg := config.Load()
-	if cfg.A2ATaskRetention != 7*24*time.Hour || cfg.A2ACleanupInterval != time.Hour {
-		t.Fatalf("A2A cleanup settings = %s/%s, want 168h/1h defaults", cfg.A2ATaskRetention, cfg.A2ACleanupInterval)
 	}
 }
 

@@ -50,7 +50,7 @@ type ChatMessage = {
   agentStats?: AgentRunStats;
   requestMessage?: string;
   conversationId?: number | null;
-  mode?: ChatMode;
+  mode?: "agent";
   retryable?: boolean;
   runID?: string;
   lastEventID?: string;
@@ -125,14 +125,6 @@ type StoredAgentTrace = {
   stats?: AgentRunStats;
   steps?: { number?: number; kind?: string; status?: string; tool_name?: string }[];
   events?: { type?: string; step?: number; tool_call_id?: string; tool_name?: string; arguments?: string; result_summary?: string; source_keys?: string[]; status?: string }[];
-};
-type ChatMode = "agent" | "a2a";
-type A2ATask = {
-  id: string;
-  status: "submitted" | "working" | "completed" | "failed" | string;
-  created_at?: string;
-  updated_at?: string;
-  error?: string;
 };
 type Conversation = { id: number; knowledgeBaseId: number; title: string; isPinned: boolean; chatModel?: string; createdAt: string; updatedAt: string };
 type ConversationPage = { items: Conversation[]; has_more: boolean; offset: number; limit: number };
@@ -266,7 +258,6 @@ const copiedConversationID = ref<number | null>(null);
 // 历史消息分页游标：记录当前会话、已加载的最早消息 id 和是否还有更早的。
 const messageCursor = ref<{ conversationId: number | null; beforeId: number | null; hasMore: boolean }>({ conversationId: null, beforeId: null, hasMore: false });
 const loadingOlderMessages = ref(false);
-const chatMode = ref<ChatMode>("agent");
 const pendingApproval = ref<PendingApproval | null>(null);
 const approvalBusy = ref(false);
 const topK = ref(5);
@@ -308,7 +299,6 @@ const copiedMessageIndex = ref<number | null>(null);
 const copiedSourceKey = ref<string | null>(null);
 let copyFeedbackTimer: number | undefined;
 let documentPollTimer: number | undefined;
-let a2aPollingTimer: number | undefined;
 const summaryPollingTimers = new Map<number, number>();
 
 const selectedKnowledgeBase = computed(() =>
@@ -604,7 +594,7 @@ function shouldShowFollowUps(message: ChatMessage, index: number): boolean {
     && message.status === "done"
     && Boolean(message.content.trim())
     && index === messages.value.length - 1
-    && message.mode !== "a2a";
+    && message.mode === "agent";
 }
 
 function followUpQuestionContext(index: number): string {
@@ -674,7 +664,6 @@ function sourceKey(source: Source): string {
 }
 
 function toggleDocument(documentID: number) {
-  if (chatMode.value !== "agent" && chatMode.value !== "a2a") return;
   selectedDocumentIDs.value = selectedDocumentIDs.value.includes(documentID)
     ? selectedDocumentIDs.value.filter((id) => id !== documentID)
     : [...selectedDocumentIDs.value, documentID];
@@ -1276,13 +1265,6 @@ function selectKnowledgeBase(id: number) {
   void loadConversation();
 }
 
-function clearA2APolling() {
-  if (a2aPollingTimer !== undefined) {
-    window.clearTimeout(a2aPollingTimer);
-    a2aPollingTimer = undefined;
-  }
-}
-
 async function createKnowledgeBase() {
   const name = newKnowledgeBaseName.value.trim();
   if (!name) {
@@ -1459,7 +1441,6 @@ async function prepareChatAttachment(file: File): Promise<ChatAttachmentDraft> {
 }
 
 async function addChatAttachments(files: File[]) {
-  if (chatMode.value !== "agent") return;
   const remaining = maxChatAttachments - chatAttachments.value.length;
   if (remaining <= 0) {
     errorMessage.value = `一条消息最多添加 ${maxChatAttachments} 个附件。`;
@@ -1494,15 +1475,10 @@ function clearChatAttachments() {
 async function askQuestion() {
   const prompt = question.value.trim();
   if (!prompt || !selectedKnowledgeBaseId.value || streaming.value) return;
-  const useA2AMode = chatMode.value === "a2a";
   const outgoingAttachments = [...chatAttachments.value];
-  if (useA2AMode && outgoingAttachments.length > 0) {
-    errorMessage.value = "附件目前只支持标准 Agent 模式。";
-    return;
-  }
   let activeConversationID: number | null = null;
   try {
-    if (!useA2AMode) activeConversationID = await ensureConversation(prompt);
+    activeConversationID = await ensureConversation(prompt);
   } catch (error) {
     showError(error);
     return;
@@ -1523,17 +1499,13 @@ async function askQuestion() {
     status: "streaming",
     requestMessage: prompt,
     conversationId: activeConversationID,
-    mode: chatMode.value,
+    mode: "agent",
     seenEventIDs: new Set(),
   };
   messages.value.push(answer);
   const answerIndex = messages.value.length - 1;
   streaming.value = true;
   try {
-    if (useA2AMode) {
-      await askA2ATask(prompt, answerIndex);
-      return;
-    }
     await streamAgentQuestion(prompt, answerIndex, activeConversationID, outgoingAttachments);
   } catch (error) {
     markAnswerFailure(answerIndex, error);
@@ -1793,7 +1765,7 @@ async function retryAnswer(answer: ChatMessage, answerIndex: number) {
   }
 }
 
-// 只有标准 Agent 流式回答才有进程内 run_id 可供停止；协作研究和异步任务不显示停止按钮。
+// 标准 Agent 流式回答通过持久化 run_id 支持停止和断线恢复。
 const canStopGeneration = computed(() => {
   if (!streaming.value || stopping.value) return false;
   const current = messages.value.find((message) => message.role === "assistant" && message.status === "streaming");
@@ -1813,54 +1785,6 @@ async function stopGeneration() {
     if (!response.ok) current.stopRequested = false;
   } catch {
     current.stopRequested = false;
-  }
-}
-
-async function askA2ATask(prompt: string, answerIndex: number) {
-  if (!selectedKnowledgeBaseId.value) throw new Error("请先选择知识库。");
-  const answer = messages.value[answerIndex];
-  if (!answer) throw new Error("无法创建问答结果。");
-
-  const task = await requestJSON<A2ATask>("/api/a2a/tasks", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ knowledge_base_id: selectedKnowledgeBaseId.value, message: prompt, top_k: topK.value, document_ids: selectedDocumentIDs.value, query_rewrite: queryRewrite.value }),
-  });
-  answer.activity = "任务已提交，等待后台 Agent 领取…";
-
-  try {
-    while (true) {
-      const current = await requestJSON<A2ATask>(`/api/a2a/tasks/${encodeURIComponent(task.id)}`);
-      if (current.status === "submitted") {
-        answer.activity = "任务已排队，等待后台 Agent 领取…";
-      } else if (current.status === "working") {
-        answer.activity = "后台 Agent 正在检索并组织答案…";
-      } else if (current.status === "failed") {
-        throw new Error(current.error || "后台 Agent 任务失败。");
-      } else if (current.status === "completed") {
-        const result = await requestJSON<{ answer?: string; sources?: Source[]; query_rewrite?: QueryRewriteStatus; retrieval?: RetrievalStats }>(
-          `/api/a2a/tasks/${encodeURIComponent(task.id)}/result`,
-        );
-        answer.content = typeof result.answer === "string" ? result.answer : "";
-        answer.sources = mergeSources(answer.sources ?? [], parseSources(result.sources));
-        if (result.query_rewrite) answer.queryRewrite = result.query_rewrite;
-        if (result.retrieval) answer.retrieval = result.retrieval;
-        answer.activity = "后台任务已完成";
-        answer.status = "done";
-        return;
-      } else {
-        throw new Error(`后台任务返回了未知状态：${current.status}`);
-      }
-
-      await new Promise<void>((resolve) => {
-        a2aPollingTimer = window.setTimeout(() => {
-          a2aPollingTimer = undefined;
-          resolve();
-        }, 1000);
-      });
-    }
-  } finally {
-    clearA2APolling();
   }
 }
 
@@ -2437,7 +2361,6 @@ onMounted(() => {
 onUnmounted(() => {
   window.clearInterval(documentPollTimer);
   for (const answerIndex of summaryPollingTimers.keys()) stopSummaryPolling(answerIndex);
-  clearA2APolling();
   window.clearTimeout(copyFeedbackTimer);
   if (conversationSearchTimer !== undefined) window.clearTimeout(conversationSearchTimer);
   window.removeEventListener("keydown", closeSourceOnEscape);
@@ -2575,7 +2498,7 @@ onUnmounted(() => {
         <div class="chat-panel panel-card">
           <div class="panel-heading">
             <div><span class="section-index">02</span><h2>问答台</h2></div>
-            <span class="panel-meta">{{ chatMode === "a2a" ? "ASYNC TASK" : "STREAMING" }}</span>
+            <span class="panel-meta">STREAMING</span>
           </div>
           <div class="chat-intro">
             <span class="chat-spark">✦</span>
@@ -2584,26 +2507,21 @@ onUnmounted(() => {
               <strong>{{ Math.round(feedbackStats.positiveRate * 100) }}%</strong>
               <span>满意率 · {{ feedbackStats.total }} 条反馈</span>
             </div>
-            <div class="chat-mode-switch" role="group" aria-label="问答模式">
-              <button type="button" :class="{ 'chat-mode--active': chatMode === 'agent' }" :aria-pressed="chatMode === 'agent'" :disabled="streaming" @click="chatMode = 'agent'">标准 Agent</button>
-              <button type="button" :class="{ 'chat-mode--active': chatMode === 'a2a' }" :aria-pressed="chatMode === 'a2a'" :disabled="streaming" @click="chatMode = 'a2a'">异步任务</button>
-            </div>
           </div>
-          <p v-if="chatMode === 'a2a'" class="chat-mode-note">异步任务会交给后台 Agent 执行；页面会自动跟踪任务状态，完成后展示答案和引用，不写入会话历史。</p>
           <div class="retrieval-controls">
-            <div><strong>检索范围</strong><span>{{ selectedDocumentIDs.length ? `${chatMode === 'a2a' ? '异步任务' : '标准 Agent'} 仅检索 ${selectedDocumentIDs.length} 份已选文档；` : "当前模式检索整个知识库；" }}控制召回数量和证据相关度</span></div>
+            <div><strong>检索范围</strong><span>{{ selectedDocumentIDs.length ? `标准 Agent 仅检索 ${selectedDocumentIDs.length} 份已选文档；` : "当前模式检索整个知识库；" }}控制召回数量和证据相关度</span></div>
             <label>召回片段数<select v-model.number="topK" :disabled="streaming"><option v-for="value in [3, 5, 8, 12, 20]" :key="value" :value="value">{{ value }} 条</option></select></label>
             <label class="rewrite-control"><input v-model="queryRewrite" type="checkbox" :disabled="streaming" /> 多查询改写</label>
-            <label v-if="chatMode !== 'a2a'" class="threshold-control">关键词下限
+            <label class="threshold-control">关键词下限
               <input v-model.number="keywordThreshold" type="range" min="0" max="0.80" step="0.05" :disabled="streaming">
               <output>{{ keywordThreshold.toFixed(2) }}</output>
             </label>
-            <label v-if="chatMode === 'agent'" class="threshold-control">距离上限
+            <label class="threshold-control">距离上限
               <input v-model.number="similarityThreshold" type="range" min="0.30" max="0.90" step="0.05" :disabled="streaming">
               <output>{{ similarityThreshold.toFixed(2) }}</output>
             </label>
           </div>
-          <template v-if="chatMode !== 'a2a'">
+          <template>
             <div class="conversation-bar">
               <div class="conversation-current">
                 <span class="conversation-caption">当前会话</span>
@@ -2836,7 +2754,7 @@ onUnmounted(() => {
                 </button>
               </div>
             </div>
-            <div v-if="chatMode === 'agent' && chatAttachments.length" class="attachment-draft-list" aria-label="待发送附件">
+            <div v-if="chatAttachments.length" class="attachment-draft-list" aria-label="待发送附件">
               <div v-for="(attachment, attachmentIndex) in chatAttachments" :key="`${attachment.filename}-${attachmentIndex}`" class="attachment-draft">
                 <img v-if="attachment.dataURL?.startsWith('data:image/')" :src="attachment.dataURL" :alt="attachment.filename" />
                 <span v-else class="attachment-draft-icon">TXT</span>
@@ -2846,11 +2764,11 @@ onUnmounted(() => {
             </div>
             <div class="composer-footer">
               <div class="composer-tools">
-                <label v-if="chatMode === 'agent'" class="attachment-trigger" title="添加图片或文本附件">
+                <label class="attachment-trigger" title="添加图片或文本附件">
                   <span aria-hidden="true">＋</span>附件
                   <input ref="chatAttachmentInput" type="file" accept="image/png,image/jpeg,image/webp,text/plain,text/markdown,.txt,.md" multiple :disabled="streaming" @change="onChatAttachmentInput" />
                 </label>
-                <label v-if="chatMode === 'agent'" class="thinking-mode-control">
+                <label class="thinking-mode-control">
                   <span>思考</span>
                   <select v-model="thinkingMode" :disabled="streaming" aria-label="选择思考模式">
                     <option value="fast">快速</option>

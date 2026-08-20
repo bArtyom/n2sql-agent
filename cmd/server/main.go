@@ -11,7 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bArtyom/n2sql-agent/internal/a2a"
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/agentrun"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
@@ -34,7 +33,6 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
-	"github.com/bArtyom/n2sql-agent/internal/multiagent"
 	"github.com/bArtyom/n2sql-agent/internal/rag"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 	"github.com/bArtyom/n2sql-agent/internal/worker"
@@ -97,7 +95,6 @@ func main() {
 			log.Printf("agent stream Redis enabled: ttl=%s max_len=%d", cfg.AgentStreamTTL, cfg.AgentStreamMaxLen)
 		}
 	}
-	a2aStore := a2a.NewPostgresStore(db)
 	searchService := retrieval.NewHybridServiceWithRerankerAndRewriterAndCache(
 		embeddingService,
 		chunkStore,
@@ -156,18 +153,6 @@ func main() {
 	}
 	agentAnswerService.SetMemoryStore(memoryStore)
 	agentAnswerService.SetDelegateResearchEnabled(true)
-	knowledgeResearcher, err := multiagent.NewAutonomousKnowledgeSearchResearcher(chatService, searchService, cfg.AgentMaxSteps, cfg.AgentMaxToolResultBytes)
-	if err != nil {
-		log.Fatal(err)
-	}
-	modelAnswerer, err := multiagent.NewModelAnswerer(chatService)
-	if err != nil {
-		log.Fatal(err)
-	}
-	multiAgentAnswers, err := multiagent.NewSupervisor(knowledgeResearcher, modelAnswerer, cfg.AgentTimeout)
-	if err != nil {
-		log.Fatal(err)
-	}
 
 	server := &http.Server{
 		Addr: cfg.Address,
@@ -189,9 +174,6 @@ func main() {
 			AgentRunReader:             agentRunStore,
 			AgentEventStore:            agentEventStore,
 			AgentRunExecutor:           agentRunExecutor,
-			A2AAnswers:                 multiAgentAnswers,
-			A2AStore:                   a2aStore,
-			A2ATaskTimeout:             cfg.AgentTimeout,
 			MCPKnowledgeSearch:         searchService,
 			MCPDocuments:               documentService,
 			MCPKnowledgeBases:          knowledgeBaseService,
@@ -250,14 +232,6 @@ func main() {
 			}
 		}
 	}()
-	a2aRunner := a2a.NewRunnerWithCleanup(a2aStore, multiAgentAnswers, cfg.AgentTimeout, cfg.A2ATaskRetention, cfg.A2ACleanupInterval, metricsRegistry)
-	a2aDone := make(chan struct{})
-	go func() {
-		defer close(a2aDone)
-		a2aRunner.Run(runContext, cfg.WorkerPollInterval, func(err error) {
-			slog.ErrorContext(runContext, "a2a_worker_loop_error", "error", err)
-		})
-	}()
 	go func() {
 		defer close(agentRunDone)
 		agentRunRunner.Run(runContext, cfg.WorkerPollInterval, func(err error) {
@@ -276,7 +250,6 @@ func main() {
 	stop()
 	<-workerDone
 	<-agentRunDone
-	<-a2aDone
 	<-checkpointCleanupDone
 	if pprofDone != nil {
 		<-pprofDone

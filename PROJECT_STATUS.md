@@ -49,9 +49,9 @@
 - Agent Runtime 增加重复工具调用保护：按工具名和规范化后的 JSON 参数去重，同一轮重复调用会安全结束，避免重复检索和步数浪费。
 - Agent Runtime 增加运行内上下文预算：单轮模型上下文超过 64KB 时保留系统提示、当前问题和最近工具结果，省略较早内容，避免多步检索结果累积撑爆上下文。
 - 检索已具备向量 + PostgreSQL 关键词、RRF 融合、关键词阈值、可选 Rerank、Query Rewrite、缓存、父块上下文去重、HNSW 和检索统计。
-- 固定“协作研究”Multi-Agent 用户模式已删除：前端不再显示该模式，`/multi-agent-chat` 和 `/multi-agent-chat/stream` 路由、处理器及路由测试已移除。普通 Agent 改为按需调用只读 `delegate_research` 子 Agent；子 Agent 只暴露 `knowledge_search`，不会递归委派或执行副作用工具。A2A 作为独立异步协议入口暂时保留。
-- Multi-Agent 的旧固定 Supervisor 仍仅被现有 A2A 适配使用；后续若要彻底清理 `internal/multiagent`，需要先把 A2A Runner/Store 迁移到 `agentservice.Answerer`。
-- 前端已支持会话、引用卡片与懒加载原文、检索统计、Agent 工具轨迹折叠、断线恢复、A2A 异步任务模式、正文分页预览、固定起步问题和按需生成追问建议。
+- 固定“协作研究”Multi-Agent 模式和 A2A 异步任务模式已全部删除；前端现在只有标准 Agent 对话，后端只保留标准 Agent 的持久化 Worker/SSE。普通 Agent 通过只读 `delegate_research` 工具按需委派子 Agent；子 Agent 只暴露 `knowledge_search`，不会递归委派或执行副作用工具。
+- 旧 `internal/multiagent`、`internal/a2a`、相关路由、任务存储、后台循环、指标和配置已清理；新增迁移会删除已有数据库中的 `a2a_tasks` 表。
+- 前端已支持会话、引用卡片与懒加载原文、检索统计、Agent 工具轨迹折叠、断线恢复、正文分页预览、固定起步问题和按需生成追问建议。
 - 最新停止生成切片：标准 Agent 流式回答期间输入栏显示“停止生成”按钮，调用 `POST /api/knowledge-bases/{id}/agent-runs/{runID}/stop` 取消执行上下文；引擎发 `run_canceled` 事件，前端标记独立 stopped 终态（保留部分内容、不显示重新生成、不写会话历史）；断线恢复与用户停止语义分离；停止按知识库 ID 隔离。
 - 最新会话置顶切片：`conversations.is_pinned` 列 + 排序索引；列表按置顶优先、组内按更新时间排序；`PATCH /conversations/{id}` 支持 `{"is_pinned": true/false}`（与重命名共用端点，跨库 404）；前端会话列表按「置顶 + 今天/昨天/N 天前」分组，置顶项 📌 标记与置顶/取消置顶按钮。
 - 会话体验四连切片：①自动标题——首轮问答后若仍是默认标题，用问题摘要（30 字截断）重命名，不覆盖用户已命名；②追问"换一批"——生成建议后按钮变为换一批，接口无状态直接再次调用；③会话更多菜单——"⋯"菜单（置顶/改名/清空消息/复制 Markdown/删除），清空走 `DELETE /conversations/{id}/messages`（事务删消息/摘要/幂等键，保留会话），复制为纯前端拼 Markdown；④正文内引用标记——提示词要求模型输出 `<kb doc_id pos/>`，前端渲染成可点击引用 pill（事件委托打开原文抽屉），流式显示"〔引用〕"，模型不输出标签时行为不变（来源卡片照旧）。
@@ -74,7 +74,7 @@
 
 ## 明确后置或不做
 
-- Redis 事件流已作为 Agent 短期事件能力接入；Redis-backed 任务队列、完整 MCP/A2A 规范、复杂沙箱、生产级认证和多租户仍后置。
+- Redis 事件流已作为 Agent 短期事件能力接入；Redis-backed 任务队列、完整 MCP 规范、复杂沙箱、生产级认证和多租户仍后置。
 - 暂不实现成功回答后的编辑问题/覆盖式重新生成；这是已确认的范围决定，不能自行恢复。
 - 暂不把大规模评测、真实压测和完整测试套件作为 Agent/RAG 功能推进的阻塞项；只保留与改动匹配的必要验证。
 - OCR 只保留最小接入和一次验证，不扩展成完整文档解析平台。
@@ -83,7 +83,7 @@
 
 后续按双主线推进：Agent Runtime 先读 DeerFlow，再用 WeKnora 校准工具、会话和用户可见交互；RAG 以 WeKnora 的文档处理、混合检索、引用和知识库交互为主。每轮选择一个小而完整的功能切片，完成后端链路、必要前端反馈、测试和学习记录；不要因为参考仓库已有复杂能力就直接扩展成完整协议或大规模系统。
 
-下一轮候选：完成 A2A 从固定 Supervisor 到标准 Agent 的适配，随后删除 `internal/multiagent` 残余代码；再进入 Agent 计划中的动态子 Agent 持久化、子任务事件关联和并行委派。
+下一轮候选：为动态子 Agent 增加父子 Run 持久化、子任务事件关联和取消传播，再评估受控并行委派。
 
 ## 交付要求
 

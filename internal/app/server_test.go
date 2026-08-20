@@ -15,7 +15,6 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
-	"github.com/bArtyom/n2sql-agent/internal/multiagent"
 	"github.com/bArtyom/n2sql-agent/internal/rag"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 )
@@ -72,19 +71,6 @@ func (agentAnswererStub) Answer(context.Context, int64, agentservice.ChatRequest
 
 func (agentAnswererStub) AnswerWithEvents(context.Context, int64, agentservice.ChatRequest, agentruntime.EventSink) (agentservice.Response, error) {
 	return agentservice.Response{Answer: "OK"}, nil
-}
-
-type multiAgentAnswererStub struct{}
-
-func (multiAgentAnswererStub) Answer(context.Context, int64, string, int) (multiagent.Response, error) {
-	return multiagent.Response{Answer: "OK"}, nil
-}
-
-func (multiAgentAnswererStub) AnswerWithEvents(_ context.Context, _ int64, _ string, _ int, emit multiagent.EventSink) (multiagent.Response, error) {
-	if err := emit(multiagent.Event{Type: multiagent.EventRunStarted}); err != nil {
-		return multiagent.Response{}, err
-	}
-	return multiagent.Response{Answer: "OK"}, nil
 }
 
 type knowledgeBaseStoreStub struct{}
@@ -286,22 +272,6 @@ func TestServerRoutesKnowledgeBaseMCP(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), `"supportedVersions"`) {
 		t.Fatalf("response body = %q, want MCP discovery result", response.Body.String())
-	}
-}
-
-func TestServerRoutesA2A(t *testing.T) {
-	server := app.New(app.Dependencies{A2AAnswers: multiAgentAnswererStub{}})
-
-	response := httptest.NewRecorder()
-	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/.well-known/agent.json", nil))
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "knowledge_base_question_answering") {
-		t.Fatalf("agent card response = (%d, %q), want A2A card", response.Code, response.Body.String())
-	}
-
-	response = httptest.NewRecorder()
-	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/a2a/tasks", strings.NewReader(`{"knowledge_base_id":7,"message":"问题"}`)))
-	if response.Code != http.StatusAccepted {
-		t.Fatalf("task response status = %d, want %d", response.Code, http.StatusAccepted)
 	}
 }
 

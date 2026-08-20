@@ -15,8 +15,6 @@ const (
 	defaultModelProviderAllowedHost   = "api.openai.com"
 	defaultUploadDir                  = "./.data/uploads"
 	defaultWorkerPollInterval         = 2 * time.Second
-	defaultA2ATaskRetention           = 7 * 24 * time.Hour
-	defaultA2ACleanupInterval         = time.Hour
 	defaultOCRPrompt                  = "请只转写图片中清晰可见的文字，保留原有段落和表格结构，不要解释或补充内容。"
 	defaultOCRRendererBinary          = "pdftoppm"
 	defaultOCRRenderDPI               = 150
@@ -50,8 +48,6 @@ type Config struct {
 	UploadDir                  string
 	WorkerPollInterval         time.Duration
 	PprofAddress               string
-	A2ATaskRetention           time.Duration
-	A2ACleanupInterval         time.Duration
 	OCRModel                   string
 	OCRPrompt                  string
 	OCRRendererBinary          string
@@ -104,8 +100,6 @@ func Load() Config {
 		UploadDir:                  uploadDir(),
 		WorkerPollInterval:         workerPollInterval(),
 		PprofAddress:               strings.TrimSpace(os.Getenv("PPROF_ADDRESS")),
-		A2ATaskRetention:           durationEnv("A2A_TASK_RETENTION", defaultA2ATaskRetention),
-		A2ACleanupInterval:         durationEnv("A2A_CLEANUP_INTERVAL", defaultA2ACleanupInterval),
 		OCRModel:                   strings.TrimSpace(os.Getenv("OCR_MODEL")),
 		OCRPrompt:                  valueOrDefault("OCR_PROMPT", defaultOCRPrompt),
 		OCRRendererBinary:          valueOrDefault("OCR_RENDERER_BIN", defaultOCRRendererBinary),

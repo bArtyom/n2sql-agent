@@ -3,9 +3,7 @@ package app
 import (
 	"log/slog"
 	"net/http"
-	"time"
 
-	"github.com/bArtyom/n2sql-agent/internal/a2a"
 	"github.com/bArtyom/n2sql-agent/internal/agentrun"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/agentstream"
@@ -23,7 +21,6 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
-	"github.com/bArtyom/n2sql-agent/internal/multiagent"
 	"github.com/bArtyom/n2sql-agent/internal/rag"
 	"github.com/bArtyom/n2sql-agent/internal/requestid"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
@@ -47,9 +44,6 @@ type Dependencies struct {
 	AgentRunReader             agentrun.Reader
 	AgentEventStore            agentrun.EventStore
 	AgentRunExecutor           agentrun.Executor
-	A2AAnswers                 multiagent.Answerer
-	A2AStore                   a2a.TaskStore
-	A2ATaskTimeout             time.Duration
 	MCPKnowledgeSearch         retrieval.Searcher
 	MCPDocuments               document.Reader
 	MCPKnowledgeBases          knowledgebase.Store
@@ -165,18 +159,6 @@ func New(dependencies Dependencies) http.Handler {
 	}
 	if dependencies.FollowUpSuggestions != nil {
 		mux.Handle("POST /api/knowledge-bases/{id}/follow-up-suggestions", handler.NewFollowUpSuggestions(dependencies.FollowUpSuggestions))
-	}
-	if dependencies.A2AAnswers != nil {
-		var a2aHandler http.Handler
-		if dependencies.A2AStore != nil {
-			a2aHandler = a2a.NewHandlerWithStore(dependencies.A2AAnswers, dependencies.A2AStore, dependencies.A2ATaskTimeout, registry)
-		} else {
-			a2aHandler = a2a.NewHandlerWithTimeoutAndMetrics(dependencies.A2AAnswers, dependencies.A2ATaskTimeout, registry)
-		}
-		mux.Handle("GET /.well-known/agent.json", a2aHandler)
-		mux.Handle("POST /api/a2a/tasks", a2aHandler)
-		mux.Handle("GET /api/a2a/tasks/{id}", a2aHandler)
-		mux.Handle("GET /api/a2a/tasks/{id}/result", a2aHandler)
 	}
 	if dependencies.MCPKnowledgeSearch != nil && dependencies.MCPDocuments != nil && dependencies.MCPKnowledgeBases != nil {
 		mux.Handle("POST /api/knowledge-bases/{id}/mcp", mcp.NewKnowledgeBaseHandler(dependencies.MCPKnowledgeSearch, dependencies.MCPDocuments, dependencies.MCPKnowledgeBases, dependencies.AgentMaxToolResultBytes))
