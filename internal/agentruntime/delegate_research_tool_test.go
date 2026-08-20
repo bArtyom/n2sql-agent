@@ -64,6 +64,18 @@ type childLifecycleStub struct {
 	err      error
 }
 
+type asyncChildLifecycleStub struct {
+	childLifecycleStub
+	ready  bool
+	result agent.ToolResult
+	called bool
+}
+
+func (s *asyncChildLifecycleStub) EnqueueChild(_ context.Context, _ ChildRunSpec) (string, bool, agent.ToolResult, error) {
+	s.called = true
+	return "child-async-1", s.ready, s.result, nil
+}
+
 func (s *childLifecycleStub) StartChild(_ context.Context, spec ChildRunSpec) (string, error) {
 	s.started = spec
 	return spec.RunID, nil
@@ -73,6 +85,39 @@ func (s *childLifecycleStub) FinishChild(_ context.Context, _ ChildRunSpec, _ ag
 	s.finished = runErr == nil
 	s.err = runErr
 	return nil
+}
+
+func TestDelegateResearchToolEnqueuesAsyncChildInsteadOfRunningInline(t *testing.T) {
+	lifecycle := &asyncChildLifecycleStub{}
+	chat := &delegateChatStub{}
+	tool, err := NewDelegateResearchTool(chat, delegateSearcherStub{}, 7, 4096, 3, nil, false, retrieval.DefaultKeywordThreshold)
+	if err != nil {
+		t.Fatalf("NewDelegateResearchTool() error = %v", err)
+	}
+	tool.SetParentRun(42, "parent-run")
+	tool.SetChildRunLifecycle(lifecycle)
+	result, err := tool.Call(context.Background(), json.RawMessage(`{"question":"研究年假"}`))
+	if err != nil {
+		t.Fatalf("Call() error = %v", err)
+	}
+	if !lifecycle.called || chat.calls != 0 || result.Metadata["waiting_children"] != true {
+		t.Fatalf("async result = %#v, called=%v chat_calls=%d", result, lifecycle.called, chat.calls)
+	}
+}
+
+func TestDelegateResearchToolReusesCompletedAsyncChildResult(t *testing.T) {
+	lifecycle := &asyncChildLifecycleStub{ready: true, result: agent.ToolResult{Content: "已完成研究", Metadata: map[string]any{"child_status": string(agent.RunSucceeded)}}}
+	chat := &delegateChatStub{}
+	tool, err := NewDelegateResearchTool(chat, delegateSearcherStub{}, 7, 4096, 3, nil, false, retrieval.DefaultKeywordThreshold)
+	if err != nil {
+		t.Fatalf("NewDelegateResearchTool() error = %v", err)
+	}
+	tool.SetParentRun(42, "parent-run")
+	tool.SetChildRunLifecycle(lifecycle)
+	result, err := tool.Call(context.Background(), json.RawMessage(`{"question":"研究年假"}`))
+	if err != nil || result.Content != "已完成研究" || chat.calls != 0 {
+		t.Fatalf("result = %#v err=%v chat_calls=%d", result, err, chat.calls)
+	}
 }
 
 func TestDelegateResearchToolTimesOutAndMarksChildTerminal(t *testing.T) {

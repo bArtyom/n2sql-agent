@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
+	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
 )
 
 type runStoreStub struct {
@@ -18,6 +19,8 @@ type runStoreStub struct {
 	markedToken   string
 	renewErr      error
 	checkpointErr error
+	waiting       bool
+	resumedParent int64
 }
 
 func (s *runStoreStub) Create(context.Context, CreateInput) (Run, error) { return s.run, nil }
@@ -53,6 +56,15 @@ func (s *runStoreStub) MarkCanceled(_ context.Context, _ int64, token string) er
 	s.status = StatusCanceled
 	return nil
 }
+func (s *runStoreStub) MarkWaitingChildren(_ context.Context, _ int64, _ string) error {
+	s.waiting = true
+	s.status = StatusWaitingChildren
+	return nil
+}
+func (s *runStoreStub) ResumeParentIfChildrenTerminal(_ context.Context, parentID int64) (bool, error) {
+	s.resumedParent = parentID
+	return true, nil
+}
 func (s *runStoreStub) DeleteToolCheckpoints(_ context.Context, id int64) error {
 	if id > 0 {
 		s.deleted++
@@ -86,6 +98,20 @@ func TestRunnerMarksSucceededAfterExecution(t *testing.T) {
 	}
 	if store.markedToken != "lease-a" {
 		t.Fatalf("marked token = %q, want lease-a", store.markedToken)
+	}
+}
+
+func TestRunnerParksParentWhenChildRunsArePending(t *testing.T) {
+	store := &runStoreStub{run: Run{ID: 8, RunID: "parent-8", LeaseToken: "lease-a"}, status: StatusPending}
+	runner, err := NewRunner(store, ExecutorFunc(func(context.Context, Run, EventSink) error {
+		return agentruntime.ErrAgentWaitingChildren
+	}))
+	if err != nil {
+		t.Fatalf("NewRunner() error = %v", err)
+	}
+	worked, err := runner.RunOnce(context.Background())
+	if err != nil || !worked || !store.waiting || store.status != StatusWaitingChildren {
+		t.Fatalf("RunOnce() = (%v, %v), waiting=%v status=%s", worked, err, store.waiting, store.status)
 	}
 }
 

@@ -46,6 +46,18 @@ type parallelToolStub struct {
 
 type timeoutToolStub struct{}
 
+type waitingChildrenToolStub struct{}
+
+func (waitingChildrenToolStub) Name() string        { return "delegate_research" }
+func (waitingChildrenToolStub) Description() string { return "async child research" }
+func (waitingChildrenToolStub) Parameters() json.RawMessage {
+	return json.RawMessage(`{"type":"object"}`)
+}
+func (waitingChildrenToolStub) ParallelSafe() bool { return true }
+func (waitingChildrenToolStub) Call(context.Context, json.RawMessage) (agent.ToolResult, error) {
+	return agent.ToolResult{Content: "子 Agent 已进入后台执行", Metadata: map[string]any{"waiting_children": true}}, nil
+}
+
 func (timeoutToolStub) Name() string { return "slow_read" }
 
 func (timeoutToolStub) Description() string { return "slow read-only tool" }
@@ -209,6 +221,26 @@ func TestEngineRunsIndependentReadOnlyToolsInParallel(t *testing.T) {
 	result, err := engine.Run(context.Background(), "run-parallel-tools", []modelclient.ChatMessage{{Role: "user", Content: "查询"}})
 	if err != nil || result.Run.FinalAnswer() != "完成" {
 		t.Fatalf("Run() = (%#v, %v), want completed answer", result.Run, err)
+	}
+}
+
+func TestEngineStopsParentWhenChildrenArePending(t *testing.T) {
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(waitingChildrenToolStub{}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	chat := chatStub{call: func(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+			ID: "child-call", Type: "function", Function: modelclient.ToolCallFunction{Name: "delegate_research", Arguments: `{}`},
+		}}}, nil
+	}}
+	engine, err := agentruntime.NewEngine(chat, registry, 3)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	_, err = engine.Run(context.Background(), "parent-waiting", []modelclient.ChatMessage{{Role: "user", Content: "研究"}})
+	if !errors.Is(err, agentruntime.ErrAgentWaitingChildren) {
+		t.Fatalf("Run() error = %v, want ErrAgentWaitingChildren", err)
 	}
 }
 
