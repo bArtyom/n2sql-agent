@@ -303,6 +303,7 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		delegate.SetParentRun(request.ParentRunDatabaseID, request.RunID)
 		delegate.SetChildRunLifecycle(s.childLifecycle)
 		delegate.SetChildScheduler(s.childScheduler)
+		delegate.SetChildEventSink(sink)
 		if err := registry.AllowAndRegister(delegate); err != nil {
 			return Response{}, fmt.Errorf("register delegate research tool: %w", err)
 		}
