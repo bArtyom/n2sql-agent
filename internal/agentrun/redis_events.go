@@ -75,7 +75,7 @@ func (s *RedisEventStore) Append(ctx context.Context, run Run, event agentstream
 	if err != nil {
 		return fmt.Errorf("encode agent stream event: %w", err)
 	}
-	key := s.key(run.RunID, run.KnowledgeBaseID)
+	key := s.key(eventStreamRunID(run, event), run.KnowledgeBaseID)
 	pipe := s.client.TxPipeline()
 	pipe.XAdd(ctx, &redis.XAddArgs{
 		Stream: key,

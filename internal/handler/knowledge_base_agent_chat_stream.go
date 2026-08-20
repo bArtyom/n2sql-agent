@@ -398,7 +398,8 @@ func writeAgentSSEEvent(w http.ResponseWriter, flusher http.Flusher, eventType s
 		string(agent.EventApprovalExpired),
 		string(agent.EventRunFinished),
 		string(agent.EventRunFailed),
-		string(agent.EventRunCanceled):
+		string(agent.EventRunCanceled),
+		string(agent.EventChildEvent):
 	default:
 		return fmt.Errorf("invalid agent SSE event type %q", eventType)
 	}

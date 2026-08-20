@@ -47,6 +47,35 @@ func TestAgentRunStreamReplaysFinishedRun(t *testing.T) {
 	}
 }
 
+func TestAgentRunStreamReplaysChildEvent(t *testing.T) {
+	hub := agentstream.NewHub()
+	if err := hub.Start("parent-1", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.PublishAgent(agent.Event{
+		ID: "parent-1-child-event-1", RunID: "parent-1", Type: agent.EventChildEvent,
+		Data: map[string]any{"child_run_id": "child-1", "child_event_type": "run_started"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.PublishAgent(agent.Event{ID: "parent-finished", RunID: "parent-1", Type: agent.EventRunFinished}); err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.Finish("parent-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/7/agent-runs/parent-1/stream", nil)
+	request.SetPathValue("id", "7")
+	request.SetPathValue("runID", "parent-1")
+	response := httptest.NewRecorder()
+	handler.NewAgentRunStream(hub).ServeHTTP(response, request)
+
+	if !strings.Contains(response.Body.String(), "event: child_event\n") || !strings.Contains(response.Body.String(), `"child_run_id":"child-1"`) {
+		t.Fatalf("body=%q, want replayed child event", response.Body.String())
+	}
+}
+
 func TestAgentRunStreamResumesAfterLastEventID(t *testing.T) {
 	hub := agentstream.NewHub()
 	if err := hub.Start("run-1", 7); err != nil {

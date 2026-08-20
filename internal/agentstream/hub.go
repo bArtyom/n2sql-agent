@@ -350,7 +350,7 @@ func validEventType(eventType string) bool {
 		string(agent.EventRunStarted), string(agent.EventStepStarted), string(agent.EventToolCalled),
 		string(agent.EventToolFinished), string(agent.EventApprovalRequired), string(agent.EventApprovalResolved),
 		string(agent.EventApprovalExpired), string(agent.EventReasoningDelta), string(agent.EventMessageDelta),
-		string(agent.EventRunFinished), string(agent.EventRunFailed), string(agent.EventRunCanceled):
+		string(agent.EventRunFinished), string(agent.EventRunFailed), string(agent.EventRunCanceled), string(agent.EventChildEvent):
 		return true
 	default:
 		return false

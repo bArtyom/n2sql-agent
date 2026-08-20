@@ -37,6 +37,27 @@ func TestHubReplaysAndClosesFinishedRun(t *testing.T) {
 	}
 }
 
+func TestHubAcceptsChildEventsOnParentStream(t *testing.T) {
+	hub := agentstream.NewHub()
+	if err := hub.Start("parent-1", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.PublishAgent(agent.Event{
+		ID: "parent-1-child-event-1", RunID: "parent-1", Type: agent.EventChildEvent,
+		Data: map[string]any{"child_run_id": "child-1", "child_event_type": "run_started"},
+	}); err != nil {
+		t.Fatalf("PublishAgent(child_event) error = %v", err)
+	}
+	snapshot, _, cancel, _, err := hub.Subscribe("parent-1", 7, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	if len(snapshot) != 1 || snapshot[0].Type != string(agent.EventChildEvent) {
+		t.Fatalf("snapshot = %#v, want one child event", snapshot)
+	}
+}
+
 func TestHubDoesNotCrossKnowledgeBases(t *testing.T) {
 	hub := agentstream.NewHub()
 	if err := hub.Start("run-1", 7); err != nil {

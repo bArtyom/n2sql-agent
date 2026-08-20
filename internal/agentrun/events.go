@@ -20,6 +20,13 @@ type PostgresEventStore struct{ db *sql.DB }
 
 func NewPostgresEventStore(db *sql.DB) *PostgresEventStore { return &PostgresEventStore{db: db} }
 
+func eventStreamRunID(run Run, event agentstream.Event) string {
+	if event.RunID != "" {
+		return event.RunID
+	}
+	return run.RunID
+}
+
 func (s *PostgresEventStore) Append(ctx context.Context, run Run, event agentstream.Event) error {
 	if run.ID <= 0 || event.RunID == "" || event.Type == "" {
 		return ErrInvalidRun
@@ -41,10 +48,19 @@ func (s *PostgresEventStore) Append(ctx context.Context, run Run, event agentstr
 
 func (s *PostgresEventStore) List(ctx context.Context, runID string, knowledgeBaseID int64) ([]agentstream.Event, error) {
 	rows, err := s.db.QueryContext(ctx, `
+		WITH RECURSIVE run_tree AS (
+			SELECT id
+			FROM agent_runs
+			WHERE run_id = $1 AND knowledge_base_id = $2
+			UNION ALL
+			SELECT child.id
+			FROM agent_runs child
+			JOIN run_tree parent ON child.parent_run_id = parent.id
+			WHERE child.knowledge_base_id = $2
+		)
 		SELECT e.event_id, e.event_type, e.payload, e.created_at
 		FROM agent_run_events e
-		JOIN agent_runs r ON r.id = e.agent_run_id
-		WHERE r.run_id = $1 AND r.knowledge_base_id = $2
+		JOIN run_tree r ON r.id = e.agent_run_id
 		ORDER BY e.id`, runID, knowledgeBaseID)
 	if err != nil {
 		return nil, fmt.Errorf("list agent events: %w", err)
