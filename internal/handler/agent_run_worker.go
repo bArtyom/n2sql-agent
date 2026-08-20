@@ -147,9 +147,14 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 		transportEventNumber := 0
 		publish := func(eventType string, value any) error {
 			transportEventNumber++
+			eventRunID := run.RunID
+			eventIDPrefix := run.RunID
+			if request.ChildMode && request.ParentRunPublicID != "" {
+				eventRunID = request.ParentRunPublicID
+			}
 			event := agentstream.Event{
-				ID:        fmt.Sprintf("%s-transport-%d", run.RunID, transportEventNumber),
-				RunID:     run.RunID,
+				ID:        fmt.Sprintf("%s-transport-%d", eventIDPrefix, transportEventNumber),
+				RunID:     eventRunID,
 				Type:      eventType,
 				Data:      value,
 				CreatedAt: time.Now().UTC(),
@@ -162,11 +167,10 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 			return hub.Publish(event)
 		}
 		emit := func(event agent.Event) error {
-			event.RunID = run.RunID
-			if request.ChildMode && request.ParentRunPublicID != "" {
-				event.RunID = request.ParentRunPublicID
-			}
 			event.Version = agent.EventSchemaVersion
+			if request.ChildMode {
+				event = wrapChildAgentEvent(run, request, event)
+			}
 			if sink != nil {
 				return sink(event)
 			}
@@ -256,4 +260,37 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 		logAgentRequest(ctx, started, request, response, nil, registry, !replayed)
 		return nil
 	})
+}
+
+// wrapChildAgentEvent keeps asynchronous child progress on the parent's SSE
+// stream while preserving the child identity and original event type. Only a
+// bounded display summary crosses the boundary; raw child model/tool payloads
+// stay inside the child run and its checkpoint/result storage.
+func wrapChildAgentEvent(run agentrun.Run, request agentservice.ChatRequest, event agent.Event) agent.Event {
+	parentRunID := request.ParentRunPublicID
+	if parentRunID == "" {
+		parentRunID = run.RunID
+	}
+	data := map[string]any{
+		"child_run_id":     run.RunID,
+		"parent_run_id":    parentRunID,
+		"child_event_type": string(event.Type),
+		"child_step":       event.StepNumber,
+	}
+	if values, ok := event.Data.(map[string]any); ok {
+		for _, key := range []string{"tool_name", "result_summary", "failed"} {
+			if value, exists := values[key]; exists {
+				data[key] = value
+			}
+		}
+	}
+	return agent.Event{
+		Version:    agent.EventSchemaVersion,
+		ID:         fmt.Sprintf("%s-child-%s", parentRunID, event.ID),
+		RunID:      parentRunID,
+		Type:       agent.EventChildEvent,
+		StepNumber: event.StepNumber,
+		Data:       data,
+		CreatedAt:  event.CreatedAt,
+	}
 }
