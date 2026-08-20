@@ -217,8 +217,19 @@ func (s *PostgresStore) CreateChild(ctx context.Context, input ChildCreateInput)
 	}
 	var run Run
 	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO agent_runs (run_id, knowledge_base_id, parent_run_id, run_kind, request, status, attempt_count, started_at)
-		VALUES ($1, $2, $3, 'child', $4, 'running', 1, CURRENT_TIMESTAMP)
+		INSERT INTO agent_runs (run_id, knowledge_base_id, parent_run_id, run_kind, request, status, attempt_count, started_at, finished_at, response, error_message, updated_at)
+		VALUES ($1, $2, $3, 'child', $4, 'running', 1, CURRENT_TIMESTAMP, NULL, NULL, NULL, CURRENT_TIMESTAMP)
+		ON CONFLICT (run_id) DO UPDATE SET
+			parent_run_id = EXCLUDED.parent_run_id,
+			knowledge_base_id = EXCLUDED.knowledge_base_id,
+			request = EXCLUDED.request,
+			status = 'running',
+			attempt_count = agent_runs.attempt_count + 1,
+			started_at = CURRENT_TIMESTAMP,
+			finished_at = NULL,
+			response = NULL,
+			error_message = NULL,
+			updated_at = CURRENT_TIMESTAMP
 		RETURNING id, run_id, knowledge_base_id, 0, parent_run_id, run_kind, request, response,
 			status, attempt_count, COALESCE(error_message, ''), created_at, started_at, finished_at,
 			lease_until, heartbeat_at, lease_token, updated_at`,

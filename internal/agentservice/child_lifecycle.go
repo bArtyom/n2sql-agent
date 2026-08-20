@@ -26,6 +26,12 @@ func NewPersistentChildRunLifecycle(store agentrun.ChildRunStore) *PersistentChi
 
 var _ agentruntime.ChildRunLifecycle = (*PersistentChildRunLifecycle)(nil)
 
+type persistentChildCheckpointStore interface {
+	Get(context.Context, string, int64) (agentrun.Run, error)
+	ListToolCheckpoints(context.Context, int64) ([]agentrun.ToolCheckpoint, error)
+	SaveToolCheckpoint(context.Context, agentrun.ToolCheckpoint) error
+}
+
 func (l *PersistentChildRunLifecycle) StartChild(ctx context.Context, spec agentruntime.ChildRunSpec) (string, error) {
 	if l == nil || l.store == nil || spec.ParentRunID <= 0 || spec.KnowledgeBaseID <= 0 || strings.TrimSpace(spec.RunID) == "" || strings.TrimSpace(spec.Question) == "" {
 		return "", agentrun.ErrInvalidRun
@@ -84,4 +90,60 @@ func (l *PersistentChildRunLifecycle) FinishChild(ctx context.Context, spec agen
 		return err
 	}
 	return l.store.MarkChildSucceeded(ctx, run.ID)
+}
+
+func (l *PersistentChildRunLifecycle) LoadChildCheckpoints(ctx context.Context, spec agentruntime.ChildRunSpec) ([]agentruntime.ResumeCheckpoint, error) {
+	store, ok := l.store.(persistentChildCheckpointStore)
+	if !ok {
+		return nil, nil
+	}
+	run, err := store.Get(ctx, spec.RunID, spec.KnowledgeBaseID)
+	if err != nil {
+		return nil, err
+	}
+	checkpoints, err := store.ListToolCheckpoints(ctx, run.ID)
+	if err != nil {
+		return nil, err
+	}
+	return resumeChildCheckpoints(checkpoints), nil
+}
+
+func (l *PersistentChildRunLifecycle) SaveChildCheckpoint(ctx context.Context, spec agentruntime.ChildRunSpec, checkpoint agentruntime.ToolCheckpoint) error {
+	store, ok := l.store.(persistentChildCheckpointStore)
+	if !ok {
+		return nil
+	}
+	run, err := store.Get(ctx, spec.RunID, spec.KnowledgeBaseID)
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(checkpoint.Payload)
+	if err != nil {
+		return fmt.Errorf("encode child checkpoint: %w", err)
+	}
+	return store.SaveToolCheckpoint(ctx, agentrun.ToolCheckpoint{
+		AgentRunID: run.ID, AttemptCount: run.AttemptCount, StepNumber: checkpoint.StepNumber,
+		ToolCallID: checkpoint.ToolCallID, DecisionID: checkpoint.DecisionID, ToolName: checkpoint.ToolName,
+		Arguments: checkpoint.Arguments, ArgumentsHash: checkpoint.ArgumentsHash, Content: checkpoint.Content, Payload: payload,
+	})
+}
+
+func resumeChildCheckpoints(checkpoints []agentrun.ToolCheckpoint) []agentruntime.ResumeCheckpoint {
+	latestAttempt := 0
+	for _, checkpoint := range checkpoints {
+		if checkpoint.AttemptCount > latestAttempt {
+			latestAttempt = checkpoint.AttemptCount
+		}
+	}
+	result := make([]agentruntime.ResumeCheckpoint, 0, len(checkpoints))
+	for _, checkpoint := range checkpoints {
+		if latestAttempt > 0 && checkpoint.AttemptCount != latestAttempt {
+			continue
+		}
+		result = append(result, agentruntime.ResumeCheckpoint{
+			ToolCallID: checkpoint.ToolCallID, DecisionID: checkpoint.DecisionID, ToolName: checkpoint.ToolName,
+			Arguments: checkpoint.Arguments, ArgumentsHash: checkpoint.ArgumentsHash, StepNumber: checkpoint.StepNumber, Content: checkpoint.Content,
+		})
+	}
+	return result
 }
