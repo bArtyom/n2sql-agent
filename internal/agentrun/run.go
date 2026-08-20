@@ -124,6 +124,12 @@ type Reader interface {
 	Get(context.Context, string, int64) (Run, error)
 }
 
+// DatabaseReader resolves a run by its internal database ID. Workers use it
+// for publishing a parent-stream event after a child releases the barrier.
+type DatabaseReader interface {
+	GetByID(context.Context, int64) (Run, error)
+}
+
 // ChildReader exposes safe parent/child Run metadata for execution trees.
 type ChildReader interface {
 	ListChildren(context.Context, int64, int64) ([]Run, error)
@@ -197,6 +203,28 @@ func (s *PostgresStore) Get(ctx context.Context, runID string, knowledgeBaseID i
 	}
 	if err != nil {
 		return Run{}, fmt.Errorf("get agent run: %w", err)
+	}
+	return run, nil
+}
+
+func (s *PostgresStore) GetByID(ctx context.Context, id int64) (Run, error) {
+	if id <= 0 {
+		return Run{}, ErrInvalidRun
+	}
+	var run Run
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, run_id, knowledge_base_id, COALESCE(conversation_id, 0), COALESCE(parent_run_id, 0), run_kind, request, response,
+			status, attempt_count, COALESCE(error_message, ''), created_at, started_at,
+			finished_at, lease_until, heartbeat_at, lease_token, updated_at
+		FROM agent_runs WHERE id = $1`, id).Scan(
+		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.ParentRunID, &run.RunKind, &run.Request, &run.Response,
+		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.CreatedAt, &run.StartedAt,
+		&run.FinishedAt, &run.LeaseUntil, &run.HeartbeatAt, &run.LeaseToken, &run.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Run{}, ErrRunNotFound
+	}
+	if err != nil {
+		return Run{}, fmt.Errorf("get agent run by id: %w", err)
 	}
 	return run, nil
 }

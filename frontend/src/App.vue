@@ -2024,6 +2024,7 @@ function childEventLabel(eventType: string, toolName: string) {
     case "run_finished": return "子 Agent 完成";
     case "run_failed": return "子 Agent 运行失败";
     case "run_canceled": return "子 Agent 已取消";
+    case "parent_resumed": return "父 Agent 即将恢复";
     case "step_started": return "子 Agent 分析问题";
     default: return "子 Agent 执行中";
   }
@@ -2228,7 +2229,9 @@ function consumeSSEBlock(block: string, answerIndex: number) {
           const childRunID = dataString("child_run_id");
           const status = childEventState(childEventType);
           const resultSummary = dataString("result_summary");
-          const detail = resultSummary || (childRunID ? `运行 ${childRunID}` : "异步子任务");
+          const detail = childEventType === "parent_resumed"
+            ? "所有子 Agent 已结束，父 Agent 即将继续"
+            : resultSummary || (childRunID ? `运行 ${childRunID}` : "异步子任务");
           recordAgentEvent(answer, event, childEventLabel(childEventType, toolName), detail, payload.step_number, status, {
             childRunID: childRunID || undefined,
             childEventType: childEventType || undefined,

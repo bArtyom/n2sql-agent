@@ -21,6 +21,21 @@ type runStoreStub struct {
 	checkpointErr error
 	waiting       bool
 	resumedParent int64
+	parentRun     Run
+}
+
+func (s *runStoreStub) Get(context.Context, string, int64) (Run, error) {
+	if s.parentRun.RunID == "" {
+		return Run{}, ErrRunNotFound
+	}
+	return s.parentRun, nil
+}
+
+func (s *runStoreStub) GetByID(context.Context, int64) (Run, error) {
+	if s.parentRun.RunID == "" {
+		return Run{}, ErrRunNotFound
+	}
+	return s.parentRun, nil
 }
 
 func (s *runStoreStub) Create(context.Context, CreateInput) (Run, error) { return s.run, nil }
@@ -156,6 +171,37 @@ func TestRunnerMarksChildTimeoutAsFailedAndResumesParent(t *testing.T) {
 	}
 	if store.resumedParent != 4 {
 		t.Fatalf("resumed parent = %d, want 4", store.resumedParent)
+	}
+}
+
+func TestRunnerPublishesParentResumeEventAfterLastChild(t *testing.T) {
+	store := &runStoreStub{
+		run:       Run{ID: 9, RunID: "child-9", ParentRunID: 4, RunKind: KindChild, LeaseToken: "lease-child"},
+		status:    StatusPending,
+		parentRun: Run{ID: 4, RunID: "parent-4", KnowledgeBaseID: 7},
+	}
+	var events []agent.Event
+	runner, err := NewRunnerWithEventSink(store, ExecutorFunc(func(context.Context, Run, EventSink) error { return nil }), func(run Run) func(agent.Event) error {
+		if run.RunID != "parent-4" {
+			return func(agent.Event) error { return nil }
+		}
+		return func(event agent.Event) error {
+			events = append(events, event)
+			return nil
+		}
+	})
+	if err != nil {
+		t.Fatalf("NewRunnerWithEventSink() error = %v", err)
+	}
+	if _, err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+	if len(events) != 1 || events[0].Type != agent.EventChildEvent || events[0].RunID != "parent-4" {
+		t.Fatalf("resume events = %#v, want one parent child_event", events)
+	}
+	data, ok := events[0].Data.(map[string]any)
+	if !ok || data["child_run_id"] != "child-9" || data["parent_resumed"] != true {
+		t.Fatalf("resume event data = %#v", events[0].Data)
 	}
 }
 

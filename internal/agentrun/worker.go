@@ -166,6 +166,43 @@ func (r *Runner) resumeParentAfterChild(ctx context.Context, run Run) {
 	}
 	if resumed {
 		slog.InfoContext(ctx, "agent_parent_requeued", "child_run_id", run.RunID, "parent_run_id", run.ParentRunID)
+		r.publishParentResumeEvent(ctx, run)
+	}
+}
+
+func (r *Runner) publishParentResumeEvent(ctx context.Context, child Run) {
+	if r.eventSink == nil {
+		return
+	}
+	reader, ok := r.store.(DatabaseReader)
+	if !ok {
+		return
+	}
+	parent, err := reader.GetByID(context.WithoutCancel(ctx), child.ParentRunID)
+	if err != nil {
+		slog.WarnContext(ctx, "agent_parent_resume_event_lookup_failed", "child_run_id", child.RunID, "parent_run_id", child.ParentRunID, "error", err)
+		return
+	}
+	sink := r.eventSink(parent)
+	if sink == nil {
+		return
+	}
+	event := agent.Event{
+		Version: agent.EventSchemaVersion,
+		ID:      fmt.Sprintf("%s-child-resumed-%s-%d", parent.RunID, child.RunID, child.AttemptCount),
+		RunID:   parent.RunID,
+		Type:    agent.EventChildEvent,
+		Data: map[string]any{
+			"child_run_id":     child.RunID,
+			"parent_run_id":    parent.RunID,
+			"child_event_type": "parent_resumed",
+			"child_status":     string(child.Status),
+			"parent_resumed":   true,
+		},
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := sink(event); err != nil {
+		slog.WarnContext(ctx, "agent_parent_resume_event_publish_failed", "child_run_id", child.RunID, "parent_run_id", parent.RunID, "error", err)
 	}
 }
 
