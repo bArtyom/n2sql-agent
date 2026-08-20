@@ -1151,6 +1151,47 @@ func TestEngineContinuesWhenCheckpointPersistenceFails(t *testing.T) {
 	t.Fatalf("events = %#v, want checkpoint_action=save_failed", events)
 }
 
+func TestEngineDoesNotPersistPartialChildResultAsCheckpoint(t *testing.T) {
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(&readOnlyToolStub{toolStub: toolStub{
+		content:  "子 Agent 部分结果",
+		metadata: map[string]any{"child_status": string(agent.RunFailed), "partial_result": true, "checkpointable": false},
+	}}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	modelCalls := 0
+	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		modelCalls++
+		if modelCalls == 1 {
+			return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+				ID: "partial-child", Type: "function",
+				Function: modelclient.ToolCallFunction{Name: "knowledge_search", Arguments: `{}`},
+			}}}, nil
+		}
+		if len(messages) != 3 || messages[2].Role != "tool" {
+			t.Fatalf("messages = %#v, want partial tool result", messages)
+		}
+		return modelclient.ChatResponse{Message: "基于部分结果回答"}, nil
+	}}
+	checkpointSaves := 0
+	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 2, agentruntime.EngineOptions{
+		CheckpointSink: func(context.Context, agentruntime.ToolCheckpoint) error {
+			checkpointSaves++
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEngineWithOptions() error = %v", err)
+	}
+	result, err := engine.Run(context.Background(), "run-partial-child", []modelclient.ChatMessage{{Role: "user", Content: "查询"}})
+	if err != nil || result.Run.FinalAnswer() != "基于部分结果回答" {
+		t.Fatalf("Run() = (%#v, %v), want successful parent answer", result.Run, err)
+	}
+	if checkpointSaves != 0 {
+		t.Fatalf("checkpoint saves = %d, want 0 for partial child result", checkpointSaves)
+	}
+}
+
 func TestEngineDoesNotFeedSideEffectFailureBackForAutomaticRetry(t *testing.T) {
 	wantErr := errors.New("remote write status unknown")
 	registry := agent.NewToolRegistry()

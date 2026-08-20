@@ -461,7 +461,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			if sources, ok := toolResult.Metadata["sources"]; ok {
 				toolFinishedData["sources"] = sources
 			}
-			for _, key := range []string{"child_run_id", "child_status", "child_steps", "child_events"} {
+			for _, key := range []string{"child_run_id", "child_status", "child_steps", "child_events", "resume_available", "partial_result", "stop_reason"} {
 				if value, ok := toolResult.Metadata[key]; ok {
 					toolFinishedData[key] = value
 				}
@@ -485,7 +485,10 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			} else {
 				toolFinishedData["checkpoint_action"] = "stored"
 			}
-			if e.checkpointSink != nil {
+			if !toolResultCheckpointable(toolResult) {
+				toolFinishedData["checkpoint_action"] = "skipped"
+			}
+			if e.checkpointSink != nil && toolResultCheckpointable(toolResult) {
 				if err := e.checkpointSink(ctx, ToolCheckpoint{
 					ToolCallID: toolCall.ID, DecisionID: fmt.Sprintf("%s-decision-%d", runID, step+1),
 					ToolName: toolCall.Function.Name, StepNumber: len(run.Steps()),
@@ -891,6 +894,9 @@ func boundedReasoningText(value string) string {
 }
 
 func toolResultSummary(result agent.ToolResult) string {
+	if status, ok := result.Metadata["child_status"].(string); ok && status == string(agent.RunFailed) {
+		return "子 Agent 失败，但保留了部分检索结果"
+	}
 	if result.NoRelevantResults {
 		return "没有命中相关资料"
 	}
@@ -898,6 +904,11 @@ func toolResultSummary(result agent.ToolResult) string {
 		return fmt.Sprintf("返回 %d 条资料", len(sources))
 	}
 	return "工具调用完成"
+}
+
+func toolResultCheckpointable(result agent.ToolResult) bool {
+	checkpointable, ok := result.Metadata["checkpointable"].(bool)
+	return !ok || checkpointable
 }
 
 func completeWithAnswer(result Result, emitter *eventEmitter, answer string) (Result, error) {

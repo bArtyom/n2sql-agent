@@ -76,13 +76,18 @@ func (l *PersistentChildRunLifecycle) FinishChild(ctx context.Context, spec agen
 		if errors.Is(runErr, context.Canceled) {
 			return l.store.MarkChildCanceled(ctx, run.ID)
 		}
+		if strings.TrimSpace(result.Content) != "" {
+			response, responseErr := marshalChildResponse(result)
+			if responseErr != nil {
+				return responseErr
+			}
+			if saveErr := l.store.SaveChildResponse(ctx, run.ID, response); saveErr != nil {
+				return saveErr
+			}
+		}
 		return l.store.MarkChildFailed(ctx, run.ID, runErr.Error())
 	}
-	response, err := json.Marshal(map[string]any{
-		"answer":  result.Content,
-		"sources": result.Metadata["sources"],
-		"stats":   result.Metadata["child_steps"],
-	})
+	response, err := marshalChildResponse(result)
 	if err != nil {
 		return err
 	}
@@ -90,6 +95,19 @@ func (l *PersistentChildRunLifecycle) FinishChild(ctx context.Context, spec agen
 		return err
 	}
 	return l.store.MarkChildSucceeded(ctx, run.ID)
+}
+
+func marshalChildResponse(result agent.ToolResult) ([]byte, error) {
+	response, err := json.Marshal(map[string]any{
+		"answer":  result.Content,
+		"sources": result.Metadata["sources"],
+		"stats":   result.Metadata["child_steps"],
+		"partial": result.Metadata["partial_result"] == true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode child response: %w", err)
+	}
+	return response, nil
 }
 
 func (l *PersistentChildRunLifecycle) LoadChildCheckpoints(ctx context.Context, spec agentruntime.ChildRunSpec) ([]agentruntime.ResumeCheckpoint, error) {

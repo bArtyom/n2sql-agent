@@ -3,6 +3,7 @@ package agentruntime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -14,6 +15,21 @@ import (
 type delegateChatStub struct {
 	calls       int
 	definitions [][]agent.FunctionDefinition
+}
+
+type delegateFailingChatStub struct {
+	calls int
+}
+
+func (s *delegateFailingChatStub) ChatMessagesWithTools(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+	s.calls++
+	if s.calls == 1 {
+		return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+			ID: "child-search-1", Type: "function",
+			Function: modelclient.ToolCallFunction{Name: "knowledge_search", Arguments: `{"query":"年假"}`},
+		}}}, nil
+	}
+	return modelclient.ChatResponse{}, errors.New("child model unavailable")
 }
 
 func (s *delegateChatStub) ChatMessagesWithTools(_ context.Context, _ []modelclient.ChatMessage, definitions []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
@@ -104,6 +120,29 @@ func TestDelegateResearchToolPersistsChildLifecycleWhenConfigured(t *testing.T) 
 	}
 	if !lifecycle.finished {
 		t.Fatal("child lifecycle was not completed")
+	}
+}
+
+func TestDelegateResearchToolReturnsPartialResultWithoutAutomaticRetry(t *testing.T) {
+	lifecycle := &childLifecycleStub{}
+	tool, err := NewDelegateResearchTool(&delegateFailingChatStub{}, delegateSearcherStub{}, 7, 4096, 3, nil, false, retrieval.DefaultKeywordThreshold)
+	if err != nil {
+		t.Fatalf("NewDelegateResearchTool() error = %v", err)
+	}
+	tool.SetParentRun(42, "parent-run")
+	tool.SetChildRunLifecycle(lifecycle)
+	result, err := tool.Call(context.Background(), json.RawMessage(`{"question":"研究年假"}`))
+	if err != nil {
+		t.Fatalf("Call() error = %v, want partial result", err)
+	}
+	if !strings.Contains(result.Content, "已检索到 1 条资料") || result.Metadata["child_status"] != string(agent.RunFailed) {
+		t.Fatalf("partial result = %#v", result)
+	}
+	if result.Metadata["partial_result"] != true || result.Metadata["checkpointable"] != false || result.Metadata["resume_available"] != true {
+		t.Fatalf("partial metadata = %#v", result.Metadata)
+	}
+	if lifecycle.finished {
+		t.Fatal("failed child was reported as succeeded")
 	}
 }
 

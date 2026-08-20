@@ -17,6 +17,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
+	"github.com/bArtyom/n2sql-agent/internal/security"
 )
 
 const (
@@ -236,8 +237,18 @@ func (t *DelegateResearchTool) Call(ctx context.Context, raw json.RawMessage) (a
 		err = runChild(ctx)
 	}
 	if err != nil {
+		if ctx.Err() != nil {
+			if t.lifecycle != nil {
+				_ = t.lifecycle.FinishChild(context.WithoutCancel(ctx), ChildRunSpec{RunID: childRunID, ParentRunID: t.parentRunID, KnowledgeBaseID: t.knowledgeBaseID, Question: input.Question}, agent.ToolResult{}, err)
+			}
+			return agent.ToolResult{}, fmt.Errorf("child research canceled: %w", err)
+		}
 		if t.lifecycle != nil {
-			_ = t.lifecycle.FinishChild(context.WithoutCancel(ctx), ChildRunSpec{RunID: childRunID, ParentRunID: t.parentRunID, KnowledgeBaseID: t.knowledgeBaseID, Question: input.Question}, agent.ToolResult{}, err)
+			partial := delegatePartialFailureResult(err, childRunID, childEvents, sources)
+			_ = t.lifecycle.FinishChild(context.WithoutCancel(ctx), ChildRunSpec{RunID: childRunID, ParentRunID: t.parentRunID, KnowledgeBaseID: t.knowledgeBaseID, Question: input.Question}, partial, err)
+			if strings.TrimSpace(partial.Content) != "" {
+				return partial, nil
+			}
 		}
 		return agent.ToolResult{}, fmt.Errorf("child research failed: %w", err)
 	}
@@ -264,6 +275,46 @@ func (t *DelegateResearchTool) Call(ctx context.Context, raw json.RawMessage) (a
 		}
 	}
 	return toolResult, nil
+}
+
+func delegatePartialFailureResult(err error, childRunID string, childEvents []map[string]any, sources []retrieval.Result) agent.ToolResult {
+	content := "子 Agent 未完成最终总结。"
+	if len(sources) > 0 {
+		content = fmt.Sprintf("子 Agent 未完成最终总结，但已检索到 %d 条资料。请基于这些资料继续回答；如果信息不足，再缩小问题后重新委派。\n\n%s", len(sources), delegateSourcePreview(sources))
+	}
+	if err != nil {
+		content += fmt.Sprintf("\n\n失败原因：%s", security.RedactText(strings.TrimSpace(err.Error())))
+	}
+	return agent.ToolResult{
+		Content: truncateUTF8(content, maxDelegateAnswerBytes),
+		Metadata: map[string]any{
+			"child_run_id":     childRunID,
+			"child_status":     string(agent.RunFailed),
+			"child_steps":      len(childEvents),
+			"child_events":     childEvents,
+			"sources":          uniqueDelegateSources(sources),
+			"resume_available": true,
+			"checkpointable":   false,
+			"partial_result":   true,
+			"stop_reason":      "child_execution_failed",
+		},
+	}
+}
+
+func delegateSourcePreview(sources []retrieval.Result) string {
+	const maxPreviewBytes = 3600
+	var builder strings.Builder
+	for index, source := range uniqueDelegateSources(sources) {
+		if index >= 3 || builder.Len() >= maxPreviewBytes {
+			break
+		}
+		preview := truncateUTF8(security.RedactText(strings.TrimSpace(source.Content)), 800)
+		if preview == "" {
+			continue
+		}
+		builder.WriteString(fmt.Sprintf("[%d] %s：%s\n", index+1, source.OriginalFilename, preview))
+	}
+	return truncateUTF8(builder.String(), maxPreviewBytes)
 }
 
 func (t *DelegateResearchTool) newChildRunID(question string) string {

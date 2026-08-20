@@ -56,6 +56,7 @@
 - 动态子 Agent 事件关联已补齐：子 Agent 关键事件通过 `child_event` 进入父 Run 的现有事件存储、Redis/SSE 和前端轨迹，事件携带 `child_run_id`、`parent_run_id`、子事件类型和有界摘要；不会把完整工具结果重复写入父事件。前端不新增 child SSE，而是在父 Run 结束后拉取安全的父子执行树并用折叠视图展示。
 - 父子 Run 查询已补齐：新增 `GET /api/knowledge-bases/{id}/agent-runs/{runID}/children`，按 `parent_run_id` 递归返回最多 8 层安全执行树，包含状态、尝试次数、时间、错误和最终 response，不暴露请求快照、租约 token；数据库查询按知识库隔离。
 - 子 Agent checkpoint 复用已补齐：持久化 child Run 使用“父 Run + 研究问题”生成稳定 ID，重试时通过同一个 child Run 读取最新 attempt 的 `agent_run_checkpoints`；子 Agent Engine 复用安全只读工具结果并继续模型决策，checkpoint 仍使用现有表、临时大结果文件和参数哈希策略，不新增存储体系。
+- 子 Agent 失败处理已改为 DeerFlow 风格：如果已经拿到检索资料但最终总结失败，返回 `failed + partial_result + resume_available` 以及有界资料预览，让父 Agent 自己判断继续回答还是重新委派；部分失败结果不写入 checkpoint，避免恢复时被误当成成功结果。只有父 context 取消时才继续向上抛出错误；重试仍复用同一 child Run 和最新安全 checkpoint。
 - 前端已支持会话、引用卡片与懒加载原文、检索统计、Agent 工具轨迹折叠、断线恢复、正文分页预览、固定起步问题和按需生成追问建议。
 - 最新停止生成切片：标准 Agent 流式回答期间输入栏显示“停止生成”按钮，调用 `POST /api/knowledge-bases/{id}/agent-runs/{runID}/stop` 取消执行上下文；引擎发 `run_canceled` 事件，前端标记独立 stopped 终态（保留部分内容、不显示重新生成、不写会话历史）；断线恢复与用户停止语义分离；停止按知识库 ID 隔离。
 - 最新会话置顶切片：`conversations.is_pinned` 列 + 排序索引；列表按置顶优先、组内按更新时间排序；`PATCH /conversations/{id}` 支持 `{"is_pinned": true/false}`（与重命名共用端点，跨库 404）；前端会话列表按「置顶 + 今天/昨天/N 天前」分组，置顶项 📌 标记与置顶/取消置顶按钮。
