@@ -151,6 +151,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	agentRunRunner.SetChildTimeout(cfg.AgentChildTimeout)
 	agentAnswerService.SetMemoryStore(memoryStore)
 	agentAnswerService.SetDelegateResearchEnabled(true)
 	agentAnswerService.SetChildRunLifecycle(agentservice.NewPersistentChildRunLifecycle(agentRunStore))

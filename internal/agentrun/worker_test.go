@@ -134,6 +134,31 @@ func TestRunnerMarksFailedExecution(t *testing.T) {
 	}
 }
 
+func TestRunnerMarksChildTimeoutAsFailedAndResumesParent(t *testing.T) {
+	store := &runStoreStub{run: Run{ID: 9, RunID: "child-9", ParentRunID: 4, RunKind: KindChild, LeaseToken: "lease-child"}, status: StatusPending}
+	runner, err := NewRunner(store, ExecutorFunc(func(ctx context.Context, _ Run, _ EventSink) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}))
+	if err != nil {
+		t.Fatalf("NewRunner() error = %v", err)
+	}
+	runner.SetChildTimeout(5 * time.Millisecond)
+	worked, err := runner.RunOnce(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("RunOnce() = (%v, %v), want handled timeout", worked, err)
+	}
+	if store.status != StatusFailed {
+		t.Fatalf("status = %s, want failed", store.status)
+	}
+	if store.failed != "child agent timed out after 5ms" {
+		t.Fatalf("failure = %q, want timeout message", store.failed)
+	}
+	if store.resumedParent != 4 {
+		t.Fatalf("resumed parent = %d, want 4", store.resumedParent)
+	}
+}
+
 func TestRunnerCancelsExecutionWhenLeaseRenewalFails(t *testing.T) {
 	store := &runStoreStub{renewErr: errors.New("lease lost")}
 	runner := &Runner{store: store}

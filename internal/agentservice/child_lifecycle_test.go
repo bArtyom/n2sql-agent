@@ -85,6 +85,49 @@ func (s *childRunStoreStub) Get(_ context.Context, runID string, knowledgeBaseID
 	return s.run, nil
 }
 
+func (s *childRunStoreStub) CreatePendingChild(_ context.Context, input agentrun.ChildCreateInput) (agentrun.Run, error) {
+	if s.run.RunID == "" {
+		s.run = agentrun.Run{ID: 9, RunID: input.RunID, ParentRunID: input.ParentRunID, KnowledgeBaseID: input.KnowledgeBaseID, RunKind: agentrun.KindChild, Status: agentrun.StatusPending}
+	}
+	if s.run.Status == agentrun.StatusFailed && s.run.AttemptCount < 3 {
+		s.run.Status = agentrun.StatusPending
+		s.run.Response = nil
+		s.run.ErrorMessage = ""
+	}
+	return s.run, nil
+}
+
+func TestPersistentChildRunLifecycleRequeuesFailedChildBelowAttemptLimit(t *testing.T) {
+	store := &childRunStoreStub{run: agentrun.Run{ID: 9, RunID: "child-1", KnowledgeBaseID: 7, RunKind: agentrun.KindChild, Status: agentrun.StatusFailed, AttemptCount: 1, ErrorMessage: "temporary model error"}}
+	lifecycle := NewPersistentChildRunLifecycle(store)
+	runID, ready, _, err := lifecycle.EnqueueChild(context.Background(), agentruntime.ChildRunSpec{
+		RunID: "child-1", ParentRunID: 42, KnowledgeBaseID: 7, Question: "研究年假",
+	})
+	if err != nil || runID != "child-1" || ready {
+		t.Fatalf("EnqueueChild() = (%q, %v, %v), want pending retry", runID, ready, err)
+	}
+	if store.run.Status != agentrun.StatusPending || store.run.ErrorMessage != "" {
+		t.Fatalf("requeued child = %#v", store.run)
+	}
+}
+
+func TestPersistentChildRunLifecycleReturnsFinalFailedChildAtAttemptLimit(t *testing.T) {
+	store := &childRunStoreStub{run: agentrun.Run{ID: 9, RunID: "child-1", KnowledgeBaseID: 7, RunKind: agentrun.KindChild, Status: agentrun.StatusFailed, AttemptCount: 3, ErrorMessage: "permanent failure"}}
+	lifecycle := NewPersistentChildRunLifecycle(store)
+	_, ready, result, err := lifecycle.EnqueueChild(context.Background(), agentruntime.ChildRunSpec{
+		RunID: "child-1", ParentRunID: 42, KnowledgeBaseID: 7, Question: "研究年假",
+	})
+	if err != nil || !ready {
+		t.Fatalf("EnqueueChild() = (ready=%v, err=%v), want final result", ready, err)
+	}
+	if result.Content != "子 Agent 已失败：permanent failure" {
+		t.Fatalf("result content = %q", result.Content)
+	}
+	if store.run.Status != agentrun.StatusFailed {
+		t.Fatalf("status = %s, want failed", store.run.Status)
+	}
+}
+
 func TestPersistentChildRunLifecycleStoresParentAndResult(t *testing.T) {
 	store := &childRunStoreStub{}
 	lifecycle := NewPersistentChildRunLifecycle(store)

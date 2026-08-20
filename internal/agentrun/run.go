@@ -262,8 +262,9 @@ func (s *PostgresStore) CreateChild(ctx context.Context, input ChildCreateInput)
 }
 
 // CreatePendingChild creates an idempotent child job for the shared Worker.
-// Existing rows are returned unchanged so a resumed parent reuses the same
-// child instead of launching a duplicate execution.
+// Pending/running/succeeded rows are returned unchanged so a resumed parent
+// reuses the same child. A failed child is requeued only while it is below the
+// normal run-attempt limit; after that the parent receives its final failure.
 func (s *PostgresStore) CreatePendingChild(ctx context.Context, input ChildCreateInput) (Run, error) {
 	if input.RunID == "" || input.ParentRunID <= 0 || input.KnowledgeBaseID <= 0 || len(input.Request) == 0 || !json.Valid(input.Request) {
 		return Run{}, ErrInvalidRun
@@ -272,11 +273,28 @@ func (s *PostgresStore) CreatePendingChild(ctx context.Context, input ChildCreat
 	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO agent_runs (run_id, knowledge_base_id, parent_run_id, run_kind, request, status)
 		VALUES ($1, $2, $3, 'child', $4, 'pending')
-		ON CONFLICT (run_id) DO UPDATE SET updated_at = agent_runs.updated_at
+		ON CONFLICT (run_id) DO UPDATE SET
+			status = CASE
+				WHEN agent_runs.status = 'failed' AND agent_runs.attempt_count < $5 THEN 'pending'
+				ELSE agent_runs.status
+			END,
+			finished_at = CASE
+				WHEN agent_runs.status = 'failed' AND agent_runs.attempt_count < $5 THEN NULL
+				ELSE agent_runs.finished_at
+			END,
+			response = CASE
+				WHEN agent_runs.status = 'failed' AND agent_runs.attempt_count < $5 THEN NULL
+				ELSE agent_runs.response
+			END,
+			error_message = CASE
+				WHEN agent_runs.status = 'failed' AND agent_runs.attempt_count < $5 THEN NULL
+				ELSE agent_runs.error_message
+			END,
+			updated_at = CURRENT_TIMESTAMP
 		RETURNING id, run_id, knowledge_base_id, 0, parent_run_id, run_kind, request, response,
 			status, attempt_count, COALESCE(error_message, ''), created_at, started_at, finished_at,
 			lease_until, heartbeat_at, lease_token, updated_at`,
-		input.RunID, input.KnowledgeBaseID, input.ParentRunID, input.Request).Scan(
+		input.RunID, input.KnowledgeBaseID, input.ParentRunID, input.Request, maxAgentRunAttempts).Scan(
 		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.ParentRunID, &run.RunKind, &run.Request, &run.Response,
 		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.CreatedAt, &run.StartedAt, &run.FinishedAt,
 		&run.LeaseUntil, &run.HeartbeatAt, &run.LeaseToken, &run.UpdatedAt)

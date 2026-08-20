@@ -22,6 +22,7 @@ const (
 	defaultOCRConcurrency             = 1
 	defaultAgentMaxSteps              = 4
 	defaultAgentTimeout               = time.Minute
+	defaultAgentChildTimeout          = 30 * time.Minute
 	defaultModelProviderTimeout       = 2 * time.Minute
 	defaultDocumentSummaryInputChars  = 30000
 	defaultAgentMaxToolResultBytes    = 32 * 1024
@@ -56,6 +57,7 @@ type Config struct {
 	OCRConcurrency             int
 	AgentMaxSteps              int
 	AgentTimeout               time.Duration
+	AgentChildTimeout          time.Duration
 	ModelProviderTimeout       time.Duration
 	DocumentSummaryInputChars  int
 	AgentMaxToolResultBytes    int
@@ -108,6 +110,7 @@ func Load() Config {
 		OCRConcurrency:             positiveIntEnv("OCR_CONCURRENCY", defaultOCRConcurrency),
 		AgentMaxSteps:              positiveIntEnv("AGENT_MAX_STEPS", defaultAgentMaxSteps),
 		AgentTimeout:               time.Duration(positiveIntEnv("AGENT_TIMEOUT_MS", int(defaultAgentTimeout/time.Millisecond))) * time.Millisecond,
+		AgentChildTimeout:          durationEnv("AGENT_CHILD_TIMEOUT", defaultAgentChildTimeout),
 		ModelProviderTimeout:       time.Duration(positiveIntEnv("MODEL_PROVIDER_TIMEOUT_MS", int(defaultModelProviderTimeout/time.Millisecond))) * time.Millisecond,
 		DocumentSummaryInputChars:  positiveIntEnv("DOCUMENT_SUMMARY_MAX_INPUT_CHARS", defaultDocumentSummaryInputChars),
 		AgentMaxToolResultBytes:    agentMaxToolResultBytes(),

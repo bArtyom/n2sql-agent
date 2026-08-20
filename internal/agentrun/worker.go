@@ -31,15 +31,26 @@ type Runner struct {
 	executor          Executor
 	eventSink         func(Run) func(agent.Event) error
 	heartbeatInterval time.Duration
+	childTimeout      time.Duration
 }
 
 const leaseHeartbeatInterval = defaultLeaseDuration / 3
+const DefaultChildExecutionTimeout = 30 * time.Minute
 
 func NewRunner(store Store, executor Executor) (*Runner, error) {
 	if store == nil || executor == nil {
 		return nil, ErrInvalidRun
 	}
-	return &Runner{store: store, executor: executor, heartbeatInterval: leaseHeartbeatInterval}, nil
+	return &Runner{store: store, executor: executor, heartbeatInterval: leaseHeartbeatInterval, childTimeout: DefaultChildExecutionTimeout}, nil
+}
+
+// SetChildTimeout bounds one asynchronous child Agent execution. Root runs do
+// not use this timeout; they remain resumable through the durable run queue.
+func (r *Runner) SetChildTimeout(timeout time.Duration) {
+	if r == nil || timeout <= 0 {
+		return
+	}
+	r.childTimeout = timeout
 }
 
 func NewRunnerWithEventSink(store Store, executor Executor, eventSink func(Run) func(agent.Event) error) (*Runner, error) {
@@ -80,6 +91,11 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 	}
 	executionContext, stopHeartbeat := context.WithCancelCause(ctx)
 	defer stopHeartbeat(nil)
+	if run.RunKind == KindChild && r.childTimeout > 0 {
+		var stopChildTimeout context.CancelFunc
+		executionContext, stopChildTimeout = context.WithTimeout(executionContext, r.childTimeout)
+		defer stopChildTimeout()
+	}
 	go r.renewLease(executionContext, run, stopHeartbeat)
 	err = r.executor.Execute(executionContext, run, sink)
 	if err == nil {
@@ -102,6 +118,16 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 	}
 	if errors.Is(context.Cause(executionContext), ErrLeaseLost) {
 		slog.WarnContext(ctx, "agent_run_lease_lost", "run_id", run.RunID, "duration_ms", time.Since(started).Milliseconds())
+		return true, nil
+	}
+	if run.RunKind == KindChild && (errors.Is(err, context.DeadlineExceeded) || errors.Is(context.Cause(executionContext), context.DeadlineExceeded)) {
+		message := fmt.Sprintf("child agent timed out after %s", r.childTimeout)
+		if markErr := r.store.MarkFailed(context.WithoutCancel(ctx), run.ID, message, run.LeaseToken); markErr != nil {
+			return true, markErr
+		}
+		r.resumeParentAfterChild(ctx, run)
+		r.cleanupTerminalCheckpoints(ctx, run.ID)
+		slog.WarnContext(ctx, "child_agent_timed_out", "run_id", run.RunID, "duration_ms", time.Since(started).Milliseconds(), "timeout", r.childTimeout)
 		return true, nil
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
