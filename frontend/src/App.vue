@@ -2141,7 +2141,9 @@ function consumeSSEBlock(block: string, answerIndex: number) {
           const toolName = dataString("tool_name") || "knowledge_search";
           finishLastAgentToolEvent(answer, {
             label: toolFinishedLabel(toolName),
-            detail: dataString("result_summary") || (eventData.no_relevant_results === true ? "没有找到足够相关资料" : `${sources.length || "已"} 条结果已返回`),
+            detail: dataString("child_run_id")
+              ? `已委派子 Agent 完成研究（${dataString("child_status") || "已完成"}）`
+              : dataString("result_summary") || (eventData.no_relevant_results === true ? "没有找到足够相关资料" : `${sources.length || "已"} 条结果已返回`),
             status: "done",
             toolCallID: dataString("tool_call_id"),
             sourceKeys: sources.map(sourceKey),

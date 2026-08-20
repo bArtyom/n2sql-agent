@@ -86,6 +86,7 @@ type ChildRunStore interface {
 	SaveChildResponse(context.Context, int64, json.RawMessage) error
 	MarkChildSucceeded(context.Context, int64) error
 	MarkChildFailed(context.Context, int64, string) error
+	MarkChildCanceled(context.Context, int64) error
 }
 
 type Store interface {
@@ -246,6 +247,10 @@ func (s *PostgresStore) MarkChildSucceeded(ctx context.Context, id int64) error 
 
 func (s *PostgresStore) MarkChildFailed(ctx context.Context, id int64, message string) error {
 	return s.markChildFinished(ctx, id, StatusFailed, message)
+}
+
+func (s *PostgresStore) MarkChildCanceled(ctx context.Context, id int64) error {
+	return s.markChildFinished(ctx, id, StatusCanceled, "")
 }
 
 func (s *PostgresStore) markChildFinished(ctx context.Context, id int64, status Status, message string) error {

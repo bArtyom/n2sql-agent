@@ -461,6 +461,11 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			if sources, ok := toolResult.Metadata["sources"]; ok {
 				toolFinishedData["sources"] = sources
 			}
+			for _, key := range []string{"child_run_id", "child_status", "child_steps", "child_events"} {
+				if value, ok := toolResult.Metadata[key]; ok {
+					toolFinishedData[key] = value
+				}
+			}
 			if truncated, ok := toolResult.Metadata["truncated"].(bool); ok {
 				toolFinishedData["truncated"] = truncated
 			}

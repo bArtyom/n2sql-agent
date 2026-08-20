@@ -15,6 +15,7 @@ type childRunStoreStub struct {
 	response  json.RawMessage
 	succeeded bool
 	failed    string
+	canceled  bool
 }
 
 func (s *childRunStoreStub) CreateChild(_ context.Context, input agentrun.ChildCreateInput) (agentrun.Run, error) {
@@ -34,6 +35,11 @@ func (s *childRunStoreStub) MarkChildSucceeded(_ context.Context, _ int64) error
 
 func (s *childRunStoreStub) MarkChildFailed(_ context.Context, _ int64, message string) error {
 	s.failed = message
+	return nil
+}
+
+func (s *childRunStoreStub) MarkChildCanceled(_ context.Context, _ int64) error {
+	s.canceled = true
 	return nil
 }
 

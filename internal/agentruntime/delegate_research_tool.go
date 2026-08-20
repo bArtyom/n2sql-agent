@@ -155,7 +155,17 @@ func (t *DelegateResearchTool) Call(ctx context.Context, raw json.RawMessage) (a
 	}
 
 	var sources []retrieval.Result
+	childEvents := make([]map[string]any, 0, 8)
 	result, err := child.RunWithEvents(ctx, childRunID, childMessages, func(event agent.Event) error {
+		if len(childEvents) < 8 {
+			item := map[string]any{"type": string(event.Type), "step_number": event.StepNumber}
+			if data, ok := event.Data.(map[string]any); ok {
+				if toolName, ok := data["tool_name"].(string); ok {
+					item["tool_name"] = toolName
+				}
+			}
+			childEvents = append(childEvents, item)
+		}
 		if event.Type != agent.EventToolFinished {
 			return nil
 		}
@@ -188,6 +198,7 @@ func (t *DelegateResearchTool) Call(ctx context.Context, raw json.RawMessage) (a
 			"child_status": string(result.Run.Status()),
 			"child_steps":  len(result.Run.Steps()),
 			"sources":      uniqueDelegateSources(sources),
+			"child_events": childEvents,
 		},
 	}
 	if t.lifecycle != nil {

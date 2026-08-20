@@ -72,6 +72,9 @@ func TestDelegateResearchToolRunsScopedReadOnlyChild(t *testing.T) {
 	if len(chat.definitions) != 2 || len(chat.definitions[0]) != 1 || chat.definitions[0][0].Name != "knowledge_search" {
 		t.Fatalf("child definitions = %#v", chat.definitions)
 	}
+	if events, ok := result.Metadata["child_events"].([]map[string]any); !ok || len(events) == 0 {
+		t.Fatalf("child events = %#v", result.Metadata["child_events"])
+	}
 }
 
 func TestDelegateResearchToolRejectsInvalidQuestion(t *testing.T) {

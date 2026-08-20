@@ -3,6 +3,7 @@ package agentservice
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -66,6 +67,9 @@ func (l *PersistentChildRunLifecycle) FinishChild(ctx context.Context, spec agen
 		return err
 	}
 	if runErr != nil {
+		if errors.Is(runErr, context.Canceled) {
+			return l.store.MarkChildCanceled(ctx, run.ID)
+		}
 		return l.store.MarkChildFailed(ctx, run.ID, runErr.Error())
 	}
 	response, err := json.Marshal(map[string]any{
