@@ -155,7 +155,7 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}", handler.NewAgentRunStatus(dependencies.AgentRunReader))
 		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}/children", handler.NewAgentRunChildren(dependencies.AgentRunReader))
 		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}/trace", handler.NewAgentRunTrace(dependencies.AgentEventStore))
-		mux.Handle("POST /api/knowledge-bases/{id}/agent-runs/{runID}/stop", handler.NewAgentRunStop(hub))
+		mux.Handle("POST /api/knowledge-bases/{id}/agent-runs/{runID}/stop", handler.NewAgentRunStopWithStore(hub, dependencies.AgentRuns))
 		mux.Handle("POST /api/knowledge-bases/{id}/agent-runs/{runID}/approval", handler.NewAgentRunApproval(hub))
 	}
 	if dependencies.FollowUpSuggestions != nil {

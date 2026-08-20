@@ -133,16 +133,19 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 
 		executionContext, stopRun := context.WithCancel(ctx)
 		defer stopRun()
-		if !request.ChildMode {
-			if err := hub.RegisterCancel(run.RunID, stopRun); err != nil {
-				return fmt.Errorf("register agent run cancel: %w", err)
+		if request.ChildMode {
+			if err := hub.Start(run.RunID, run.KnowledgeBaseID); err != nil && !errors.Is(err, agentstream.ErrRunAlreadyStarted) {
+				return fmt.Errorf("start child agent stream: %w", err)
 			}
-			defer func() {
-				if err := hub.Finish(run.RunID); err != nil && !errors.Is(err, agentstream.ErrRunNotFound) {
-					slog.WarnContext(ctx, "agent_stream_finish_failed", "run_id", run.RunID, "error", err)
-				}
-			}()
 		}
+		if err := hub.RegisterCancel(run.RunID, stopRun); err != nil {
+			return fmt.Errorf("register agent run cancel: %w", err)
+		}
+		defer func() {
+			if err := hub.Finish(run.RunID); err != nil && !errors.Is(err, agentstream.ErrRunNotFound) {
+				slog.WarnContext(ctx, "agent_stream_finish_failed", "run_id", run.RunID, "error", err)
+			}
+		}()
 
 		transportEventNumber := 0
 		publish := func(eventType string, value any) error {

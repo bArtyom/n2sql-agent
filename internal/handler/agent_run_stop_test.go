@@ -9,11 +9,23 @@ import (
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
+	"github.com/bArtyom/n2sql-agent/internal/agentrun"
 	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/agentstream"
 	"github.com/bArtyom/n2sql-agent/internal/handler"
 )
+
+type cancelTreeStoreStub struct {
+	agentrun.Store
+	childIDs []string
+	called   bool
+}
+
+func (s *cancelTreeStoreStub) CancelTree(context.Context, string, int64) ([]string, error) {
+	s.called = true
+	return s.childIDs, nil
+}
 
 // blockingAgentAnswererStub simulates a real Agent run that keeps working
 // until its execution context is canceled: it emits run_started, then blocks
@@ -132,6 +144,44 @@ func TestAgentRunStopScopesByKnowledgeBase(t *testing.T) {
 	case <-streamDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("agent stream did not finish after stop")
+	}
+}
+
+func TestAgentRunStopCancelsWaitingParentAndChildren(t *testing.T) {
+	hub := agentstream.NewHub()
+	if err := hub.Start("parent-1", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.Start("child-1", 7); err != nil {
+		t.Fatal(err)
+	}
+	parentCanceled := make(chan struct{})
+	childCanceled := make(chan struct{})
+	if err := hub.RegisterCancel("parent-1", func() { close(parentCanceled) }); err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.RegisterCancel("child-1", func() { close(childCanceled) }); err != nil {
+		t.Fatal(err)
+	}
+	store := &cancelTreeStoreStub{childIDs: []string{"child-1"}}
+	endpoint := handler.NewAgentRunStopWithStore(hub, store)
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-runs/parent-1/stop", nil)
+	request.SetPathValue("id", "7")
+	request.SetPathValue("runID", "parent-1")
+	response := httptest.NewRecorder()
+	endpoint.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !store.called {
+		t.Fatalf("status=%d store_called=%v body=%q", response.Code, store.called, response.Body.String())
+	}
+	select {
+	case <-parentCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("parent cancel was not propagated")
+	}
+	select {
+	case <-childCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("child cancel was not propagated")
 	}
 }
 

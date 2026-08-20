@@ -130,6 +130,12 @@ type DatabaseReader interface {
 	GetByID(context.Context, int64) (Run, error)
 }
 
+// CancellationStore cancels a run and all unfinished descendants. It returns
+// child public IDs so the HTTP layer can also cancel in-process contexts.
+type CancellationStore interface {
+	CancelTree(context.Context, string, int64) ([]string, error)
+}
+
 // ChildReader exposes safe parent/child Run metadata for execution trees.
 type ChildReader interface {
 	ListChildren(context.Context, int64, int64) ([]Run, error)
@@ -227,6 +233,65 @@ func (s *PostgresStore) GetByID(ctx context.Context, id int64) (Run, error) {
 		return Run{}, fmt.Errorf("get agent run by id: %w", err)
 	}
 	return run, nil
+}
+
+func (s *PostgresStore) CancelTree(ctx context.Context, runID string, knowledgeBaseID int64) ([]string, error) {
+	if strings.TrimSpace(runID) == "" || knowledgeBaseID <= 0 {
+		return nil, ErrInvalidRun
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin agent cancellation: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var rootID int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT id FROM agent_runs WHERE run_id = $1 AND knowledge_base_id = $2 FOR UPDATE`, runID, knowledgeBaseID).Scan(&rootID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrRunNotFound
+		}
+		return nil, fmt.Errorf("lock agent run for cancellation: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx, `
+		WITH RECURSIVE run_tree AS (
+			SELECT id, run_id FROM agent_runs WHERE id = $1
+			UNION ALL
+			SELECT child.id, child.run_id FROM agent_runs child JOIN run_tree parent ON child.parent_run_id = parent.id
+		)
+		SELECT run_id FROM run_tree WHERE id <> $1`, rootID)
+	if err != nil {
+		return nil, fmt.Errorf("list child runs for cancellation: %w", err)
+	}
+	var childIDs []string
+	for rows.Next() {
+		var childID string
+		if err := rows.Scan(&childID); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan child run for cancellation: %w", err)
+		}
+		childIDs = append(childIDs, childID)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close child cancellation rows: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		WITH RECURSIVE run_tree AS (
+			SELECT id FROM agent_runs WHERE id = $1
+			UNION ALL
+			SELECT child.id FROM agent_runs child JOIN run_tree parent ON child.parent_run_id = parent.id
+		)
+		UPDATE agent_runs
+		SET status = 'canceled', finished_at = CURRENT_TIMESTAMP,
+			lease_until = NULL, heartbeat_at = NULL, lease_token = NULL,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id IN (SELECT id FROM run_tree)
+		  AND status NOT IN ('succeeded', 'failed', 'canceled')`, rootID); err != nil {
+		return nil, fmt.Errorf("cancel agent run tree: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit agent cancellation: %w", err)
+	}
+	return childIDs, nil
 }
 
 func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Run, error) {
