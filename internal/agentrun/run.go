@@ -21,6 +21,13 @@ const (
 	StatusCanceled  Status = "canceled"
 )
 
+type Kind string
+
+const (
+	KindRoot  Kind = "root"
+	KindChild Kind = "child"
+)
+
 var (
 	ErrNoRun       = errors.New("no pending agent run")
 	ErrRunNotFound = errors.New("agent run not found")
@@ -41,6 +48,8 @@ type Run struct {
 	RunID           string           `json:"run_id"`
 	KnowledgeBaseID int64            `json:"knowledge_base_id"`
 	ConversationID  int64            `json:"conversation_id,omitempty"`
+	ParentRunID     int64            `json:"parent_run_id,omitempty"`
+	RunKind         Kind             `json:"run_kind"`
 	Request         json.RawMessage  `json:"request"`
 	Response        json.RawMessage  `json:"response,omitempty"`
 	Status          Status           `json:"status"`
@@ -60,7 +69,23 @@ type CreateInput struct {
 	RunID           string
 	KnowledgeBaseID int64
 	ConversationID  int64
+	ParentRunID     int64
+	RunKind         Kind
 	Request         json.RawMessage
+}
+
+type ChildCreateInput struct {
+	RunID           string
+	ParentRunID     int64
+	KnowledgeBaseID int64
+	Request         json.RawMessage
+}
+
+type ChildRunStore interface {
+	CreateChild(context.Context, ChildCreateInput) (Run, error)
+	SaveChildResponse(context.Context, int64, json.RawMessage) error
+	MarkChildSucceeded(context.Context, int64) error
+	MarkChildFailed(context.Context, int64, string) error
 }
 
 type Store interface {
@@ -135,12 +160,12 @@ func (s *PostgresStore) Get(ctx context.Context, runID string, knowledgeBaseID i
 	}
 	var run Run
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, run_id, knowledge_base_id, COALESCE(conversation_id, 0), request, response,
+		SELECT id, run_id, knowledge_base_id, COALESCE(conversation_id, 0), COALESCE(parent_run_id, 0), run_kind, request, response,
 			status, attempt_count, COALESCE(error_message, ''), created_at, started_at,
 			finished_at, lease_until, heartbeat_at, lease_token, updated_at
 		FROM agent_runs
 		WHERE run_id = $1 AND knowledge_base_id = $2`, runID, knowledgeBaseID).Scan(
-		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.Request, &run.Response,
+		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.ParentRunID, &run.RunKind, &run.Request, &run.Response,
 		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.CreatedAt, &run.StartedAt,
 		&run.FinishedAt, &run.LeaseUntil, &run.HeartbeatAt, &run.LeaseToken, &run.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -158,19 +183,83 @@ func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Run, err
 	}
 	var run Run
 	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO agent_runs (run_id, knowledge_base_id, conversation_id, request)
-		VALUES ($1, $2, NULLIF($3, 0), $4)
-		RETURNING id, run_id, knowledge_base_id, COALESCE(conversation_id, 0), request, response,
+		INSERT INTO agent_runs (run_id, knowledge_base_id, conversation_id, parent_run_id, run_kind, request)
+		VALUES ($1, $2, NULLIF($3, 0), NULLIF($4, 0), $5, $6)
+		RETURNING id, run_id, knowledge_base_id, COALESCE(conversation_id, 0), COALESCE(parent_run_id, 0), run_kind, request, response,
 			status, attempt_count, COALESCE(error_message, ''), created_at, started_at, finished_at,
 			lease_until, heartbeat_at, lease_token, updated_at`,
-		input.RunID, input.KnowledgeBaseID, input.ConversationID, input.Request).Scan(
-		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.Request, &run.Response,
+		input.RunID, input.KnowledgeBaseID, input.ConversationID, input.ParentRunID, runKind(input.RunKind), input.Request).Scan(
+		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.ParentRunID, &run.RunKind, &run.Request, &run.Response,
 		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.CreatedAt, &run.StartedAt, &run.FinishedAt,
 		&run.LeaseUntil, &run.HeartbeatAt, &run.LeaseToken, &run.UpdatedAt)
 	if err != nil {
 		return Run{}, fmt.Errorf("create agent run: %w", err)
 	}
 	return run, nil
+}
+
+func runKind(kind Kind) Kind {
+	if kind == "" {
+		return KindRoot
+	}
+	return kind
+}
+
+func (s *PostgresStore) CreateChild(ctx context.Context, input ChildCreateInput) (Run, error) {
+	if input.RunID == "" || input.ParentRunID <= 0 || input.KnowledgeBaseID <= 0 || len(input.Request) == 0 || !json.Valid(input.Request) {
+		return Run{}, ErrInvalidRun
+	}
+	var run Run
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO agent_runs (run_id, knowledge_base_id, parent_run_id, run_kind, request, status, attempt_count, started_at)
+		VALUES ($1, $2, $3, 'child', $4, 'running', 1, CURRENT_TIMESTAMP)
+		RETURNING id, run_id, knowledge_base_id, 0, parent_run_id, run_kind, request, response,
+			status, attempt_count, COALESCE(error_message, ''), created_at, started_at, finished_at,
+			lease_until, heartbeat_at, lease_token, updated_at`,
+		input.RunID, input.KnowledgeBaseID, input.ParentRunID, input.Request).Scan(
+		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.ParentRunID, &run.RunKind, &run.Request, &run.Response,
+		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.CreatedAt, &run.StartedAt, &run.FinishedAt,
+		&run.LeaseUntil, &run.HeartbeatAt, &run.LeaseToken, &run.UpdatedAt)
+	if err != nil {
+		return Run{}, fmt.Errorf("create child agent run: %w", err)
+	}
+	return run, nil
+}
+
+func (s *PostgresStore) SaveChildResponse(ctx context.Context, id int64, response json.RawMessage) error {
+	if id <= 0 || len(response) == 0 || !json.Valid(response) {
+		return ErrInvalidRun
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE agent_runs SET response = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND run_kind = 'child' AND status = 'running'`, id, response)
+	if err != nil {
+		return fmt.Errorf("save child agent response: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return ErrRunNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) MarkChildSucceeded(ctx context.Context, id int64) error {
+	return s.markChildFinished(ctx, id, StatusSucceeded, "")
+}
+
+func (s *PostgresStore) MarkChildFailed(ctx context.Context, id int64, message string) error {
+	return s.markChildFinished(ctx, id, StatusFailed, message)
+}
+
+func (s *PostgresStore) markChildFinished(ctx context.Context, id int64, status Status, message string) error {
+	if id <= 0 {
+		return ErrInvalidRun
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE agent_runs SET status = $2, error_message = NULLIF($3, ''), finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND run_kind = 'child' AND status = 'running'`, id, status, message)
+	if err != nil {
+		return fmt.Errorf("mark child agent run %s: %w", status, err)
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return ErrRunNotFound
+	}
+	return nil
 }
 
 func (s *PostgresStore) ClaimNext(ctx context.Context) (Run, error) {
@@ -192,10 +281,10 @@ func (s *PostgresStore) ClaimNext(ctx context.Context) (Run, error) {
 			updated_at = CURRENT_TIMESTAMP
 		FROM next_run
 		WHERE run.id = next_run.id
-		RETURNING run.id, run.run_id, run.knowledge_base_id, COALESCE(run.conversation_id, 0),
+		RETURNING run.id, run.run_id, run.knowledge_base_id, COALESCE(run.conversation_id, 0), COALESCE(run.parent_run_id, 0), run.run_kind,
 			run.request, run.response, run.status, run.attempt_count, COALESCE(run.error_message, ''),
 			run.created_at, run.started_at, run.finished_at, run.lease_until, run.heartbeat_at, run.lease_token, run.updated_at`).Scan(
-		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.Request, &run.Response,
+		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.ParentRunID, &run.RunKind, &run.Request, &run.Response,
 		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.CreatedAt, &run.StartedAt, &run.FinishedAt,
 		&run.LeaseUntil, &run.HeartbeatAt, &run.LeaseToken, &run.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {

@@ -34,6 +34,21 @@ func (delegateSearcherStub) Search(_ context.Context, knowledgeBaseID int64, que
 	return []retrieval.Result{{DocumentID: knowledgeBaseID + 1, OriginalFilename: "员工手册.md", Position: 3, Content: query + "规则"}}, nil
 }
 
+type childLifecycleStub struct {
+	started  ChildRunSpec
+	finished bool
+}
+
+func (s *childLifecycleStub) StartChild(_ context.Context, spec ChildRunSpec) (string, error) {
+	s.started = spec
+	return spec.RunID, nil
+}
+
+func (s *childLifecycleStub) FinishChild(_ context.Context, _ ChildRunSpec, _ agent.ToolResult, runErr error) error {
+	s.finished = runErr == nil
+	return nil
+}
+
 func TestDelegateResearchToolRunsScopedReadOnlyChild(t *testing.T) {
 	chat := &delegateChatStub{}
 	tool, err := NewDelegateResearchTool(chat, delegateSearcherStub{}, 7, 4096, 3, nil, false, retrieval.DefaultKeywordThreshold)
@@ -66,5 +81,25 @@ func TestDelegateResearchToolRejectsInvalidQuestion(t *testing.T) {
 	}
 	if _, err := tool.Call(context.Background(), json.RawMessage(`{"question":""}`)); err == nil {
 		t.Fatal("Call() error = nil, want invalid question")
+	}
+}
+
+func TestDelegateResearchToolPersistsChildLifecycleWhenConfigured(t *testing.T) {
+	lifecycle := &childLifecycleStub{}
+	chat := &delegateChatStub{}
+	tool, err := NewDelegateResearchTool(chat, delegateSearcherStub{}, 7, 4096, 3, nil, false, retrieval.DefaultKeywordThreshold)
+	if err != nil {
+		t.Fatalf("NewDelegateResearchTool() error = %v", err)
+	}
+	tool.SetParentRun(42, "parent-run")
+	tool.SetChildRunLifecycle(lifecycle)
+	if _, err := tool.Call(context.Background(), json.RawMessage(`{"question":"研究年假"}`)); err != nil {
+		t.Fatalf("Call() error = %v", err)
+	}
+	if lifecycle.started.ParentRunID != 42 || lifecycle.started.KnowledgeBaseID != 7 || lifecycle.started.Question != "研究年假" {
+		t.Fatalf("started child = %#v", lifecycle.started)
+	}
+	if !lifecycle.finished {
+		t.Fatal("child lifecycle was not completed")
 	}
 }

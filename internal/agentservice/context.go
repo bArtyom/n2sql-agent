@@ -45,6 +45,7 @@ type ChatRequest struct {
 	// RunID is assigned by the streaming transport when it needs a reconnectable
 	// run. It is intentionally not accepted from JSON clients.
 	RunID               string                          `json:"-"`
+	ParentRunDatabaseID int64                           `json:"-"`
 	TopK                int                             `json:"top_k,omitempty"`
 	ChatModel           string                          `json:"chat_model,omitempty"`
 	ThinkingMode        string                          `json:"thinking_mode,omitempty"`

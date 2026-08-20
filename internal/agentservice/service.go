@@ -72,6 +72,7 @@ type Service struct {
 	memoryStore        memory.Store
 	profileStore       memory.ProfileStore
 	delegateResearch   bool
+	childLifecycle     agentruntime.ChildRunLifecycle
 	sequence           atomic.Uint64
 }
 
@@ -92,6 +93,12 @@ func (s *Service) SetMemoryStore(store memory.Store) {
 func (s *Service) SetDelegateResearchEnabled(enabled bool) {
 	if s != nil {
 		s.delegateResearch = enabled
+	}
+}
+
+func (s *Service) SetChildRunLifecycle(lifecycle agentruntime.ChildRunLifecycle) {
+	if s != nil {
+		s.childLifecycle = lifecycle
 	}
 }
 
@@ -284,6 +291,8 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		if delegateErr != nil {
 			return Response{}, fmt.Errorf("create delegate research tool: %w", delegateErr)
 		}
+		delegate.SetParentRun(request.ParentRunDatabaseID, request.RunID)
+		delegate.SetChildRunLifecycle(s.childLifecycle)
 		if err := registry.AllowAndRegister(delegate); err != nil {
 			return Response{}, fmt.Errorf("register delegate research tool: %w", err)
 		}

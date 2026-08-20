@@ -153,6 +153,7 @@ func main() {
 	}
 	agentAnswerService.SetMemoryStore(memoryStore)
 	agentAnswerService.SetDelegateResearchEnabled(true)
+	agentAnswerService.SetChildRunLifecycle(agentservice.NewPersistentChildRunLifecycle(agentRunStore))
 
 	server := &http.Server{
 		Addr: cfg.Address,

@@ -115,6 +115,7 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 		}
 		request := snapshot.Request
 		request.RunID = run.RunID
+		request.ParentRunDatabaseID = run.ID
 		request.RecoveryCheckpoints = run.Checkpoints
 		if checkpointStore != nil {
 			request.CheckpointSink = func(ctx context.Context, checkpoint agentruntime.ToolCheckpoint) error {
