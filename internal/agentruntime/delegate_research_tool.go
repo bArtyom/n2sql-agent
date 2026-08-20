@@ -24,6 +24,7 @@ const (
 	delegateResearchToolName = "delegate_research"
 	maxDelegateQuestionBytes = 8000
 	maxDelegateAnswerBytes   = 12000
+	DefaultChildAgentTimeout = 5 * time.Minute
 )
 
 var (
@@ -48,6 +49,7 @@ type DelegateResearchTool struct {
 	lifecycle         ChildRunLifecycle
 	scheduler         ChildScheduler
 	childEventSink    EventSink
+	childTimeout      time.Duration
 	sequence          atomic.Uint64
 }
 
@@ -87,6 +89,19 @@ func (t *DelegateResearchTool) SetChildScheduler(scheduler ChildScheduler) {
 	}
 }
 
+// SetChildTimeout overrides the total wall-clock limit for one child Agent.
+// A non-positive value restores the safe default instead of disabling it.
+func (t *DelegateResearchTool) SetChildTimeout(timeout time.Duration) {
+	if t == nil {
+		return
+	}
+	if timeout <= 0 {
+		t.childTimeout = DefaultChildAgentTimeout
+		return
+	}
+	t.childTimeout = timeout
+}
+
 func (t *DelegateResearchTool) SetChildEventSink(sink EventSink) {
 	if t != nil {
 		t.childEventSink = sink
@@ -111,13 +126,14 @@ func NewDelegateResearchTool(chat modelruntime.ToolChatRunner, searcher retrieva
 		queryRewrite:     queryRewrite,
 		keywordThreshold: keywordThreshold,
 		scheduler:        scheduler,
+		childTimeout:     DefaultChildAgentTimeout,
 	}, nil
 }
 
 func (t *DelegateResearchTool) Name() string { return delegateResearchToolName }
 
 func (t *DelegateResearchTool) Description() string {
-	return "委派一个只读研究子 Agent，针对知识库或已选文档进行多步检索并返回简短结论"
+	return "仅在需要隔离上下文的独立研究任务中委派一个只读研究子 Agent；不要用于依赖前一步结果的连续步骤。多个独立问题可以并发委派，子 Agent 会返回简短结论"
 }
 
 func (t *DelegateResearchTool) Parameters() json.RawMessage {
@@ -192,6 +208,12 @@ func (t *DelegateResearchTool) Call(ctx context.Context, raw json.RawMessage) (a
 	var sources []retrieval.Result
 	childEvents := make([]map[string]any, 0, 8)
 	var result Result
+	childTimeout := t.childTimeout
+	if childTimeout <= 0 {
+		childTimeout = DefaultChildAgentTimeout
+	}
+	childCtx, cancelChild := context.WithTimeout(ctx, childTimeout)
+	defer cancelChild()
 	runChild := func(childCtx context.Context) error {
 		var runErr error
 		result, runErr = child.RunWithEvents(childCtx, childRunID, childMessages, func(event agent.Event) error {
@@ -232,9 +254,9 @@ func (t *DelegateResearchTool) Call(ctx context.Context, raw json.RawMessage) (a
 		return runErr
 	}
 	if t.scheduler != nil {
-		err = t.scheduler.Run(ctx, runChild)
+		err = t.scheduler.Run(childCtx, runChild)
 	} else {
-		err = runChild(ctx)
+		err = runChild(childCtx)
 	}
 	if err != nil {
 		if ctx.Err() != nil {
@@ -242,6 +264,9 @@ func (t *DelegateResearchTool) Call(ctx context.Context, raw json.RawMessage) (a
 				_ = t.lifecycle.FinishChild(context.WithoutCancel(ctx), ChildRunSpec{RunID: childRunID, ParentRunID: t.parentRunID, KnowledgeBaseID: t.knowledgeBaseID, Question: input.Question}, agent.ToolResult{}, err)
 			}
 			return agent.ToolResult{}, fmt.Errorf("child research canceled: %w", err)
+		}
+		if errors.Is(childCtx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+			err = fmt.Errorf("child research timed out after %s: %w", childTimeout, context.DeadlineExceeded)
 		}
 		if t.lifecycle != nil {
 			partial := delegatePartialFailureResult(err, childRunID, childEvents, sources)

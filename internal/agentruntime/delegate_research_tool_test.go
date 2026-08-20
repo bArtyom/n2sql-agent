@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
@@ -19,6 +20,13 @@ type delegateChatStub struct {
 
 type delegateFailingChatStub struct {
 	calls int
+}
+
+type delegateBlockingChatStub struct{}
+
+func (*delegateBlockingChatStub) ChatMessagesWithTools(ctx context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+	<-ctx.Done()
+	return modelclient.ChatResponse{}, ctx.Err()
 }
 
 func (s *delegateFailingChatStub) ChatMessagesWithTools(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
@@ -53,6 +61,7 @@ func (delegateSearcherStub) Search(_ context.Context, knowledgeBaseID int64, que
 type childLifecycleStub struct {
 	started  ChildRunSpec
 	finished bool
+	err      error
 }
 
 func (s *childLifecycleStub) StartChild(_ context.Context, spec ChildRunSpec) (string, error) {
@@ -62,7 +71,30 @@ func (s *childLifecycleStub) StartChild(_ context.Context, spec ChildRunSpec) (s
 
 func (s *childLifecycleStub) FinishChild(_ context.Context, _ ChildRunSpec, _ agent.ToolResult, runErr error) error {
 	s.finished = runErr == nil
+	s.err = runErr
 	return nil
+}
+
+func TestDelegateResearchToolTimesOutAndMarksChildTerminal(t *testing.T) {
+	lifecycle := &childLifecycleStub{}
+	tool, err := NewDelegateResearchTool(&delegateBlockingChatStub{}, delegateSearcherStub{}, 7, 4096, 3, nil, false, retrieval.DefaultKeywordThreshold)
+	if err != nil {
+		t.Fatalf("NewDelegateResearchTool() error = %v", err)
+	}
+	tool.SetParentRun(42, "parent-run")
+	tool.SetChildRunLifecycle(lifecycle)
+	tool.SetChildTimeout(10 * time.Millisecond)
+	started := time.Now()
+	_, err = tool.Call(context.Background(), json.RawMessage(`{"question":"研究年假"}`))
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("Call() error = %v, want timeout", err)
+	}
+	if time.Since(started) > time.Second {
+		t.Fatalf("timeout took too long: %s", time.Since(started))
+	}
+	if lifecycle.finished || lifecycle.err == nil || !strings.Contains(lifecycle.err.Error(), "timed out") {
+		t.Fatalf("child lifecycle = finished:%v err:%v, want terminal failure", lifecycle.finished, lifecycle.err)
+	}
 }
 
 func TestDelegateResearchToolRunsScopedReadOnlyChild(t *testing.T) {
