@@ -43,6 +43,7 @@
 - Agent 主线能力已收口：只读工具失败会把结构化错误反馈给模型进行纠错，副作用工具失败不自动重试；Worker 通过租约过期回收恢复崩溃任务；子 Agent 由共享调度器异步执行，所有子任务进入终态后唤醒父 Agent。
 - 工具策略层已解耦：`knowledge_base_preferred` 可注入额外工具，`knowledge_base_only` 后端不注册额外工具；子 Agent 继承父 Agent 的业务工具，但不继承 `delegate_research`，避免递归创建子 Agent。
 - Agent 循环检测采用两阶段保护：第一次重复工具调用发布 `loop_detected` 并把警告反馈给模型，模型仍重复时才停止本轮，接近 DeerFlow 的 warning/hard-stop 机制。
+- Agent checkpoint 已增加模型决策边界：模型工具决策先写入 `agent_run_decisions`，Worker 接管时可跳过重复规划并执行已保存决策；工具结果仍写入 `agent_run_checkpoints`，任务终态后两类 checkpoint 都会清理。
 - Agent checkpoint 第一版断点续跑已接入：checkpoint 额外保存有界的原始工具参数；Worker 接管后将最近的安全只读工具调用重建为 `assistant tool_call + tool result` 上下文，直接进入下一次模型决策，减少重复的工具选择；旧格式 checkpoint 已通过迁移清理，不再兼容。
 - Agent checkpoint 恢复轨迹已补齐：接管时发出带 `checkpoint_action=resumed_context` 的 `tool_finished` 事件，并将已恢复的工具参数加入本轮重复调用保护，前端和运行日志可以区分“重新执行”与“从 checkpoint 恢复”。
 - Agent checkpoint 已保存模型决策批次 ID；同一轮并行只读工具恢复时，会重建为一条带多个 `tool_call` 的 assistant 消息及对应 tool 消息，避免恢复后的上下文协议失真。

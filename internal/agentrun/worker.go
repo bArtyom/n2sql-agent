@@ -238,11 +238,15 @@ func (r *Runner) publishParentResumeEvent(ctx context.Context, child Run) {
 
 func (r *Runner) cleanupTerminalCheckpoints(ctx context.Context, runID int64) {
 	cleaner, ok := r.store.(ToolCheckpointCleaner)
-	if !ok {
-		return
+	if ok {
+		if err := cleaner.DeleteToolCheckpoints(context.WithoutCancel(ctx), runID); err != nil {
+			slog.WarnContext(ctx, "agent_checkpoint_cleanup_failed", "run_id", runID, "error", err)
+		}
 	}
-	if err := cleaner.DeleteToolCheckpoints(context.WithoutCancel(ctx), runID); err != nil {
-		slog.WarnContext(ctx, "agent_checkpoint_cleanup_failed", "run_id", runID, "error", err)
+	if decisionCleaner, ok := r.store.(DecisionCheckpointCleaner); ok {
+		if err := decisionCleaner.DeleteDecisionCheckpoints(context.WithoutCancel(ctx), runID); err != nil {
+			slog.WarnContext(ctx, "agent_decision_checkpoint_cleanup_failed", "run_id", runID, "error", err)
+		}
 	}
 }
 

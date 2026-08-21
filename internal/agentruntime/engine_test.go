@@ -1055,6 +1055,46 @@ func TestEngineReusesMatchingSafeCheckpointWithoutCallingTool(t *testing.T) {
 	}
 }
 
+func TestEngineResumesPersistedDecisionBeforeCallingModel(t *testing.T) {
+	tool := &toolStub{}
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(tool); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	modelCalls := 0
+	chat := chatStub{call: func(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		modelCalls++
+		return modelclient.ChatResponse{Message: "恢复后的最终答案"}, nil
+	}}
+	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 2, agentruntime.EngineOptions{
+		ResumeDecision: &agentruntime.ResumeDecision{
+			DecisionID: "decision-resume-1",
+			StepNumber: 1,
+			ToolCalls: []modelclient.ToolCall{{
+				ID:   "resume-call-1",
+				Type: "function",
+				Function: modelclient.ToolCallFunction{
+					Name:      "knowledge_search",
+					Arguments: `{"query":"年假"}`,
+				},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEngineWithOptions() error = %v", err)
+	}
+	result, err := engine.Run(context.Background(), "run-resume-decision", []modelclient.ChatMessage{{Role: "user", Content: "继续查询"}})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Run.Status() != agent.RunSucceeded || result.Run.FinalAnswer() != "恢复后的最终答案" {
+		t.Fatalf("run = %s/%q, want resumed success", result.Run.Status(), result.Run.FinalAnswer())
+	}
+	if modelCalls != 1 || string(tool.args) != `{"query":"年假"}` {
+		t.Fatalf("model calls = %d, tool args = %s, want one final model call and resumed tool decision", modelCalls, tool.args)
+	}
+}
+
 func TestEngineResumesSafeToolConversationWithoutRepeatingModelDecision(t *testing.T) {
 	called := false
 	tool := &readOnlyToolStub{toolStub: toolStub{onCall: func(context.Context) { called = true }}}

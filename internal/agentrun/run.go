@@ -50,26 +50,27 @@ func shouldRetryExpiredRun(attemptCount int) bool {
 }
 
 type Run struct {
-	ID              int64            `json:"id"`
-	RunID           string           `json:"run_id"`
-	KnowledgeBaseID int64            `json:"knowledge_base_id"`
-	ConversationID  int64            `json:"conversation_id,omitempty"`
-	ParentRunID     int64            `json:"parent_run_id,omitempty"`
-	RunKind         Kind             `json:"run_kind"`
-	Request         json.RawMessage  `json:"request"`
-	Response        json.RawMessage  `json:"response,omitempty"`
-	Status          Status           `json:"status"`
-	AttemptCount    int              `json:"attempt_count"`
-	ErrorMessage    string           `json:"error_message,omitempty"`
-	StopReason      string           `json:"stop_reason,omitempty"`
-	CreatedAt       time.Time        `json:"created_at"`
-	StartedAt       *time.Time       `json:"started_at,omitempty"`
-	FinishedAt      *time.Time       `json:"finished_at,omitempty"`
-	LeaseUntil      *time.Time       `json:"lease_until,omitempty"`
-	HeartbeatAt     *time.Time       `json:"heartbeat_at,omitempty"`
-	LeaseToken      string           `json:"-"`
-	UpdatedAt       time.Time        `json:"updated_at"`
-	Checkpoints     []ToolCheckpoint `json:"-"`
+	ID              int64               `json:"id"`
+	RunID           string              `json:"run_id"`
+	KnowledgeBaseID int64               `json:"knowledge_base_id"`
+	ConversationID  int64               `json:"conversation_id,omitempty"`
+	ParentRunID     int64               `json:"parent_run_id,omitempty"`
+	RunKind         Kind                `json:"run_kind"`
+	Request         json.RawMessage     `json:"request"`
+	Response        json.RawMessage     `json:"response,omitempty"`
+	Status          Status              `json:"status"`
+	AttemptCount    int                 `json:"attempt_count"`
+	ErrorMessage    string              `json:"error_message,omitempty"`
+	StopReason      string              `json:"stop_reason,omitempty"`
+	CreatedAt       time.Time           `json:"created_at"`
+	StartedAt       *time.Time          `json:"started_at,omitempty"`
+	FinishedAt      *time.Time          `json:"finished_at,omitempty"`
+	LeaseUntil      *time.Time          `json:"lease_until,omitempty"`
+	HeartbeatAt     *time.Time          `json:"heartbeat_at,omitempty"`
+	LeaseToken      string              `json:"-"`
+	UpdatedAt       time.Time           `json:"updated_at"`
+	Checkpoints     []ToolCheckpoint    `json:"-"`
+	Decision        *DecisionCheckpoint `json:"-"`
 }
 
 type CreateInput struct {
@@ -201,6 +202,23 @@ type ToolCheckpointStore interface {
 type ToolCheckpointCleaner interface {
 	DeleteToolCheckpoints(context.Context, int64) error
 	CleanupTerminalToolCheckpoints(context.Context, time.Duration) (int64, error)
+}
+
+type DecisionCheckpoint struct {
+	AgentRunID   int64
+	AttemptCount int
+	StepNumber   int
+	DecisionID   string
+	ToolCalls    json.RawMessage
+}
+
+type DecisionCheckpointStore interface {
+	SaveDecisionCheckpoint(context.Context, DecisionCheckpoint) error
+	GetLatestDecisionCheckpoint(context.Context, int64) (*DecisionCheckpoint, error)
+}
+
+type DecisionCheckpointCleaner interface {
+	DeleteDecisionCheckpoints(context.Context, int64) error
 }
 
 type ToolCheckpoint struct {
@@ -624,6 +642,52 @@ func (s *PostgresStore) SaveToolCheckpoint(ctx context.Context, checkpoint ToolC
 		checkpoint.ToolCallID, checkpoint.ToolName, payload)
 	if err != nil {
 		return fmt.Errorf("save agent tool checkpoint: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) SaveDecisionCheckpoint(ctx context.Context, checkpoint DecisionCheckpoint) error {
+	if checkpoint.AgentRunID <= 0 || checkpoint.AttemptCount <= 0 || checkpoint.StepNumber <= 0 || checkpoint.DecisionID == "" || len(checkpoint.ToolCalls) == 0 || !json.Valid(checkpoint.ToolCalls) {
+		return ErrInvalidRun
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO agent_run_decisions (agent_run_id, attempt_count, step_number, decision_id, tool_calls)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (agent_run_id, attempt_count, decision_id)
+		DO UPDATE SET step_number = EXCLUDED.step_number, tool_calls = EXCLUDED.tool_calls`,
+		checkpoint.AgentRunID, checkpoint.AttemptCount, checkpoint.StepNumber, checkpoint.DecisionID, checkpoint.ToolCalls)
+	if err != nil {
+		return fmt.Errorf("save agent decision checkpoint: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) GetLatestDecisionCheckpoint(ctx context.Context, agentRunID int64) (*DecisionCheckpoint, error) {
+	if agentRunID <= 0 {
+		return nil, ErrInvalidRun
+	}
+	var checkpoint DecisionCheckpoint
+	err := s.db.QueryRowContext(ctx, `
+		SELECT agent_run_id, attempt_count, step_number, decision_id, tool_calls
+		FROM agent_run_decisions
+		WHERE agent_run_id = $1
+		ORDER BY attempt_count DESC, step_number DESC, id DESC
+		LIMIT 1`, agentRunID).Scan(&checkpoint.AgentRunID, &checkpoint.AttemptCount, &checkpoint.StepNumber, &checkpoint.DecisionID, &checkpoint.ToolCalls)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get agent decision checkpoint: %w", err)
+	}
+	return &checkpoint, nil
+}
+
+func (s *PostgresStore) DeleteDecisionCheckpoints(ctx context.Context, agentRunID int64) error {
+	if agentRunID <= 0 {
+		return ErrInvalidRun
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_run_decisions WHERE agent_run_id = $1`, agentRunID); err != nil {
+		return fmt.Errorf("delete agent decision checkpoints: %w", err)
 	}
 	return nil
 }

@@ -66,7 +66,9 @@ type Engine struct {
 	toolTimeout             time.Duration
 	parallelToolLimit       int
 	resumeCheckpoints       []ResumeCheckpoint
+	resumeDecision          *ResumeDecision
 	checkpointSink          ToolCheckpointSink
+	decisionSink            DecisionCheckpointSink
 }
 
 // EngineOptions controls bounded loop behavior without changing the default
@@ -94,7 +96,9 @@ type EngineOptions struct {
 	// The engine reuses one only when the tool is safe and the arguments hash
 	// matches the new model call exactly.
 	ResumeCheckpoints []ResumeCheckpoint
+	ResumeDecision    *ResumeDecision
 	CheckpointSink    ToolCheckpointSink
+	DecisionSink      DecisionCheckpointSink
 }
 
 type ResumeCheckpoint struct {
@@ -119,6 +123,20 @@ type ToolCheckpoint struct {
 }
 
 type ToolCheckpointSink func(context.Context, ToolCheckpoint) error
+
+type ResumeDecision struct {
+	DecisionID string
+	StepNumber int
+	ToolCalls  []modelclient.ToolCall
+}
+
+type DecisionCheckpoint struct {
+	DecisionID string
+	StepNumber int
+	ToolCalls  []modelclient.ToolCall
+}
+
+type DecisionCheckpointSink func(context.Context, DecisionCheckpoint) error
 
 // ApprovalGate is called immediately before a tool is executed. Returning
 // false rejects the tool call; returning an error aborts the run.
@@ -192,7 +210,9 @@ func NewEngineWithOptions(chat modelruntime.ToolChatRunner, registry *agent.Tool
 		toolTimeout:             toolTimeout,
 		parallelToolLimit:       parallelToolLimit,
 		resumeCheckpoints:       options.ResumeCheckpoints,
+		resumeDecision:          options.ResumeDecision,
 		checkpointSink:          options.CheckpointSink,
+		decisionSink:            options.DecisionSink,
 	}, nil
 }
 
@@ -236,6 +256,10 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 	emitter := newEventEmitter(runID, sink)
 	seenToolCalls := make(map[string]struct{})
 	loopWarnings := make(map[string]struct{})
+	var resumedDecision *modelclient.ChatResponse
+	if e.resumeDecision != nil && len(e.resumeDecision.ToolCalls) > 0 && len(e.resumeCheckpoints) == 0 {
+		resumedDecision = &modelclient.ChatResponse{ToolCalls: e.resumeDecision.ToolCalls}
+	}
 	if err := emitter.emit(agent.EventRunStarted, 0, map[string]any{
 		"status": string(agent.RunRunning),
 	}); err != nil {
@@ -267,15 +291,22 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 		}
 		conversation = compactConversationWithSummarizer(ctx, conversation, maxAgentConversationBytes, e.contextSummarizer)
 
-		if err := run.RecordModelCall(); err != nil {
-			return finishErrorWithEvents(result, err, emitter)
-		}
-		response, err := e.chatWithRetry(ctx, conversation, definitions)
-		if err != nil {
-			if stepErr := run.AddStep(agent.Step{Kind: agent.StepModelDecision, Status: agent.StepFailed}); stepErr != nil {
-				return finishErrorWithEvents(result, stepErr, emitter)
+		var response modelclient.ChatResponse
+		usedResumedDecision := resumedDecision != nil
+		if resumedDecision != nil {
+			response = *resumedDecision
+			resumedDecision = nil
+		} else {
+			if err := run.RecordModelCall(); err != nil {
+				return finishErrorWithEvents(result, err, emitter)
 			}
-			return finishErrorWithCategory(result, err, agent.FailureModel, emitter)
+			response, err = e.chatWithRetry(ctx, conversation, definitions)
+			if err != nil {
+				if stepErr := run.AddStep(agent.Step{Kind: agent.StepModelDecision, Status: agent.StepFailed}); stepErr != nil {
+					return finishErrorWithEvents(result, stepErr, emitter)
+				}
+				return finishErrorWithCategory(result, err, agent.FailureModel, emitter)
+			}
 		}
 		if response.Usage != nil {
 			run.ObserveChatTokens(*response.Usage)
@@ -323,6 +354,14 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			Content:   response.Message,
 			ToolCalls: response.ToolCalls,
 		})
+		if e.decisionSink != nil && len(response.ToolCalls) > 0 && !usedResumedDecision {
+			decision := DecisionCheckpoint{DecisionID: fmt.Sprintf("%s-decision-%d", runID, step+1), StepNumber: step + 1, ToolCalls: response.ToolCalls}
+			if err := e.decisionSink(ctx, decision); err != nil {
+				// A decision checkpoint accelerates recovery but must not turn a
+				// successful model response into a failed Agent run.
+				_ = emitter.emit(agent.EventToolFinished, len(run.Steps()), map[string]any{"checkpoint_action": "decision_save_failed"})
+			}
+		}
 		parallelResults, parallel := e.precomputeReadOnlyToolCalls(ctx, response.ToolCalls, seenToolCalls)
 		var fallbackAnswer string
 		hasRelevantToolResult := false

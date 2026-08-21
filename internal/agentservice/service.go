@@ -348,7 +348,9 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	engine, err := agentruntime.NewEngineWithOptions(chatRunner, registry, s.maxSteps, agentruntime.EngineOptions{
 		ContextSummarizer: contextSummarizer,
 		ResumeCheckpoints: resumeCheckpoints(request.RecoveryCheckpoints),
+		ResumeDecision:    request.RecoveryDecision,
 		CheckpointSink:    request.CheckpointSink,
+		DecisionSink:      request.DecisionSink,
 	})
 	if err != nil {
 		return Response{}, fmt.Errorf("create agent engine: %w", err)

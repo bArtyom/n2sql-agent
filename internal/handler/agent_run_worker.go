@@ -16,6 +16,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agentstream"
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/metrics"
+	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 )
 
 // persistedAgentRequest is the request snapshot stored in agent_runs. Headers
@@ -117,6 +118,16 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 		request.RunID = run.RunID
 		request.ParentRunDatabaseID = run.ID
 		request.RecoveryCheckpoints = run.Checkpoints
+		if decisionStore, ok := checkpointStore.(agentrun.DecisionCheckpointStore); ok {
+			if decision, decisionErr := decisionStore.GetLatestDecisionCheckpoint(ctx, run.ID); decisionErr != nil {
+				slog.WarnContext(ctx, "agent_decision_checkpoint_load_failed", "run_id", run.RunID, "error", decisionErr)
+			} else if decision != nil {
+				var toolCalls []modelclient.ToolCall
+				if err := json.Unmarshal(decision.ToolCalls, &toolCalls); err == nil {
+					request.RecoveryDecision = &agentruntime.ResumeDecision{DecisionID: decision.DecisionID, StepNumber: decision.StepNumber, ToolCalls: toolCalls}
+				}
+			}
+		}
 		if checkpointStore != nil {
 			request.CheckpointSink = func(ctx context.Context, checkpoint agentruntime.ToolCheckpoint) error {
 				payload, err := json.Marshal(checkpoint.Payload)
@@ -128,6 +139,18 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 					ToolCallID: checkpoint.ToolCallID, DecisionID: checkpoint.DecisionID, ToolName: checkpoint.ToolName, Arguments: checkpoint.Arguments,
 					ArgumentsHash: checkpoint.ArgumentsHash, Content: checkpoint.Content, Payload: payload,
 				})
+			}
+			if decisionStore, ok := checkpointStore.(agentrun.DecisionCheckpointStore); ok {
+				request.DecisionSink = func(ctx context.Context, checkpoint agentruntime.DecisionCheckpoint) error {
+					toolCalls, err := json.Marshal(checkpoint.ToolCalls)
+					if err != nil {
+						return fmt.Errorf("encode agent decision checkpoint: %w", err)
+					}
+					return decisionStore.SaveDecisionCheckpoint(ctx, agentrun.DecisionCheckpoint{
+						AgentRunID: run.ID, AttemptCount: run.AttemptCount, StepNumber: checkpoint.StepNumber,
+						DecisionID: checkpoint.DecisionID, ToolCalls: toolCalls,
+					})
+				}
 			}
 		}
 
