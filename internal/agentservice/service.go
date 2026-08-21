@@ -75,6 +75,7 @@ type Service struct {
 	memoryStore        memory.Store
 	profileStore       memory.ProfileStore
 	delegateResearch   bool
+	externalTools      []agent.Tool
 	childLifecycle     agentruntime.ChildRunLifecycle
 	childScheduler     agentruntime.ChildScheduler
 	sequence           atomic.Uint64
@@ -97,6 +98,15 @@ func (s *Service) SetMemoryStore(store memory.Store) {
 func (s *Service) SetDelegateResearchEnabled(enabled bool) {
 	if s != nil {
 		s.delegateResearch = enabled
+	}
+}
+
+// SetExternalTools configures optional non-knowledge capabilities. They are
+// exposed only in knowledge_base_preferred mode; strict knowledge-base runs
+// never register them, so the model cannot call them.
+func (s *Service) SetExternalTools(tools ...agent.Tool) {
+	if s != nil {
+		s.externalTools = append([]agent.Tool(nil), tools...)
 	}
 }
 
@@ -308,6 +318,11 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 			return Response{}, fmt.Errorf("create child knowledge search registry: %w", err)
 		}
 	}
+	if request.KnowledgePolicy == KnowledgeBasePreferred && !request.ChildMode {
+		if err := s.registerExternalTools(registry); err != nil {
+			return Response{}, err
+		}
+	}
 	if s.delegateResearch && !request.ChildMode {
 		childSteps := s.maxSteps
 		if childSteps > 3 {
@@ -377,6 +392,21 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		response.Answer = knowledgeBaseRefusal
 	}
 	return response, nil
+}
+
+func (s *Service) registerExternalTools(registry *agent.ToolRegistry) error {
+	if registry == nil {
+		return ErrInvalidService
+	}
+	for _, tool := range s.externalTools {
+		if tool == nil {
+			return fmt.Errorf("register external tool: %w", agent.ErrInvalidTool)
+		}
+		if err := registry.AllowAndRegister(tool); err != nil {
+			return fmt.Errorf("register external tool %q: %w", tool.Name(), err)
+		}
+	}
+	return nil
 }
 
 func resumeCheckpoints(checkpoints []agentrun.ToolCheckpoint) []agentruntime.ResumeCheckpoint {

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -86,6 +87,20 @@ func (s *searcherStub) Search(_ context.Context, knowledgeBaseID int64, query st
 
 type chatStub struct {
 	call func([]modelclient.ChatMessage, []agent.FunctionDefinition) (modelclient.ChatResponse, error)
+}
+
+type externalToolStub struct{}
+
+func (externalToolStub) Name() string { return "external_lookup" }
+
+func (externalToolStub) Description() string { return "lookup outside the knowledge base" }
+
+func (externalToolStub) Parameters() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`)
+}
+
+func (externalToolStub) Call(context.Context, json.RawMessage) (agent.ToolResult, error) {
+	return agent.ToolResult{Content: "external result"}, nil
 }
 
 func (s chatStub) ChatMessagesWithTools(_ context.Context, messages []modelclient.ChatMessage, definitions []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
@@ -222,6 +237,51 @@ func TestServiceKnowledgeBaseOnlyRefusesWithoutEvidence(t *testing.T) {
 	}
 	if response.Status != agent.RunSucceeded {
 		t.Fatalf("status = %v, want succeeded with refusal answer", response.Status)
+	}
+}
+
+func TestServiceToolPolicyScopesExternalTools(t *testing.T) {
+	chat := chatStub{call: func(_ []modelclient.ChatMessage, definitions []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		return modelclient.ChatResponse{Message: fmt.Sprintf("tools=%d", len(definitions))}, nil
+	}}
+	service, err := agentservice.NewService(chat, &searcherStub{}, 2, time.Minute)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	service.SetExternalTools(externalToolStub{})
+
+	strict, err := service.Answer(context.Background(), 7, agentservice.ChatRequest{
+		Message:         "严格问题",
+		KnowledgePolicy: agentservice.KnowledgeBaseOnly,
+	})
+	if err != nil {
+		t.Fatalf("strict Answer() error = %v", err)
+	}
+	if strict.Answer != "知识库中没有找到足够资料，暂时无法回答这个问题。" {
+		t.Fatalf("strict answer = %q, want refusal", strict.Answer)
+	}
+
+	preferred, err := service.Answer(context.Background(), 7, agentservice.ChatRequest{
+		Message:         "开放问题",
+		KnowledgePolicy: agentservice.KnowledgeBasePreferred,
+	})
+	if err != nil {
+		t.Fatalf("preferred Answer() error = %v", err)
+	}
+	if preferred.Answer != "tools=2" {
+		t.Fatalf("preferred answer = %q, want knowledge and external tools", preferred.Answer)
+	}
+
+	child, err := service.Answer(context.Background(), 7, agentservice.ChatRequest{
+		Message:         "子 Agent 问题",
+		KnowledgePolicy: agentservice.KnowledgeBasePreferred,
+		ChildMode:       true,
+	})
+	if err != nil {
+		t.Fatalf("child Answer() error = %v", err)
+	}
+	if child.Answer != "tools=1" {
+		t.Fatalf("child answer = %q, want knowledge tools only", child.Answer)
 	}
 }
 
