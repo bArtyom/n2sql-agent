@@ -15,16 +15,18 @@ const (
 )
 
 type documentPreviewChunk struct {
-	Position int    `json:"position"`
-	Content  string `json:"content"`
+	Position    int    `json:"position"`
+	Content     string `json:"content"`
+	HeadingPath string `json:"headingPath,omitempty"`
 }
 
 type documentPreviewResponse struct {
-	DocumentID       int64                  `json:"documentId"`
-	OriginalFilename string                 `json:"originalFilename,omitempty"`
-	Chunks           []documentPreviewChunk `json:"chunks"`
-	NextPosition     int                    `json:"nextPosition"`
-	Truncated        bool                   `json:"truncated"`
+	DocumentID       int64                           `json:"documentId"`
+	OriginalFilename string                          `json:"originalFilename,omitempty"`
+	Chunks           []documentPreviewChunk          `json:"chunks"`
+	NextPosition     int                             `json:"nextPosition"`
+	Truncated        bool                            `json:"truncated"`
+	Diagnostics      *documentchunk.SplitDiagnostics `json:"diagnostics,omitempty"`
 }
 
 // NewDocumentPreview exposes a bounded, read-only document window. It uses a
@@ -66,8 +68,14 @@ func NewDocumentPreview(reader documentchunk.Reader) http.Handler {
 			NextPosition:     result.NextPosition,
 			Truncated:        result.Truncated,
 		}
+		if diagnosticsReader, ok := reader.(documentchunk.DiagnosticsReader); ok {
+			diagnostics, diagnosticsErr := diagnosticsReader.ChunkingDiagnostics(r.Context(), knowledgeBaseID, documentID)
+			if diagnosticsErr == nil && diagnostics.ChunkCount > 0 {
+				response.Diagnostics = &diagnostics
+			}
+		}
 		for _, chunk := range result.Chunks {
-			response.Chunks = append(response.Chunks, documentPreviewChunk{Position: chunk.Position, Content: chunk.Content})
+			response.Chunks = append(response.Chunks, documentPreviewChunk{Position: chunk.Position, Content: chunk.Content, HeadingPath: chunk.HeadingPath})
 		}
 		writeJSON(w, response)
 	})

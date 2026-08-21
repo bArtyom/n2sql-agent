@@ -62,6 +62,10 @@ type ChunkStore interface {
 	Replace(context.Context, int64, []string, [][]float32) error
 }
 
+type ChunkingDiagnosticsStore interface {
+	SaveChunkingDiagnostics(context.Context, int64, documentchunk.SplitDiagnostics) error
+}
+
 type HierarchicalChunkStore interface {
 	ReplaceHierarchical(context.Context, int64, []documentchunk.ParentChunk, []documentchunk.ChildChunk, [][]float32) error
 }
@@ -80,7 +84,11 @@ func NewChunkingProcessor(extractor TextExtractor, splitter TextSplitter, chunks
 		if len(contents) == 0 {
 			return Permanent(errors.New("document contains no chunks"))
 		}
-		return chunks.Replace(ctx, task.DocumentID, contents, nil)
+		if err := chunks.Replace(ctx, task.DocumentID, contents, nil); err != nil {
+			return err
+		}
+		saveDiagnostics(ctx, chunks, splitter, task, text)
+		return nil
 	}
 }
 
@@ -99,7 +107,11 @@ func NewEmbeddingChunkingProcessor(extractor TextExtractor, splitter TextSplitte
 		if err != nil {
 			return fmt.Errorf("embed document chunks: %w", err)
 		}
-		return chunks.Replace(ctx, task.DocumentID, contents, embeddings)
+		if err := chunks.Replace(ctx, task.DocumentID, contents, embeddings); err != nil {
+			return err
+		}
+		saveDiagnostics(ctx, chunks, splitter, task, text)
+		return nil
 	}
 }
 
@@ -136,7 +148,26 @@ func NewEmbeddingHierarchicalChunkingProcessor(extractor TextExtractor, parentSp
 		if err != nil {
 			return fmt.Errorf("embed document child chunks: %w", err)
 		}
-		return chunks.ReplaceHierarchical(ctx, task.DocumentID, parents, children, embeddings)
+		if err := chunks.ReplaceHierarchical(ctx, task.DocumentID, parents, children, embeddings); err != nil {
+			return err
+		}
+		saveDiagnostics(ctx, chunks, parentSplitter, task, text)
+		return nil
+	}
+}
+
+func saveDiagnostics(ctx context.Context, chunks any, splitter TextSplitter, task Task, text string) {
+	store, ok := chunks.(ChunkingDiagnosticsStore)
+	if !ok {
+		return
+	}
+	structured, ok := splitter.(*documentchunk.AdaptiveSplitter)
+	if !ok {
+		return
+	}
+	_, diagnostics := structured.SplitDocumentPartsWithDiagnostics(filepath.Base(task.StoragePath), text)
+	if err := store.SaveChunkingDiagnostics(ctx, task.DocumentID, diagnostics); err != nil {
+		slog.WarnContext(ctx, "save document chunking diagnostics failed", "document_id", task.DocumentID, "error", err)
 	}
 }
 

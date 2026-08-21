@@ -14,9 +14,20 @@ type DocumentItem = {
 type DocumentPreview = {
   documentId: number;
   originalFilename?: string;
-  chunks: { position: number; content: string }[];
+  chunks: { position: number; content: string; headingPath?: string }[];
   nextPosition: number;
   truncated: boolean;
+  diagnostics?: {
+    strategy: string;
+    chunkCount: number;
+    headingCount: number;
+    protectedBlockCount: number;
+    totalRunes: number;
+    minChunkRunes: number;
+    maxChunkRunes: number;
+    shortChunkCount: number;
+    oversizeChunkCount: number;
+  };
 };
 type QuestionSuggestion = { id: string; text: string; category?: string };
 type Source = {
@@ -2956,8 +2967,15 @@ onUnmounted(() => {
         <div class="document-preview-content">
           <p v-if="documentPreviewLoading">正在读取文档正文…</p>
           <template v-else-if="documentPreview">
+            <div v-if="documentPreview.diagnostics" class="document-preview-diagnostics">
+              <strong>切分诊断</strong>
+              <span>策略：{{ documentPreview.diagnostics.strategy }}</span>
+              <span>{{ documentPreview.diagnostics.chunkCount }} 个 Chunk</span>
+              <span>结构 {{ documentPreview.diagnostics.headingCount }} · 保护块 {{ documentPreview.diagnostics.protectedBlockCount }}</span>
+              <span>短块 {{ documentPreview.diagnostics.shortChunkCount }} · 超长块 {{ documentPreview.diagnostics.oversizeChunkCount }}</span>
+            </div>
             <article v-for="chunk in documentPreview.chunks" :key="chunk.position" class="document-preview-chunk">
-              <span>第 {{ chunk.position + 1 }} 段</span>
+              <span>第 {{ chunk.position + 1 }} 段 <em v-if="chunk.headingPath">· {{ chunk.headingPath }}</em></span>
               <p>{{ chunk.content }}</p>
             </article>
             <div v-if="documentPreview.truncated" class="document-preview-actions">

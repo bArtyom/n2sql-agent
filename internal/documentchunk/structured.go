@@ -3,6 +3,7 @@ package documentchunk
 import (
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // SplitStrategy describes the structure detector selected for a document.
@@ -15,6 +16,21 @@ const (
 	StrategyHeuristic SplitStrategy = "heuristic"
 	StrategyRecursive SplitStrategy = "recursive"
 )
+
+// SplitDiagnostics is the small, persisted report used by document preview.
+// It describes the selected structure strategy and the quality of the final
+// chunks without retaining the source document a second time.
+type SplitDiagnostics struct {
+	Strategy            SplitStrategy `json:"strategy"`
+	ChunkCount          int           `json:"chunkCount"`
+	HeadingCount        int           `json:"headingCount"`
+	ProtectedBlockCount int           `json:"protectedBlockCount"`
+	TotalRunes          int           `json:"totalRunes"`
+	MinChunkRunes       int           `json:"minChunkRunes"`
+	MaxChunkRunes       int           `json:"maxChunkRunes"`
+	ShortChunkCount     int           `json:"shortChunkCount"`
+	OversizeChunkCount  int           `json:"oversizeChunkCount"`
+}
 
 type AdaptiveSplitter struct {
 	recursive *Splitter
@@ -41,8 +57,14 @@ func (s *AdaptiveSplitter) Split(text string) []string {
 }
 
 func (s *AdaptiveSplitter) SplitDocumentParts(filename, text string) []StructuredPart {
+	parts, _ := s.SplitDocumentPartsWithDiagnostics(filename, text)
+	return parts
+}
+
+func (s *AdaptiveSplitter) SplitDocumentPartsWithDiagnostics(filename, text string) ([]StructuredPart, SplitDiagnostics) {
+	diagnostics := SplitDiagnostics{}
 	if s == nil || s.recursive == nil || strings.TrimSpace(text) == "" {
-		return nil
+		return nil, diagnostics
 	}
 	filename = strings.TrimSpace(filename)
 	if filename == "" {
@@ -51,14 +73,55 @@ func (s *AdaptiveSplitter) SplitDocumentParts(filename, text string) []Structure
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\f", "\n"+pageBreakMarker+"\n")
 	lines := strings.Split(text, "\n")
+	diagnostics.TotalRunes = utf8.RuneCountInString(text)
+	diagnostics.ProtectedBlockCount = len(findProtectedBlocks(text))
 	if sections, ok := parseMarkdownSections(lines); ok {
-		return s.renderSections(sections)
+		diagnostics.Strategy = StrategyHeading
+		diagnostics.HeadingCount = len(sections)
+		parts := s.renderSections(sections)
+		return parts, finalizeDiagnostics(diagnostics, parts, s.recursive.size)
 	}
 	if sections, ok := parseHeuristicSections(lines); ok {
-		return s.renderSections(sections)
+		diagnostics.Strategy = StrategyHeuristic
+		diagnostics.HeadingCount = len(sections)
+		parts := s.renderSections(sections)
+		return parts, finalizeDiagnostics(diagnostics, parts, s.recursive.size)
 	}
-	parts := s.recursive.Split(text)
-	return addVirtualPaths(filename, parts)
+	diagnostics.Strategy = StrategyRecursive
+	contentParts := s.splitContent(text)
+	parts := addVirtualPaths(filename, contentParts)
+	return parts, finalizeDiagnostics(diagnostics, parts, s.recursive.size)
+}
+
+func finalizeDiagnostics(diagnostics SplitDiagnostics, parts []StructuredPart, target int) SplitDiagnostics {
+	diagnostics.ChunkCount = len(parts)
+	if len(parts) == 0 {
+		return diagnostics
+	}
+	diagnostics.MinChunkRunes = -1
+	for _, part := range parts {
+		length := utf8.RuneCountInString(part.Content)
+		if length < diagnostics.MinChunkRunes || diagnostics.MinChunkRunes < 0 {
+			diagnostics.MinChunkRunes = length
+		}
+		if length > diagnostics.MaxChunkRunes {
+			diagnostics.MaxChunkRunes = length
+		}
+		if length < maxInt(32, target/10) {
+			diagnostics.ShortChunkCount++
+		}
+		if length > target {
+			diagnostics.OversizeChunkCount++
+		}
+	}
+	return diagnostics
+}
+
+func maxInt(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
 }
 
 type structuredSection struct {
@@ -195,7 +258,7 @@ func (s *AdaptiveSplitter) renderSections(sections []structuredSection) []Struct
 			continue
 		}
 		path := strings.Join(section.path, " > ")
-		parts := s.recursive.Split(section.content)
+		parts := s.splitContent(section.content)
 		if len(parts) == 0 {
 			continue
 		}
@@ -204,6 +267,125 @@ func (s *AdaptiveSplitter) renderSections(sections []structuredSection) []Struct
 		}
 	}
 	return result
+}
+
+type protectedBlock struct {
+	start int
+	end   int
+}
+
+// splitContent keeps fenced code, LaTeX blocks and Markdown tables together.
+// A block larger than the configured budget is the only case where the
+// recursive splitter is allowed to enter it.
+func (s *AdaptiveSplitter) splitContent(text string) []string {
+	blocks := findProtectedBlocks(text)
+	if len(blocks) == 0 {
+		return s.recursive.Split(text)
+	}
+	result := make([]string, 0)
+	cursor := 0
+	for _, block := range blocks {
+		if block.start > cursor {
+			result = append(result, s.recursive.Split(text[cursor:block.start])...)
+		}
+		content := strings.TrimSpace(text[block.start:block.end])
+		if content != "" {
+			if utf8.RuneCountInString(content) <= s.recursive.size {
+				result = append(result, content)
+			} else {
+				result = append(result, s.recursive.Split(content)...)
+			}
+		}
+		cursor = block.end
+	}
+	if cursor < len(text) {
+		result = append(result, s.recursive.Split(text[cursor:])...)
+	}
+	return result
+}
+
+func findProtectedBlocks(text string) []protectedBlock {
+	lines := strings.SplitAfter(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	blocks := make([]protectedBlock, 0)
+	offset := 0
+	inFence := false
+	inLatex := false
+	latexStart := 0
+	for index := 0; index < len(lines); index++ {
+		line := strings.TrimRight(lines[index], "\r\n")
+		trimmed := strings.TrimSpace(line)
+		start := offset
+		offset += len(lines[index])
+		if strings.HasPrefix(trimmed, "```") {
+			if !inFence {
+				inFence = true
+				blockStart := start
+				closed := false
+				for index++; index < len(lines); index++ {
+					closing := strings.TrimSpace(strings.TrimRight(lines[index], "\r\n"))
+					offset += len(lines[index])
+					if strings.HasPrefix(closing, "```") {
+						blocks = append(blocks, protectedBlock{start: blockStart, end: offset})
+						inFence = false
+						closed = true
+						break
+					}
+				}
+				if !closed && offset > blockStart {
+					blocks = append(blocks, protectedBlock{start: blockStart, end: offset})
+				}
+			}
+			continue
+		}
+		if trimmed == "$$" || strings.HasPrefix(trimmed, "\\[") {
+			if !inLatex {
+				latexStart = start
+				inLatex = true
+			} else if trimmed == "$$" {
+				blocks = append(blocks, protectedBlock{start: latexStart, end: offset})
+				inLatex = false
+			}
+			continue
+		}
+		if inLatex && trimmed == "\\]" {
+			blocks = append(blocks, protectedBlock{start: latexStart, end: offset})
+			inLatex = false
+			continue
+		}
+		if inLatex {
+			continue
+		}
+		if isTableHeader(lines, index) {
+			blockStart := start
+			blockEnd := offset
+			for index+1 < len(lines) {
+				next := strings.TrimSpace(strings.TrimRight(lines[index+1], "\r\n"))
+				if !strings.Contains(next, "|") {
+					break
+				}
+				index++
+				blockEnd += len(lines[index])
+			}
+			blocks = append(blocks, protectedBlock{start: blockStart, end: blockEnd})
+			offset = blockEnd
+		}
+	}
+	if inLatex && offset > latexStart {
+		blocks = append(blocks, protectedBlock{start: latexStart, end: offset})
+	}
+	return blocks
+}
+
+func isTableHeader(lines []string, index int) bool {
+	if index+1 >= len(lines) || !strings.Contains(lines[index], "|") {
+		return false
+	}
+	separator := strings.TrimSpace(strings.TrimRight(lines[index+1], "\r\n"))
+	if !strings.Contains(separator, "|") {
+		return false
+	}
+	separator = strings.NewReplacer("|", "", ":", "", "-", "", " ", "", "\t", "").Replace(separator)
+	return separator == ""
 }
 
 func addVirtualPaths(filename string, parts []string) []StructuredPart {

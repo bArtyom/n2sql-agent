@@ -164,6 +164,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus
 .document-preview-content { flex: 1; overflow: auto; padding: 16px; color: #455b50; background: #f6f7f0; border-left: 3px solid #8bad91; font-size: 12px; line-height: 1.8; }
 .document-preview-chunk { padding: 0 0 16px; margin-bottom: 16px; border-bottom: 1px solid #e1e8df; }
 .document-preview-chunk > span { color: #aa7b4d; font-size: 9px; letter-spacing: .08em; }
+.document-preview-chunk > span em { color: #81958a; font-style: normal; letter-spacing: 0; }
+.document-preview-diagnostics { display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 10px 12px; margin-bottom: 16px; color: #718179; background: #f1f6ee; border: 1px solid #dce8da; font-size: 10px; line-height: 1.6; }
+.document-preview-diagnostics strong { width: 100%; color: #466254; font-size: 11px; }
 .document-preview-chunk p { margin: 6px 0 0; white-space: pre-wrap; }
 .document-preview-note { margin: 0; color: #8a9890; font-size: 10px; line-height: 1.7; }
 .document-preview-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 2px; }

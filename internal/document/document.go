@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -28,12 +30,13 @@ var (
 )
 
 type Document struct {
-	ID               int64  `json:"id"`
-	KnowledgeBaseID  int64  `json:"knowledgeBaseId"`
-	OriginalFilename string `json:"originalFilename"`
-	ContentType      string `json:"contentType"`
-	SizeBytes        int64  `json:"sizeBytes"`
-	ProcessingStatus string `json:"processingStatus"`
+	ID                  int64                          `json:"id"`
+	KnowledgeBaseID     int64                          `json:"knowledgeBaseId"`
+	OriginalFilename    string                         `json:"originalFilename"`
+	ContentType         string                         `json:"contentType"`
+	SizeBytes           int64                          `json:"sizeBytes"`
+	ProcessingStatus    string                         `json:"processingStatus"`
+	ChunkingDiagnostics documentchunk.SplitDiagnostics `json:"chunkingDiagnostics"`
 }
 
 // Summary is the cached, document-level summary generated on demand.
@@ -252,6 +255,7 @@ func (s *PostgresStore) EnsureKnowledgeBase(ctx context.Context, id int64) error
 func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Document, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT d.id, d.knowledge_base_id, d.original_filename, d.content_type, d.size_bytes,
+		       d.chunking_diagnostics,
 		       COALESCE(task.status, 'pending') AS processing_status
 		FROM documents AS d
 		LEFT JOIN LATERAL (
@@ -275,15 +279,22 @@ func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Docu
 	documents := make([]Document, 0)
 	for rows.Next() {
 		var document Document
+		var diagnostics []byte
 		if err := rows.Scan(
 			&document.ID,
 			&document.KnowledgeBaseID,
 			&document.OriginalFilename,
 			&document.ContentType,
 			&document.SizeBytes,
+			&diagnostics,
 			&document.ProcessingStatus,
 		); err != nil {
 			return nil, fmt.Errorf("scan document: %w", err)
+		}
+		if len(diagnostics) > 0 {
+			if err := json.Unmarshal(diagnostics, &document.ChunkingDiagnostics); err != nil {
+				return nil, fmt.Errorf("decode chunking diagnostics: %w", err)
+			}
 		}
 		documents = append(documents, document)
 	}

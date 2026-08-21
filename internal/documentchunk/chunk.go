@@ -3,6 +3,7 @@ package documentchunk
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -122,6 +123,10 @@ type RangeReader interface {
 	ReadRange(context.Context, int64, int64, int, int, int) (RangeResult, error)
 }
 
+type DiagnosticsReader interface {
+	ChunkingDiagnostics(context.Context, int64, int64) (SplitDiagnostics, error)
+}
+
 type RangeResult struct {
 	Chunks       []SearchResult `json:"chunks"`
 	NextPosition int            `json:"nextPosition"`
@@ -176,6 +181,44 @@ type ContextChunk struct {
 type PostgresStore struct{ db *sql.DB }
 
 func NewPostgresStore(db *sql.DB) *PostgresStore { return &PostgresStore{db: db} }
+
+func (s *PostgresStore) SaveChunkingDiagnostics(ctx context.Context, documentID int64, diagnostics SplitDiagnostics) error {
+	payload, err := json.Marshal(diagnostics)
+	if err != nil {
+		return fmt.Errorf("encode chunking diagnostics: %w", err)
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE documents SET chunking_diagnostics = $2::jsonb WHERE id = $1`, documentID, payload)
+	if err != nil {
+		return fmt.Errorf("save chunking diagnostics: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return ErrChunkNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) ChunkingDiagnostics(ctx context.Context, knowledgeBaseID, documentID int64) (SplitDiagnostics, error) {
+	var payload []byte
+	err := s.db.QueryRowContext(ctx, `
+		SELECT d.chunking_diagnostics
+		FROM documents AS d
+		JOIN knowledge_bases AS kb ON kb.id = d.knowledge_base_id
+		WHERE d.id = $1 AND d.knowledge_base_id = $2
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, documentID, knowledgeBaseID).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SplitDiagnostics{}, ErrChunkNotFound
+	}
+	if err != nil {
+		return SplitDiagnostics{}, fmt.Errorf("read chunking diagnostics: %w", err)
+	}
+	var diagnostics SplitDiagnostics
+	if len(payload) > 0 {
+		if err := json.Unmarshal(payload, &diagnostics); err != nil {
+			return SplitDiagnostics{}, fmt.Errorf("decode chunking diagnostics: %w", err)
+		}
+	}
+	return diagnostics, nil
+}
 
 // Read loads one chunk for a citation detail view. The knowledge-base and
 // current-administrator predicates are part of the SQL query so a caller

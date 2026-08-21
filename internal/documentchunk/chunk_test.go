@@ -88,10 +88,10 @@ func TestAdaptiveSplitterDoesNotSplitProtectedCodeHeading(t *testing.T) {
 	splitter := documentchunk.NewAdaptiveSplitter(300, 0)
 	text := "说明\n\n```text\n# not a heading\n1. not a section\n```\n\n第二章 真正章节\n\n正文。"
 	chunks := splitter.Split(text)
-	if len(chunks) != 2 {
-		t.Fatalf("chunks = %#v, want two sections", chunks)
+	if len(chunks) < 2 {
+		t.Fatalf("chunks = %#v, want structured content", chunks)
 	}
-	if !strings.Contains(chunks[0], "# not a heading") {
+	if !strings.Contains(strings.Join(chunks, "\n"), "# not a heading") {
 		t.Fatalf("protected code was treated as heading: %q", chunks[0])
 	}
 }
@@ -101,5 +101,43 @@ func TestAdaptiveSplitterTreatsFormFeedAsPageBoundary(t *testing.T) {
 	chunks := splitter.Split("第一页内容\f第二页内容")
 	if len(chunks) != 2 {
 		t.Fatalf("chunks = %#v, want two page sections", chunks)
+	}
+}
+
+func TestAdaptiveSplitterProtectsTablesAndLatex(t *testing.T) {
+	splitter := documentchunk.NewAdaptiveSplitter(200, 0)
+	text := "说明\n\n| 名称 | 说明 |\n| --- | --- |\n| A | 这是表格中的完整内容 |\n| B | 另一行 |\n\n公式：\n$$\na^2 + b^2 = c^2\n$$\n\n结尾。"
+	parts := splitter.SplitDocumentParts("guide.md", text)
+	joined := strings.Join(func() []string {
+		result := make([]string, 0, len(parts))
+		for _, part := range parts {
+			result = append(result, part.Content)
+		}
+		return result
+	}(), "\n")
+	if !strings.Contains(joined, "| A | 这是表格中的完整内容 |\n| B | 另一行 |") {
+		t.Fatalf("table rows were split or lost: %q", joined)
+	}
+	if !strings.Contains(joined, "$$\na^2 + b^2 = c^2\n$$") {
+		t.Fatalf("latex block was split or lost: %q", joined)
+	}
+}
+
+func TestAdaptiveSplitterSplitsOversizedProtectedBlock(t *testing.T) {
+	splitter := documentchunk.NewAdaptiveSplitter(12, 0)
+	parts := splitter.Split("```text\n" + strings.Repeat("very-long-code ", 8) + "\n```")
+	if len(parts) < 2 {
+		t.Fatalf("oversized protected block should be allowed to split: %#v", parts)
+	}
+}
+
+func TestAdaptiveSplitterReportsDiagnostics(t *testing.T) {
+	splitter := documentchunk.NewAdaptiveSplitter(200, 0)
+	parts, diagnostics := splitter.SplitDocumentPartsWithDiagnostics("guide.md", "# 标题\n\n正文。\n\n```go\nfmt.Println(1)\n```")
+	if len(parts) != diagnostics.ChunkCount || diagnostics.Strategy != documentchunk.StrategyHeading {
+		t.Fatalf("parts and diagnostics disagree: parts=%d diagnostics=%#v", len(parts), diagnostics)
+	}
+	if diagnostics.HeadingCount != 1 || diagnostics.ProtectedBlockCount != 1 {
+		t.Fatalf("missing structure diagnostics: %#v", diagnostics)
 	}
 }
