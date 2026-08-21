@@ -37,6 +37,7 @@ func NewKnowledgeBaseSearch(searcher retrieval.Searcher) http.Handler {
 			DocumentIDs      []int64 `json:"document_ids,omitempty"`
 			QueryRewrite     bool    `json:"query_rewrite,omitempty"`
 			KeywordThreshold float64 `json:"keyword_threshold,omitempty"`
+			Debug            bool    `json:"debug,omitempty"`
 		}
 		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSearchBody))
 		decoder.DisallowUnknownFields()
@@ -92,10 +93,15 @@ func NewKnowledgeBaseSearch(searcher retrieval.Searcher) http.Handler {
 		if stats.HasData() {
 			statsPointer = &stats
 		}
-		writeJSON(w, struct {
+		response := struct {
 			Results   []retrieval.Result          `json:"results"`
 			Retrieval *usage.RetrievalObservation `json:"retrieval,omitempty"`
-		}{Results: results, Retrieval: statsPointer})
+			Explain   []retrieval.Explanation     `json:"explain,omitempty"`
+		}{Results: results, Retrieval: statsPointer}
+		if request.Debug {
+			response.Explain = retrieval.ExplainResults(results)
+		}
+		writeJSON(w, response)
 	})
 }
 

@@ -44,6 +44,42 @@ func TestKnowledgeBaseSearchReturnsSimilarChunks(t *testing.T) {
 	}
 }
 
+func TestKnowledgeBaseSearchReturnsExplainableEvidenceWhenDebugEnabled(t *testing.T) {
+	searcher := &explainableSearcherStub{}
+	endpoint := handler.NewKnowledgeBaseSearch(searcher)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/search", strings.NewReader(`{"query":"后端怎么运行","debug":true}`))
+	request.SetPathValue("id", "7")
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
+	}
+	body := response.Body.String()
+	for _, want := range []string{`"explain"`, `"reason":"向量+关键词+标题命中"`, `"fusionScore":0.8`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("response body = %q, missing %s", body, want)
+		}
+	}
+}
+
+type explainableSearcherStub struct{}
+
+func (explainableSearcherStub) Search(_ context.Context, _ int64, _ string, _ int) ([]retrieval.Result, error) {
+	return []retrieval.Result{{
+		DocumentID:        11,
+		Position:          2,
+		Content:           "Go 后端",
+		Distance:          0.12,
+		MatchType:         "hybrid",
+		KeywordScore:      0.7,
+		KeywordScoreKnown: true,
+		HeadingScore:      0.4,
+		FusionScore:       0.8,
+	}}, nil
+}
+
 func TestKnowledgeBaseSearchRejectsInvalidRequest(t *testing.T) {
 	cases := []struct {
 		name string
