@@ -249,6 +249,7 @@ func TestServiceToolPolicyScopesExternalTools(t *testing.T) {
 		t.Fatalf("NewService() error = %v", err)
 	}
 	service.SetExternalTools(externalToolStub{})
+	service.SetDelegateResearchEnabled(true)
 
 	strict, err := service.Answer(context.Background(), 7, agentservice.ChatRequest{
 		Message:         "严格问题",
@@ -268,8 +269,8 @@ func TestServiceToolPolicyScopesExternalTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("preferred Answer() error = %v", err)
 	}
-	if preferred.Answer != "tools=2" {
-		t.Fatalf("preferred answer = %q, want knowledge and external tools", preferred.Answer)
+	if preferred.Answer != "tools=3" {
+		t.Fatalf("preferred answer = %q, want knowledge, external, and delegate tools", preferred.Answer)
 	}
 
 	child, err := service.Answer(context.Background(), 7, agentservice.ChatRequest{
@@ -280,8 +281,8 @@ func TestServiceToolPolicyScopesExternalTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("child Answer() error = %v", err)
 	}
-	if child.Answer != "tools=1" {
-		t.Fatalf("child answer = %q, want knowledge tools only", child.Answer)
+	if child.Answer != "tools=2" {
+		t.Fatalf("child answer = %q, want inherited business tools without delegate", child.Answer)
 	}
 }
 

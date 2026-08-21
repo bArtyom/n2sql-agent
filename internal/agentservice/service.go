@@ -102,8 +102,9 @@ func (s *Service) SetDelegateResearchEnabled(enabled bool) {
 }
 
 // SetExternalTools configures optional non-knowledge capabilities. They are
-// exposed only in knowledge_base_preferred mode; strict knowledge-base runs
-// never register them, so the model cannot call them.
+// exposed in knowledge_base_preferred mode to both parent and child Agents;
+// child Agents still never receive the delegate_research tool, which prevents
+// recursive child creation.
 func (s *Service) SetExternalTools(tools ...agent.Tool) {
 	if s != nil {
 		s.externalTools = append([]agent.Tool(nil), tools...)
@@ -318,7 +319,7 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 			return Response{}, fmt.Errorf("create child knowledge search registry: %w", err)
 		}
 	}
-	if request.KnowledgePolicy == KnowledgeBasePreferred && !request.ChildMode {
+	if request.KnowledgePolicy == KnowledgeBasePreferred {
 		if err := s.registerExternalTools(registry); err != nil {
 			return Response{}, err
 		}
