@@ -373,7 +373,7 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	if err != nil {
 		return response, fmt.Errorf("run agent answer: %w", err)
 	}
-	if request.KnowledgePolicy == KnowledgeBaseOnly && len(response.Sources) == 0 {
+	if request.KnowledgePolicy == KnowledgeBaseOnly && !collector.HasEvidence() {
 		response.Answer = knowledgeBaseRefusal
 	}
 	return response, nil

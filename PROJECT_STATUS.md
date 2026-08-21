@@ -40,6 +40,7 @@
 - Agent Worker 已增加最大接管次数：租约过期的 Run 最多尝试 3 次；超过次数后进入 `failed` 并记录 `worker lease expired: maximum attempts reached`，避免故障任务无限循环。
 - Agent Run 已采用 DeerFlow 风格的失败状态：`agent_runs.status` 区分 `succeeded`、`failed`、`timeout`、`canceled`，`stop_reason` 保存有限的停止原因，`error_message` 保存可读错误；运行时仍可在内存中使用细粒度 `FailureCategory`，但不对外持久化。
 - Agent + RAG 支持 `knowledge_policy`：默认 `knowledge_base_preferred` 保持开放 Agent 行为；`knowledge_base_only` 只允许知识库证据，无引用时由后端统一拒答，适合测评知识库拒答率。
+- Agent 主线能力已收口：只读工具失败会把结构化错误反馈给模型进行纠错，副作用工具失败不自动重试；Worker 通过租约过期回收恢复崩溃任务；子 Agent 由共享调度器异步执行，所有子任务进入终态后唤醒父 Agent。
 - Agent checkpoint 第一版断点续跑已接入：checkpoint 额外保存有界的原始工具参数；Worker 接管后将最近的安全只读工具调用重建为 `assistant tool_call + tool result` 上下文，直接进入下一次模型决策，减少重复的工具选择；旧格式 checkpoint 已通过迁移清理，不再兼容。
 - Agent checkpoint 恢复轨迹已补齐：接管时发出带 `checkpoint_action=resumed_context` 的 `tool_finished` 事件，并将已恢复的工具参数加入本轮重复调用保护，前端和运行日志可以区分“重新执行”与“从 checkpoint 恢复”。
 - Agent checkpoint 已保存模型决策批次 ID；同一轮并行只读工具恢复时，会重建为一条带多个 `tool_call` 的 assistant 消息及对应 tool 消息，避免恢复后的上下文协议失真。

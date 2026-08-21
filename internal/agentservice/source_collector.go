@@ -16,8 +16,9 @@ const maxResponseSources = 20
 // service boundary means the Agent engine does not need to know about HTTP or
 // conversation persistence.
 type sourceCollector struct {
-	sources []retrieval.Result
-	seen    map[string]struct{}
+	sources  []retrieval.Result
+	seen     map[string]struct{}
+	grounded bool
 }
 
 func newSourceCollector() *sourceCollector {
@@ -35,14 +36,24 @@ func (c *sourceCollector) Sink(next agentruntime.EventSink) agentruntime.EventSi
 }
 
 func (c *sourceCollector) observe(event agent.Event) {
-	if c == nil || event.Type != agent.EventToolFinished || len(c.sources) >= maxResponseSources {
+	if c == nil || event.Type != agent.EventToolFinished {
 		return
 	}
 	data, ok := event.Data.(map[string]any)
 	if !ok {
 		return
 	}
+	if failed, _ := data["failed"].(bool); failed {
+		return
+	}
+	toolName, _ := data["tool_name"].(string)
+	if isKnowledgeTool(toolName) && data["no_relevant_results"] != true {
+		c.grounded = true
+	}
 	sources := decodeSources(data["sources"])
+	if len(sources) == 0 || len(c.sources) >= maxResponseSources {
+		return
+	}
 	for _, source := range sources {
 		if len(c.sources) >= maxResponseSources {
 			return
@@ -53,6 +64,15 @@ func (c *sourceCollector) observe(event agent.Event) {
 		}
 		c.seen[key] = struct{}{}
 		c.sources = append(c.sources, source)
+	}
+}
+
+func isKnowledgeTool(name string) bool {
+	switch name {
+	case "knowledge_search", "document_list", "document_info", "document_read", "document_summary":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -85,4 +105,8 @@ func (c *sourceCollector) Sources() []retrieval.Result {
 	result := make([]retrieval.Result, len(c.sources))
 	copy(result, c.sources)
 	return result
+}
+
+func (c *sourceCollector) HasEvidence() bool {
+	return c != nil && c.grounded
 }
