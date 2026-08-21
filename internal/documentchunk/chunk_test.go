@@ -25,3 +25,39 @@ func TestSplitterPrefersParagraphBoundaries(t *testing.T) {
 		t.Fatalf("chunks = %#v", chunks)
 	}
 }
+
+func TestAdaptiveSplitterKeepsMarkdownHeadingPath(t *testing.T) {
+	splitter := documentchunk.NewAdaptiveSplitter(200, 0)
+	chunks := splitter.SplitDocument("guide.md", "# 部署指南\n\n介绍。\n\n## Docker\n\n启动命令。\n\n### Windows\n\n使用 PowerShell。")
+	if len(chunks) != 3 {
+		t.Fatalf("got %d chunks = %#v, want one chunk per section", len(chunks), chunks)
+	}
+	if !strings.Contains(chunks[1], "结构路径：部署指南 > Docker") {
+		t.Fatalf("nested heading path missing: %q", chunks[1])
+	}
+	if !strings.Contains(chunks[2], "结构路径：部署指南 > Docker > Windows") {
+		t.Fatalf("deep heading path missing: %q", chunks[2])
+	}
+}
+
+func TestAdaptiveSplitterUsesVirtualTitlesWithoutHeadings(t *testing.T) {
+	splitter := documentchunk.NewAdaptiveSplitter(10, 0)
+	chunks := splitter.SplitDocument("notes.md", "第一段内容。\n\n第二段内容。\n\n第三段内容。")
+	if len(chunks) < 2 {
+		t.Fatalf("chunks = %#v, want multiple virtual sections", chunks)
+	}
+	if !strings.Contains(chunks[0], "结构路径：notes.md > 第 1 段") {
+		t.Fatalf("virtual title missing: %q", chunks[0])
+	}
+}
+
+func TestAdaptiveSplitterDetectsHeuristicSections(t *testing.T) {
+	splitter := documentchunk.NewAdaptiveSplitter(200, 0)
+	chunks := splitter.SplitDocument("policy.txt", "第一章 总则\n\n适用范围。\n\n第二章 请假\n\n请假规则。")
+	if len(chunks) != 2 {
+		t.Fatalf("chunks = %#v, want heuristic sections", chunks)
+	}
+	if !strings.Contains(chunks[1], "结构路径：第二章 请假") {
+		t.Fatalf("heuristic path missing: %q", chunks[1])
+	}
+}

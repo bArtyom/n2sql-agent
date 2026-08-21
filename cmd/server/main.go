@@ -69,8 +69,8 @@ func main() {
 		extractor = documentextractor.NewWithOCR(cfg.UploadDir, scannedPDF)
 		log.Printf("scanned PDF OCR enabled: model=%s renderer=%s max_pages=%d concurrency=%d", cfg.OCRModel, cfg.OCRRendererBinary, cfg.OCRMaxPages, cfg.OCRConcurrency)
 	}
-	parentSplitter := documentchunk.NewSplitter(3000, 300)
-	childSplitter := documentchunk.NewSplitter(1000, 150)
+	parentSplitter := documentchunk.NewAdaptiveSplitter(3000, 300)
+	childSplitter := documentchunk.NewAdaptiveSplitter(1000, 150)
 	processor := worker.NewEmbeddingHierarchicalChunkingProcessor(extractor, parentSplitter, childSplitter, chunkStore, embeddingService)
 	metricsRegistry := metrics.New()
 	agentStreamHub := agentstream.NewHub()
@@ -159,37 +159,37 @@ func main() {
 	server := &http.Server{
 		Addr: cfg.Address,
 		Handler: app.New(app.Dependencies{
-			Providers:                  providerStore,
-			KnowledgeBases:             knowledgeBaseService,
-			Documents:                  documentService,
-			ChunkReader:                chunkStore,
-			ConnectionChecker:          modelClient,
-			Embeddings:                 embeddingService,
-			Chat:                       chatService,
-			Search:                     searchService,
-			Answers:                    answerService,
-			StreamingAnswers:           answerService,
-			AgentAnswers:               agentAnswerService,
-			AgentStreamingAnswers:      agentAnswerService,
-			AgentStreamHub:             agentStreamHub,
-			AgentRuns:                  agentRunStore,
-			AgentRunReader:             agentRunStore,
-			AgentEventStore:            agentEventStore,
-			AgentRunExecutor:           agentRunExecutor,
-			MCPKnowledgeSearch:         searchService,
-			MCPDocuments:               documentService,
-			MCPKnowledgeBases:          knowledgeBaseService,
-			Conversations:              conversationService,
-			Memories:                   memoryStore,
-			MemoryProfile:              memoryStore,
-			Auth:                       authStore,
-			SecureCookies:              cfg.SecureCookies,
-			AgentMaxToolResultBytes:    cfg.AgentMaxToolResultBytes,
-			AgentMaxHistoryBytes:       cfg.AgentMaxHistoryBytes,
-			FollowUpSuggestions:        followUpService,
-			DocumentSummary:            documentSummaryService,
-			APIKeyEnvVar:               cfg.ModelProviderAPIKeyEnvVar,
-			Metrics:                    metricsRegistry,
+			Providers:               providerStore,
+			KnowledgeBases:          knowledgeBaseService,
+			Documents:               documentService,
+			ChunkReader:             chunkStore,
+			ConnectionChecker:       modelClient,
+			Embeddings:              embeddingService,
+			Chat:                    chatService,
+			Search:                  searchService,
+			Answers:                 answerService,
+			StreamingAnswers:        answerService,
+			AgentAnswers:            agentAnswerService,
+			AgentStreamingAnswers:   agentAnswerService,
+			AgentStreamHub:          agentStreamHub,
+			AgentRuns:               agentRunStore,
+			AgentRunReader:          agentRunStore,
+			AgentEventStore:         agentEventStore,
+			AgentRunExecutor:        agentRunExecutor,
+			MCPKnowledgeSearch:      searchService,
+			MCPDocuments:            documentService,
+			MCPKnowledgeBases:       knowledgeBaseService,
+			Conversations:           conversationService,
+			Memories:                memoryStore,
+			MemoryProfile:           memoryStore,
+			Auth:                    authStore,
+			SecureCookies:           cfg.SecureCookies,
+			AgentMaxToolResultBytes: cfg.AgentMaxToolResultBytes,
+			AgentMaxHistoryBytes:    cfg.AgentMaxHistoryBytes,
+			FollowUpSuggestions:     followUpService,
+			DocumentSummary:         documentSummaryService,
+			APIKeyEnvVar:            cfg.ModelProviderAPIKeyEnvVar,
+			Metrics:                 metricsRegistry,
 		}),
 	}
 	runContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

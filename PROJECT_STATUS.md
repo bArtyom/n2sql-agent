@@ -55,6 +55,7 @@
 - Agent Runtime 增加重复工具调用保护：按工具名和规范化后的 JSON 参数去重，同一轮重复调用会安全结束，避免重复检索和步数浪费。
 - Agent Runtime 增加运行内上下文预算：单轮模型上下文超过 64KB 时保留系统提示、当前问题和最近工具结果，省略较早内容，避免多步检索结果累积撑爆上下文。
 - 检索已具备向量 + PostgreSQL 关键词、RRF 融合、关键词阈值、可选 Rerank、Query Rewrite、缓存、父块上下文去重、HNSW 和检索统计；`retrieval-eval` 还支持人工标注目标文档并输出文档命中率、首次命中排名和 MRR，开始建立可解释的召回质量基线。
+- 知识库文档切分开始对齐 WeKnora 自适应策略：Markdown 标题优先保存结构路径，普通文本识别章节/编号等启发式标题，无结构文档回退原递归切分；结构路径以块前缀进入现有父子 chunk 和检索链路，暂不新增数据库字段。
 - 固定“协作研究”Multi-Agent 模式和 A2A 异步任务模式已全部删除；前端现在只有标准 Agent 对话，后端只保留标准 Agent 的持久化 Worker/SSE。普通 Agent 通过只读 `delegate_research` 工具按需委派子 Agent；子 Agent 只暴露 `knowledge_search`，不会递归委派或执行副作用工具。
 - 旧 `internal/multiagent`、`internal/a2a`、相关路由、任务存储、后台循环、指标和配置已清理；新增迁移会删除已有数据库中的 `a2a_tasks` 表。
 - 动态子 Agent 第一阶段已完成：`agent_runs` 增加 `parent_run_id` 与 `run_kind`；标准 Worker 会把父 Run 数据库 ID传入 Agent 请求，`delegate_research` 可同步创建并持久化 child Run，保存子 Agent 结果并更新 succeeded/failed/canceled 状态。父工具完成事件会透传有界的 child Run 标识、状态、步数和事件摘要；子 Run 当前仍在父 Run 的工具调用内执行，独立事件流和独立 Worker 调度后置。

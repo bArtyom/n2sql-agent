@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"path/filepath"
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
@@ -53,6 +54,10 @@ type TextExtractor interface {
 }
 
 type TextSplitter interface{ Split(string) []string }
+type DocumentTextSplitter interface {
+	TextSplitter
+	SplitDocument(string, string) []string
+}
 type ChunkStore interface {
 	Replace(context.Context, int64, []string, [][]float32) error
 }
@@ -70,7 +75,7 @@ func NewChunkingProcessor(extractor TextExtractor, splitter TextSplitter, chunks
 		if err != nil {
 			return err
 		}
-		parts := splitter.Split(text)
+		parts := splitDocument(splitter, task, text)
 		if len(parts) == 0 {
 			return Permanent(errors.New("document contains no chunks"))
 		}
@@ -84,7 +89,7 @@ func NewEmbeddingChunkingProcessor(extractor TextExtractor, splitter TextSplitte
 		if err != nil {
 			return err
 		}
-		parts := splitter.Split(text)
+		parts := splitDocument(splitter, task, text)
 		if len(parts) == 0 {
 			return Permanent(errors.New("document contains no chunks"))
 		}
@@ -105,7 +110,7 @@ func NewEmbeddingHierarchicalChunkingProcessor(extractor TextExtractor, parentSp
 		if err != nil {
 			return err
 		}
-		parentParts := parentSplitter.Split(text)
+		parentParts := splitDocument(parentSplitter, task, text)
 		if len(parentParts) == 0 {
 			return Permanent(errors.New("document contains no parent chunks"))
 		}
@@ -131,6 +136,13 @@ func NewEmbeddingHierarchicalChunkingProcessor(extractor TextExtractor, parentSp
 		}
 		return chunks.ReplaceHierarchical(ctx, task.DocumentID, parents, children, embeddings)
 	}
+}
+
+func splitDocument(splitter TextSplitter, task Task, text string) []string {
+	if structured, ok := splitter.(DocumentTextSplitter); ok {
+		return structured.SplitDocument(filepath.Base(task.StoragePath), text)
+	}
+	return splitter.Split(text)
 }
 
 func embedChunks(ctx context.Context, embedder Embedder, parts []string) ([][]float32, error) {
