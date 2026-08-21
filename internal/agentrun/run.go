@@ -9,8 +9,6 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
-
-	"github.com/bArtyom/n2sql-agent/internal/agent"
 )
 
 type Status string
@@ -21,6 +19,7 @@ const (
 	StatusWaitingChildren Status = "waiting_children"
 	StatusSucceeded       Status = "succeeded"
 	StatusFailed          Status = "failed"
+	StatusTimeout         Status = "timeout"
 	StatusCanceled        Status = "canceled"
 )
 
@@ -43,44 +42,34 @@ const maxAgentRunAttempts = 3
 const maxCheckpointArgumentsBytes = 16 * 1024
 
 func IsTerminalStatus(status Status) bool {
-	return status == StatusSucceeded || status == StatusFailed || status == StatusCanceled
+	return status == StatusSucceeded || status == StatusFailed || status == StatusTimeout || status == StatusCanceled
 }
 
 func shouldRetryExpiredRun(attemptCount int) bool {
 	return attemptCount < maxAgentRunAttempts
 }
 
-func validFailureCategory(category agent.FailureCategory) bool {
-	switch category {
-	case agent.FailureNone, agent.FailureModel, agent.FailureTool, agent.FailureTimeout,
-		agent.FailureCanceled, agent.FailureStepLimit, agent.FailureValidation, agent.FailureInternal:
-		return true
-	default:
-		return false
-	}
-}
-
 type Run struct {
-	ID              int64                 `json:"id"`
-	RunID           string                `json:"run_id"`
-	KnowledgeBaseID int64                 `json:"knowledge_base_id"`
-	ConversationID  int64                 `json:"conversation_id,omitempty"`
-	ParentRunID     int64                 `json:"parent_run_id,omitempty"`
-	RunKind         Kind                  `json:"run_kind"`
-	Request         json.RawMessage       `json:"request"`
-	Response        json.RawMessage       `json:"response,omitempty"`
-	Status          Status                `json:"status"`
-	AttemptCount    int                   `json:"attempt_count"`
-	ErrorMessage    string                `json:"error_message,omitempty"`
-	FailureCategory agent.FailureCategory `json:"failure_category,omitempty"`
-	CreatedAt       time.Time             `json:"created_at"`
-	StartedAt       *time.Time            `json:"started_at,omitempty"`
-	FinishedAt      *time.Time            `json:"finished_at,omitempty"`
-	LeaseUntil      *time.Time            `json:"lease_until,omitempty"`
-	HeartbeatAt     *time.Time            `json:"heartbeat_at,omitempty"`
-	LeaseToken      string                `json:"-"`
-	UpdatedAt       time.Time             `json:"updated_at"`
-	Checkpoints     []ToolCheckpoint      `json:"-"`
+	ID              int64            `json:"id"`
+	RunID           string           `json:"run_id"`
+	KnowledgeBaseID int64            `json:"knowledge_base_id"`
+	ConversationID  int64            `json:"conversation_id,omitempty"`
+	ParentRunID     int64            `json:"parent_run_id,omitempty"`
+	RunKind         Kind             `json:"run_kind"`
+	Request         json.RawMessage  `json:"request"`
+	Response        json.RawMessage  `json:"response,omitempty"`
+	Status          Status           `json:"status"`
+	AttemptCount    int              `json:"attempt_count"`
+	ErrorMessage    string           `json:"error_message,omitempty"`
+	StopReason      string           `json:"stop_reason,omitempty"`
+	CreatedAt       time.Time        `json:"created_at"`
+	StartedAt       *time.Time       `json:"started_at,omitempty"`
+	FinishedAt      *time.Time       `json:"finished_at,omitempty"`
+	LeaseUntil      *time.Time       `json:"lease_until,omitempty"`
+	HeartbeatAt     *time.Time       `json:"heartbeat_at,omitempty"`
+	LeaseToken      string           `json:"-"`
+	UpdatedAt       time.Time        `json:"updated_at"`
+	Checkpoints     []ToolCheckpoint `json:"-"`
 }
 
 type CreateInput struct {
@@ -122,33 +111,45 @@ type Store interface {
 	MarkCanceled(context.Context, int64, string) error
 }
 
-// FailureCategoryStore persists a bounded machine-readable reason alongside
-// the human-facing error. Store remains backwards-compatible for small test
-// stores and non-PostgreSQL adapters that only support MarkFailed.
-type FailureCategoryStore interface {
-	MarkFailedWithCategory(context.Context, int64, string, agent.FailureCategory, string) error
+const (
+	StopReasonModelError      = "model_error"
+	StopReasonToolError       = "tool_error"
+	StopReasonTimeout         = "timeout"
+	StopReasonCanceled        = "canceled"
+	StopReasonStepLimit       = "step_limit"
+	StopReasonValidationError = "validation_error"
+	StopReasonInternalError   = "internal_error"
+	StopReasonOrphanRecovered = "orphan_recovered"
+)
+
+// StoppedError carries a bounded lifecycle reason across the executor/Worker
+// boundary. The detailed error remains separate and is stored in error_message.
+type StoppedError struct {
+	Err    error
+	Reason string
 }
 
-// CategorizedError carries the safe failure class selected by the Agent
-// runtime across the executor/worker boundary without exposing raw internals
-// to the HTTP client.
-type CategorizedError struct {
-	Err      error
-	Category agent.FailureCategory
-}
-
-func (e *CategorizedError) Error() string {
+func (e *StoppedError) Error() string {
 	if e == nil || e.Err == nil {
 		return ""
 	}
 	return e.Err.Error()
 }
 
-func (e *CategorizedError) Unwrap() error {
+func (e *StoppedError) Unwrap() error {
 	if e == nil {
 		return nil
 	}
 	return e.Err
+}
+
+// StopReasonStore persists a DeerFlow-style stop reason alongside the
+// human-facing error. Store remains compatible with adapters that only support
+// MarkFailed or MarkCanceled.
+type StopReasonStore interface {
+	MarkFailedWithReason(context.Context, int64, string, string, string) error
+	MarkTimedOut(context.Context, int64, string, string) error
+	MarkCanceledWithReason(context.Context, int64, string, string) error
 }
 
 // ParentRunCoordinator is implemented by durable stores that can park a
@@ -239,12 +240,12 @@ func (s *PostgresStore) Get(ctx context.Context, runID string, knowledgeBaseID i
 	var run Run
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, run_id, knowledge_base_id, COALESCE(conversation_id, 0), COALESCE(parent_run_id, 0), run_kind, request, response,
-			status, attempt_count, COALESCE(error_message, ''), COALESCE(failure_category, ''), created_at, started_at,
+			status, attempt_count, COALESCE(error_message, ''), COALESCE(stop_reason, ''), created_at, started_at,
 			finished_at, lease_until, heartbeat_at, lease_token, updated_at
 		FROM agent_runs
 		WHERE run_id = $1 AND knowledge_base_id = $2`, runID, knowledgeBaseID).Scan(
 		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.ParentRunID, &run.RunKind, &run.Request, &run.Response,
-		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.FailureCategory, &run.CreatedAt, &run.StartedAt,
+		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.StopReason, &run.CreatedAt, &run.StartedAt,
 		&run.FinishedAt, &run.LeaseUntil, &run.HeartbeatAt, &run.LeaseToken, &run.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Run{}, ErrRunNotFound
@@ -262,11 +263,11 @@ func (s *PostgresStore) GetByID(ctx context.Context, id int64) (Run, error) {
 	var run Run
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, run_id, knowledge_base_id, COALESCE(conversation_id, 0), COALESCE(parent_run_id, 0), run_kind, request, response,
-			status, attempt_count, COALESCE(error_message, ''), COALESCE(failure_category, ''), created_at, started_at,
+			status, attempt_count, COALESCE(error_message, ''), COALESCE(stop_reason, ''), created_at, started_at,
 			finished_at, lease_until, heartbeat_at, lease_token, updated_at
 		FROM agent_runs WHERE id = $1`, id).Scan(
 		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.ParentRunID, &run.RunKind, &run.Request, &run.Response,
-		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.FailureCategory, &run.CreatedAt, &run.StartedAt,
+		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.StopReason, &run.CreatedAt, &run.StartedAt,
 		&run.FinishedAt, &run.LeaseUntil, &run.HeartbeatAt, &run.LeaseToken, &run.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Run{}, ErrRunNotFound
@@ -324,10 +325,11 @@ func (s *PostgresStore) CancelTree(ctx context.Context, runID string, knowledgeB
 		)
 		UPDATE agent_runs
 		SET status = 'canceled', finished_at = CURRENT_TIMESTAMP,
+			stop_reason = 'canceled',
 			lease_until = NULL, heartbeat_at = NULL, lease_token = NULL,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id IN (SELECT id FROM run_tree)
-		  AND status NOT IN ('succeeded', 'failed', 'canceled')`, rootID); err != nil {
+		  AND status NOT IN ('succeeded', 'failed', 'timeout', 'canceled')`, rootID); err != nil {
 		return nil, fmt.Errorf("cancel agent run tree: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -345,11 +347,11 @@ func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Run, err
 		INSERT INTO agent_runs (run_id, knowledge_base_id, conversation_id, parent_run_id, run_kind, request)
 		VALUES ($1, $2, NULLIF($3, 0), NULLIF($4, 0), $5, $6)
 		RETURNING id, run_id, knowledge_base_id, COALESCE(conversation_id, 0), COALESCE(parent_run_id, 0), run_kind, request, response,
-			status, attempt_count, COALESCE(error_message, ''), COALESCE(failure_category, ''), created_at, started_at, finished_at,
+			status, attempt_count, COALESCE(error_message, ''), COALESCE(stop_reason, ''), created_at, started_at, finished_at,
 			lease_until, heartbeat_at, lease_token, updated_at`,
 		input.RunID, input.KnowledgeBaseID, input.ConversationID, input.ParentRunID, runKind(input.RunKind), input.Request).Scan(
 		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.ParentRunID, &run.RunKind, &run.Request, &run.Response,
-		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.FailureCategory, &run.CreatedAt, &run.StartedAt, &run.FinishedAt,
+		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.StopReason, &run.CreatedAt, &run.StartedAt, &run.FinishedAt,
 		&run.LeaseUntil, &run.HeartbeatAt, &run.LeaseToken, &run.UpdatedAt)
 	if err != nil {
 		return Run{}, fmt.Errorf("create agent run: %w", err)
@@ -382,13 +384,14 @@ func (s *PostgresStore) CreateChild(ctx context.Context, input ChildCreateInput)
 			finished_at = NULL,
 			response = NULL,
 			error_message = NULL,
+			stop_reason = NULL,
 			updated_at = CURRENT_TIMESTAMP
 		RETURNING id, run_id, knowledge_base_id, 0, parent_run_id, run_kind, request, response,
-			status, attempt_count, COALESCE(error_message, ''), COALESCE(failure_category, ''), created_at, started_at, finished_at,
+			status, attempt_count, COALESCE(error_message, ''), COALESCE(stop_reason, ''), created_at, started_at, finished_at,
 			lease_until, heartbeat_at, lease_token, updated_at`,
 		input.RunID, input.KnowledgeBaseID, input.ParentRunID, input.Request).Scan(
 		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.ParentRunID, &run.RunKind, &run.Request, &run.Response,
-		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.FailureCategory, &run.CreatedAt, &run.StartedAt, &run.FinishedAt,
+		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.StopReason, &run.CreatedAt, &run.StartedAt, &run.FinishedAt,
 		&run.LeaseUntil, &run.HeartbeatAt, &run.LeaseToken, &run.UpdatedAt)
 	if err != nil {
 		return Run{}, fmt.Errorf("create child agent run: %w", err)
@@ -425,13 +428,17 @@ func (s *PostgresStore) CreatePendingChild(ctx context.Context, input ChildCreat
 				WHEN agent_runs.status = 'failed' AND agent_runs.attempt_count < $5 THEN NULL
 				ELSE agent_runs.error_message
 			END,
+			stop_reason = CASE
+				WHEN agent_runs.status = 'failed' AND agent_runs.attempt_count < $5 THEN NULL
+				ELSE agent_runs.stop_reason
+			END,
 			updated_at = CURRENT_TIMESTAMP
 		RETURNING id, run_id, knowledge_base_id, 0, parent_run_id, run_kind, request, response,
-			status, attempt_count, COALESCE(error_message, ''), COALESCE(failure_category, ''), created_at, started_at, finished_at,
+			status, attempt_count, COALESCE(error_message, ''), COALESCE(stop_reason, ''), created_at, started_at, finished_at,
 			lease_until, heartbeat_at, lease_token, updated_at`,
 		input.RunID, input.KnowledgeBaseID, input.ParentRunID, input.Request, maxAgentRunAttempts).Scan(
 		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.ParentRunID, &run.RunKind, &run.Request, &run.Response,
-		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.FailureCategory, &run.CreatedAt, &run.StartedAt, &run.FinishedAt,
+		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.StopReason, &run.CreatedAt, &run.StartedAt, &run.FinishedAt,
 		&run.LeaseUntil, &run.HeartbeatAt, &run.LeaseToken, &run.UpdatedAt)
 	if err != nil {
 		return Run{}, fmt.Errorf("create pending child agent run: %w", err)
@@ -499,10 +506,10 @@ func (s *PostgresStore) ClaimNext(ctx context.Context) (Run, error) {
 		FROM next_run
 		WHERE run.id = next_run.id
 		RETURNING run.id, run.run_id, run.knowledge_base_id, COALESCE(run.conversation_id, 0), COALESCE(run.parent_run_id, 0), run.run_kind,
-			run.request, run.response, run.status, run.attempt_count, COALESCE(run.error_message, ''), COALESCE(run.failure_category, ''),
+			run.request, run.response, run.status, run.attempt_count, COALESCE(run.error_message, ''), COALESCE(run.stop_reason, ''),
 			run.created_at, run.started_at, run.finished_at, run.lease_until, run.heartbeat_at, run.lease_token, run.updated_at`).Scan(
 		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.ParentRunID, &run.RunKind, &run.Request, &run.Response,
-		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.FailureCategory, &run.CreatedAt, &run.StartedAt, &run.FinishedAt,
+		&run.Status, &run.AttemptCount, &run.ErrorMessage, &run.StopReason, &run.CreatedAt, &run.StartedAt, &run.FinishedAt,
 		&run.LeaseUntil, &run.HeartbeatAt, &run.LeaseToken, &run.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Run{}, ErrNoRun
@@ -520,7 +527,7 @@ func (s *PostgresStore) ListChildren(ctx context.Context, parentRunID, knowledge
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, run_id, knowledge_base_id, COALESCE(conversation_id, 0),
 			COALESCE(parent_run_id, 0), run_kind, response, status, attempt_count,
-			COALESCE(error_message, ''), COALESCE(failure_category, ''), created_at, started_at, finished_at,
+			COALESCE(error_message, ''), COALESCE(stop_reason, ''), created_at, started_at, finished_at,
 			lease_until, heartbeat_at, updated_at
 		FROM agent_runs
 		WHERE parent_run_id = $1 AND knowledge_base_id = $2
@@ -535,7 +542,7 @@ func (s *PostgresStore) ListChildren(ctx context.Context, parentRunID, knowledge
 		if err := rows.Scan(
 			&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID,
 			&run.ParentRunID, &run.RunKind, &run.Response, &run.Status, &run.AttemptCount,
-			&run.ErrorMessage, &run.FailureCategory, &run.CreatedAt, &run.StartedAt, &run.FinishedAt,
+			&run.ErrorMessage, &run.StopReason, &run.CreatedAt, &run.StartedAt, &run.FinishedAt,
 			&run.LeaseUntil, &run.HeartbeatAt, &run.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan child agent run: %w", err)
@@ -697,7 +704,7 @@ func (s *PostgresStore) CleanupTerminalToolCheckpoints(ctx context.Context, rete
 		DELETE FROM agent_run_checkpoints AS checkpoint
 		USING agent_runs AS run
 		WHERE checkpoint.agent_run_id = run.id
-		  AND run.status IN ('succeeded', 'failed', 'canceled')
+		  AND run.status IN ('succeeded', 'failed', 'timeout', 'canceled')
 		  AND run.updated_at < CURRENT_TIMESTAMP - ($1 * INTERVAL '1 second')`, retention.Seconds())
 	if err != nil {
 		return 0, fmt.Errorf("cleanup terminal agent tool checkpoints: %w", err)
@@ -728,6 +735,9 @@ func (s *PostgresStore) RequeueExpired(ctx context.Context) error {
 		UPDATE agent_runs
 		SET status = CASE WHEN attempt_count >= $1 THEN 'failed' ELSE 'pending' END,
 			lease_until = NULL, heartbeat_at = NULL, lease_token = NULL,
+			stop_reason = CASE WHEN attempt_count >= $1
+				THEN 'orphan_recovered'
+				ELSE NULL END,
 			error_message = CASE WHEN attempt_count >= $1
 				THEN 'worker lease expired: maximum attempts reached'
 				ELSE 'worker lease expired' END,
@@ -764,33 +774,38 @@ func (s *PostgresStore) MarkSucceeded(ctx context.Context, id int64, leaseToken 
 }
 
 func (s *PostgresStore) MarkFailed(ctx context.Context, id int64, message, leaseToken string) error {
-	return s.MarkFailedWithCategory(ctx, id, message, agent.FailureInternal, leaseToken)
+	return s.MarkFailedWithReason(ctx, id, message, StopReasonInternalError, leaseToken)
 }
 
-func (s *PostgresStore) MarkFailedWithCategory(ctx context.Context, id int64, message string, category agent.FailureCategory, leaseToken string) error {
-	if !validFailureCategory(category) {
-		return ErrInvalidRun
-	}
-	return s.markFinishedWithCategory(ctx, id, leaseToken, StatusFailed, message, category)
+func (s *PostgresStore) MarkFailedWithReason(ctx context.Context, id int64, message, reason, leaseToken string) error {
+	return s.markFinishedWithReason(ctx, id, leaseToken, StatusFailed, message, reason)
+}
+
+func (s *PostgresStore) MarkTimedOut(ctx context.Context, id int64, message, leaseToken string) error {
+	return s.markFinishedWithReason(ctx, id, leaseToken, StatusTimeout, message, StopReasonTimeout)
 }
 
 func (s *PostgresStore) MarkCanceled(ctx context.Context, id int64, leaseToken string) error {
-	return s.markFinishedWithCategory(ctx, id, leaseToken, StatusCanceled, "", agent.FailureCanceled)
+	return s.MarkCanceledWithReason(ctx, id, StopReasonCanceled, leaseToken)
+}
+
+func (s *PostgresStore) MarkCanceledWithReason(ctx context.Context, id int64, reason, leaseToken string) error {
+	return s.markFinishedWithReason(ctx, id, leaseToken, StatusCanceled, "", reason)
 }
 
 func (s *PostgresStore) markFinished(ctx context.Context, id int64, leaseToken string, status Status, message string) error {
-	return s.markFinishedWithCategory(ctx, id, leaseToken, status, message, agent.FailureNone)
+	return s.markFinishedWithReason(ctx, id, leaseToken, status, message, "")
 }
 
-func (s *PostgresStore) markFinishedWithCategory(ctx context.Context, id int64, leaseToken string, status Status, message string, category agent.FailureCategory) error {
+func (s *PostgresStore) markFinishedWithReason(ctx context.Context, id int64, leaseToken string, status Status, message, reason string) error {
 	if id <= 0 || leaseToken == "" {
 		return ErrInvalidRun
 	}
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE agent_runs
-		SET status = $2, error_message = NULLIF($3, ''), failure_category = NULLIF($4, ''), finished_at = CURRENT_TIMESTAMP,
+		SET status = $2, error_message = NULLIF($3, ''), stop_reason = NULLIF($4, ''), finished_at = CURRENT_TIMESTAMP,
 			lease_until = NULL, heartbeat_at = NULL, lease_token = NULL, updated_at = CURRENT_TIMESTAMP
-		WHERE id = $1 AND status = 'running' AND lease_token = $5`, id, status, message, category, leaseToken)
+		WHERE id = $1 AND status = 'running' AND lease_token = $5`, id, status, message, reason, leaseToken)
 	if err != nil {
 		return fmt.Errorf("mark agent run %s: %w", status, err)
 	}

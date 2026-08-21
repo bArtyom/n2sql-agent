@@ -123,17 +123,17 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 	}
 	if run.RunKind == KindChild && (errors.Is(err, context.DeadlineExceeded) || errors.Is(context.Cause(executionContext), context.DeadlineExceeded)) {
 		message := fmt.Sprintf("child agent timed out after %s", r.childTimeout)
-		if markErr := r.markFailed(context.WithoutCancel(ctx), run, message, agent.FailureTimeout); markErr != nil {
+		if markErr := r.markTimeout(context.WithoutCancel(ctx), run, message); markErr != nil {
 			return true, markErr
 		}
-		run.Status = StatusFailed
+		run.Status = StatusTimeout
 		r.resumeParentAfterChild(ctx, run)
 		r.cleanupTerminalCheckpoints(ctx, run.ID)
 		slog.WarnContext(ctx, "child_agent_timed_out", "run_id", run.RunID, "duration_ms", time.Since(started).Milliseconds(), "timeout", r.childTimeout)
 		return true, nil
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		if markErr := r.store.MarkCanceled(context.WithoutCancel(ctx), run.ID, run.LeaseToken); markErr != nil {
+		if markErr := r.markCanceled(context.WithoutCancel(ctx), run, StopReasonCanceled); markErr != nil {
 			return true, markErr
 		}
 		run.Status = StatusCanceled
@@ -145,12 +145,12 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 	if len(message) > 2000 {
 		message = message[:2000]
 	}
-	category := agent.FailureInternal
-	var categorized *CategorizedError
-	if errors.As(err, &categorized) && categorized.Category != agent.FailureNone {
-		category = categorized.Category
+	reason := StopReasonInternalError
+	var stopped *StoppedError
+	if errors.As(err, &stopped) && stopped.Reason != "" {
+		reason = stopped.Reason
 	}
-	if markErr := r.markFailed(context.WithoutCancel(ctx), run, message, category); markErr != nil {
+	if markErr := r.markFailed(context.WithoutCancel(ctx), run, message, reason); markErr != nil {
 		return true, markErr
 	}
 	run.Status = StatusFailed
@@ -160,11 +160,25 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-func (r *Runner) markFailed(ctx context.Context, run Run, message string, category agent.FailureCategory) error {
-	if store, ok := r.store.(FailureCategoryStore); ok {
-		return store.MarkFailedWithCategory(ctx, run.ID, message, category, run.LeaseToken)
+func (r *Runner) markFailed(ctx context.Context, run Run, message, reason string) error {
+	if store, ok := r.store.(StopReasonStore); ok {
+		return store.MarkFailedWithReason(ctx, run.ID, message, reason, run.LeaseToken)
 	}
 	return r.store.MarkFailed(ctx, run.ID, message, run.LeaseToken)
+}
+
+func (r *Runner) markTimeout(ctx context.Context, run Run, message string) error {
+	if store, ok := r.store.(StopReasonStore); ok {
+		return store.MarkTimedOut(ctx, run.ID, message, run.LeaseToken)
+	}
+	return r.store.MarkFailed(ctx, run.ID, message, run.LeaseToken)
+}
+
+func (r *Runner) markCanceled(ctx context.Context, run Run, reason string) error {
+	if store, ok := r.store.(StopReasonStore); ok {
+		return store.MarkCanceledWithReason(ctx, run.ID, reason, run.LeaseToken)
+	}
+	return r.store.MarkCanceled(ctx, run.ID, run.LeaseToken)
 }
 
 func (r *Runner) resumeParentAfterChild(ctx context.Context, run Run) {

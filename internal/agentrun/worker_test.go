@@ -11,18 +11,18 @@ import (
 )
 
 type runStoreStub struct {
-	run             Run
-	status          Status
-	failed          string
-	failureCategory agent.FailureCategory
-	requeued        bool
-	deleted         int
-	markedToken     string
-	renewErr        error
-	checkpointErr   error
-	waiting         bool
-	resumedParent   int64
-	parentRun       Run
+	run           Run
+	status        Status
+	failed        string
+	stopReason    string
+	requeued      bool
+	deleted       int
+	markedToken   string
+	renewErr      error
+	checkpointErr error
+	waiting       bool
+	resumedParent int64
+	parentRun     Run
 }
 
 func (s *runStoreStub) Get(context.Context, string, int64) (Run, error) {
@@ -67,9 +67,19 @@ func (s *runStoreStub) MarkFailed(_ context.Context, _ int64, message, token str
 	s.status, s.failed = StatusFailed, message
 	return nil
 }
-func (s *runStoreStub) MarkFailedWithCategory(_ context.Context, _ int64, message string, category agent.FailureCategory, token string) error {
+func (s *runStoreStub) MarkFailedWithReason(_ context.Context, _ int64, message, reason, token string) error {
 	s.markedToken = token
-	s.status, s.failed, s.failureCategory = StatusFailed, message, category
+	s.status, s.failed, s.stopReason = StatusFailed, message, reason
+	return nil
+}
+func (s *runStoreStub) MarkTimedOut(_ context.Context, _ int64, message, token string) error {
+	s.markedToken = token
+	s.status, s.failed, s.stopReason = StatusTimeout, message, StopReasonTimeout
+	return nil
+}
+func (s *runStoreStub) MarkCanceledWithReason(_ context.Context, _ int64, reason, token string) error {
+	s.markedToken = token
+	s.status, s.stopReason = StatusCanceled, reason
 	return nil
 }
 func (s *runStoreStub) MarkCanceled(_ context.Context, _ int64, token string) error {
@@ -155,10 +165,10 @@ func TestRunnerMarksFailedExecution(t *testing.T) {
 	}
 }
 
-func TestRunnerPersistsCategorizedFailureWhenStoreSupportsIt(t *testing.T) {
+func TestRunnerPersistsStopReasonWhenStoreSupportsIt(t *testing.T) {
 	store := &runStoreStub{run: Run{ID: 3, RunID: "run-3"}, status: StatusPending}
 	runner, err := NewRunner(store, ExecutorFunc(func(context.Context, Run, EventSink) error {
-		return &CategorizedError{Err: errors.New("provider rejected request"), Category: agent.FailureModel}
+		return &StoppedError{Err: errors.New("provider rejected request"), Reason: StopReasonModelError}
 	}))
 	if err != nil {
 		t.Fatalf("NewRunner() error = %v", err)
@@ -166,8 +176,8 @@ func TestRunnerPersistsCategorizedFailureWhenStoreSupportsIt(t *testing.T) {
 	if _, err := runner.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce() error = %v", err)
 	}
-	if store.failureCategory != agent.FailureModel {
-		t.Fatalf("failure category = %q, want %q", store.failureCategory, agent.FailureModel)
+	if store.stopReason != StopReasonModelError {
+		t.Fatalf("stop reason = %q, want %q", store.stopReason, StopReasonModelError)
 	}
 }
 
@@ -185,8 +195,8 @@ func TestRunnerMarksChildTimeoutAsFailedAndResumesParent(t *testing.T) {
 	if err != nil || !worked {
 		t.Fatalf("RunOnce() = (%v, %v), want handled timeout", worked, err)
 	}
-	if store.status != StatusFailed {
-		t.Fatalf("status = %s, want failed", store.status)
+	if store.status != StatusTimeout {
+		t.Fatalf("status = %s, want timeout", store.status)
 	}
 	if store.failed != "child agent timed out after 5ms" {
 		t.Fatalf("failure = %q, want timeout message", store.failed)

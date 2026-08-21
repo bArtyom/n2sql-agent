@@ -249,8 +249,8 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 				_ = publish("waiting_children", map[string]any{"run_id": run.RunID})
 				return err
 			}
-			if response.Stats != nil && response.Stats.FailureCategory != agent.FailureNone {
-				err = &agentrun.CategorizedError{Err: err, Category: response.Stats.FailureCategory}
+			if reason := stopReasonFromFailureCategory(response.Stats); reason != "" {
+				err = &agentrun.StoppedError{Err: err, Reason: reason}
 			}
 			if !replayed {
 				message, _ := knowledgeBaseAgentChatError(err)
@@ -271,6 +271,30 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 		logAgentRequest(ctx, started, request, response, nil, registry, !replayed)
 		return nil
 	})
+}
+
+func stopReasonFromFailureCategory(stats *agent.RunStats) string {
+	if stats == nil {
+		return ""
+	}
+	switch stats.FailureCategory {
+	case agent.FailureModel:
+		return agentrun.StopReasonModelError
+	case agent.FailureTool:
+		return agentrun.StopReasonToolError
+	case agent.FailureTimeout:
+		return agentrun.StopReasonTimeout
+	case agent.FailureCanceled:
+		return agentrun.StopReasonCanceled
+	case agent.FailureStepLimit:
+		return agentrun.StopReasonStepLimit
+	case agent.FailureValidation:
+		return agentrun.StopReasonValidationError
+	case agent.FailureInternal:
+		return agentrun.StopReasonInternalError
+	default:
+		return ""
+	}
 }
 
 // wrapChildAgentEvent keeps asynchronous child progress on the parent's SSE

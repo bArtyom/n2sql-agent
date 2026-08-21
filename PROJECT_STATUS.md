@@ -38,7 +38,7 @@
 - Agent Worker 租约丢失主动停止已补齐：心跳续租失败后立即取消本次执行上下文，旧 Worker 不再继续调用模型或工具；数据库 token fencing 继续作为最终写入保护。
 - Agent Worker 已区分取消原因：用户取消仍进入 `canceled`；心跳导致的 `ErrLeaseLost` 不写终态，保留运行记录等待租约回收后由下一个 Worker 接管，避免把故障恢复误判成用户主动停止。
 - Agent Worker 已增加最大接管次数：租约过期的 Run 最多尝试 3 次；超过次数后进入 `failed` 并记录 `worker lease expired: maximum attempts reached`，避免故障任务无限循环。
-- Agent Run 失败分类已持久化：`agent_runs.failure_category` 与人类可读 `error_message` 分离保存，Worker 支持 `model_failed`、`tool_failed`、`timeout`、`canceled`、`step_limit_exceeded`、`validation_failed`、`internal_failed`，状态接口返回分类供前端和运维判断。
+- Agent Run 已采用 DeerFlow 风格的失败状态：`agent_runs.status` 区分 `succeeded`、`failed`、`timeout`、`canceled`，`stop_reason` 保存有限的停止原因，`error_message` 保存可读错误；运行时仍可在内存中使用细粒度 `FailureCategory`，但不对外持久化。
 - Agent checkpoint 第一版断点续跑已接入：checkpoint 额外保存有界的原始工具参数；Worker 接管后将最近的安全只读工具调用重建为 `assistant tool_call + tool result` 上下文，直接进入下一次模型决策，减少重复的工具选择；旧格式 checkpoint 已通过迁移清理，不再兼容。
 - Agent checkpoint 恢复轨迹已补齐：接管时发出带 `checkpoint_action=resumed_context` 的 `tool_finished` 事件，并将已恢复的工具参数加入本轮重复调用保护，前端和运行日志可以区分“重新执行”与“从 checkpoint 恢复”。
 - Agent checkpoint 已保存模型决策批次 ID；同一轮并行只读工具恢复时，会重建为一条带多个 `tool_call` 的 assistant 消息及对应 tool 消息，避免恢复后的上下文协议失真。

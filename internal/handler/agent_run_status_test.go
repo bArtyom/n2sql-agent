@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/agentrun"
 	"github.com/bArtyom/n2sql-agent/internal/handler"
 )
@@ -30,14 +29,14 @@ func (s agentRunReaderStub) ListChildren(context.Context, int64, int64) ([]agent
 func TestAgentRunStatusDoesNotExposeRequestSnapshot(t *testing.T) {
 	created := time.Date(2026, time.August, 18, 10, 0, 0, 0, time.UTC)
 	endpoint := handler.NewAgentRunStatus(agentRunReaderStub{run: agentrun.Run{
-		RunID:           "run-1",
-		Status:          agentrun.StatusRunning,
-		AttemptCount:    2,
-		FailureCategory: agent.FailureModel,
-		Request:         []byte(`{"message":"secret question"}`),
-		Response:        []byte(`{"answer":"恢复后的答案","status":"succeeded"}`),
-		CreatedAt:       created,
-		UpdatedAt:       created,
+		RunID:        "run-1",
+		Status:       agentrun.StatusRunning,
+		AttemptCount: 2,
+		StopReason:   agentrun.StopReasonModelError,
+		Request:      []byte(`{"message":"secret question"}`),
+		Response:     []byte(`{"answer":"恢复后的答案","status":"succeeded"}`),
+		CreatedAt:    created,
+		UpdatedAt:    created,
 	}})
 	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/7/agent-runs/run-1", nil)
 	request.SetPathValue("id", "7")
@@ -56,8 +55,8 @@ func TestAgentRunStatusDoesNotExposeRequestSnapshot(t *testing.T) {
 	if !strings.Contains(body, `"answer":"恢复后的答案"`) {
 		t.Fatalf("body = %q, want persisted response", body)
 	}
-	if !strings.Contains(body, `"failure_category":"model_failed"`) {
-		t.Fatalf("body = %q, want failure category", body)
+	if !strings.Contains(body, `"stop_reason":"model_error"`) {
+		t.Fatalf("body = %q, want stop reason", body)
 	}
 	if strings.Contains(body, "secret question") || strings.Contains(body, "request") {
 		t.Fatalf("body = %q, must not expose request snapshot", body)

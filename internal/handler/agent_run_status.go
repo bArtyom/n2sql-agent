@@ -39,15 +39,15 @@ func NewAgentRunStatus(reader agentrun.Reader) http.Handler {
 			return
 		}
 		payload := map[string]any{
-			"run_id":           run.RunID,
-			"status":           run.Status,
-			"attempt_count":    run.AttemptCount,
-			"error":            run.ErrorMessage,
-			"failure_category": run.FailureCategory,
-			"created_at":       run.CreatedAt,
-			"started_at":       run.StartedAt,
-			"finished_at":      run.FinishedAt,
-			"updated_at":       run.UpdatedAt,
+			"run_id":        run.RunID,
+			"status":        run.Status,
+			"attempt_count": run.AttemptCount,
+			"error":         run.ErrorMessage,
+			"stop_reason":   run.StopReason,
+			"created_at":    run.CreatedAt,
+			"started_at":    run.StartedAt,
+			"finished_at":   run.FinishedAt,
+			"updated_at":    run.UpdatedAt,
 		}
 		if childReader, ok := reader.(agentrun.ChildReader); ok {
 			if children, childErr := childReader.ListChildren(r.Context(), run.ID, run.KnowledgeBaseID); childErr == nil {
