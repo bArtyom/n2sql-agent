@@ -482,6 +482,13 @@ function matchTypeLabel(matchType?: string): string {
 function sourceScoreLabel(source: Source): string {
   if (source.matchType === "document_read") return "指定片段";
   if (typeof source.rerankScore === "number") return `重排 ${source.rerankScore.toFixed(2)}`;
+  if (typeof source.headingScore === "number" && source.headingScore > 0) {
+    const heading = `标题 ${source.headingScore.toFixed(2)}`;
+    if (typeof source.keywordScore === "number" && source.keywordScore > 0) {
+      return `正文 ${source.keywordScore.toFixed(2)} · ${heading}`;
+    }
+    return heading;
+  }
   if (typeof source.keywordScore === "number" && source.keywordScore > 0) return `关键词 ${source.keywordScore.toFixed(2)}`;
   if (typeof source.fusionScore === "number" && source.fusionScore > 0) return `融合 ${source.fusionScore.toFixed(3)}`;
   return `距离 ${source.distance.toFixed(2)}`;
