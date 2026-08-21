@@ -58,6 +58,10 @@ type Deleter interface {
 	Delete(context.Context, int64, int64) error
 }
 
+type Reprocessor interface {
+	Reprocess(context.Context, int64, int64) error
+}
+
 type CreateInput struct {
 	KnowledgeBaseID  int64
 	OriginalFilename string
@@ -150,6 +154,17 @@ func (s *Service) List(ctx context.Context, knowledgeBaseID int64) ([]Document, 
 		return nil, err
 	}
 	return documents, nil
+}
+
+func (s *Service) Reprocess(ctx context.Context, knowledgeBaseID, documentID int64) error {
+	if knowledgeBaseID <= 0 || documentID <= 0 {
+		return ErrDocumentNotFound
+	}
+	reprocessor, ok := s.store.(Reprocessor)
+	if !ok {
+		return ErrDeleteUnavailable
+	}
+	return reprocessor.Reprocess(ctx, knowledgeBaseID, documentID)
 }
 
 // Delete removes the database record first so PostgreSQL can cascade chunks,
@@ -302,6 +317,36 @@ func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Docu
 		return nil, fmt.Errorf("iterate documents: %w", err)
 	}
 	return documents, nil
+}
+
+func (s *PostgresStore) Reprocess(ctx context.Context, knowledgeBaseID, documentID int64) error {
+	var exists, active bool
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM documents AS d
+			JOIN knowledge_bases AS kb ON kb.id = d.knowledge_base_id
+			WHERE d.id = $1 AND d.knowledge_base_id = $2
+			  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
+		), EXISTS (
+			SELECT 1 FROM document_processing_tasks
+			WHERE document_id = $1 AND status IN ('pending', 'processing')
+		)`, documentID, knowledgeBaseID).Scan(&exists, &active); err != nil {
+		return fmt.Errorf("check document reprocess status: %w", err)
+	}
+	if !exists {
+		return ErrDocumentNotFound
+	}
+	if active {
+		return ErrDocumentProcessing
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO document_processing_tasks (document_id) VALUES ($1)`, documentID); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.ConstraintName == "document_processing_tasks_active_document_idx" {
+			return ErrDocumentProcessing
+		}
+		return fmt.Errorf("create document reprocess task: %w", err)
+	}
+	return nil
 }
 
 func (s *PostgresStore) GetSummary(ctx context.Context, knowledgeBaseID, documentID int64) (Summary, error) {

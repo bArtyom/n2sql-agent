@@ -248,6 +248,7 @@ const creatingKnowledgeBase = ref(false);
 const deletingKnowledgeBase = ref(false);
 const uploading = ref(false);
 const deletingDocumentID = ref<number | null>(null);
+const reprocessingDocumentID = ref<number | null>(null);
 const streaming = ref(false);
 const stopping = ref(false);
 const errorMessage = ref("");
@@ -1615,6 +1616,28 @@ async function streamAgentQuestion(prompt: string, answerIndex: number, activeCo
   clearPendingRun();
 }
 
+async function reprocessDocument(item: DocumentItem) {
+  if (!selectedKnowledgeBaseId.value || streaming.value || reprocessingDocumentID.value !== null) return;
+  if (["pending", "processing"].includes(item.processingStatus)) return;
+  if (!window.confirm(`重新处理“${item.originalFilename}”？系统会重新切分并生成向量。`)) return;
+  reprocessingDocumentID.value = item.id;
+  try {
+    await requestJSON<{ documentId: number; status: string }>(
+      `/api/knowledge-bases/${selectedKnowledgeBaseId.value}/documents/${item.id}/reprocess`,
+      { method: "POST" },
+    );
+    await refreshDocuments();
+  } catch (error) {
+    if (error instanceof APIError && error.status === 409) {
+      errorMessage.value = "文档已经在处理中。";
+    } else {
+      showError(error);
+    }
+  } finally {
+    reprocessingDocumentID.value = null;
+  }
+}
+
 async function readAgentSSE(response: Response, answerIndex: number) {
   if (!response.body) throw new Error("问答服务没有返回流式内容。");
   const reader = response.body.getReader();
@@ -2604,6 +2627,14 @@ onUnmounted(() => {
                 title="查看正文片段"
                 @click="openDocumentPreview(document)"
               >查看</button>
+              <button
+                v-if="['succeeded', 'failed'].includes(document.processingStatus)"
+                class="document-preview-button"
+                type="button"
+                :disabled="streaming || reprocessingDocumentID !== null"
+                title="重新切分并生成向量"
+                @click="reprocessDocument(document)"
+              >{{ reprocessingDocumentID === document.id ? "排队中…" : "重处理" }}</button>
               <button
                 class="document-delete"
                 type="button"

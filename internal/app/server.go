@@ -113,6 +113,9 @@ func New(dependencies Dependencies) http.Handler {
 		if deleter, ok := dependencies.Documents.(document.Deleter); ok {
 			mux.Handle("DELETE /api/knowledge-bases/{id}/documents/{documentID}", handler.NewDocumentDelete(deleter))
 		}
+		if reprocessor, ok := dependencies.Documents.(document.Reprocessor); ok {
+			mux.Handle("POST /api/knowledge-bases/{id}/documents/{documentID}/reprocess", handler.NewDocumentReprocess(reprocessor))
+		}
 	}
 	if dependencies.ChunkReader != nil {
 		mux.Handle("GET /api/knowledge-bases/{id}/documents/{documentID}/chunks/{position}", handler.NewDocumentChunk(dependencies.ChunkReader))
