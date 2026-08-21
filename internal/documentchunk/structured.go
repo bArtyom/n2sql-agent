@@ -17,6 +17,13 @@ const (
 	StrategyRecursive SplitStrategy = "recursive"
 )
 
+type HeadingPathKind string
+
+const (
+	HeadingPathSemantic HeadingPathKind = "semantic"
+	HeadingPathVirtual  HeadingPathKind = "virtual"
+)
+
 // SplitDiagnostics is the small, persisted report used by document preview.
 // It describes the selected structure strategy and the quality of the final
 // chunks without retaining the source document a second time.
@@ -37,8 +44,26 @@ type AdaptiveSplitter struct {
 }
 
 type StructuredPart struct {
-	Content     string
-	HeadingPath string
+	Content         string
+	HeadingPath     string
+	HeadingPathKind HeadingPathKind
+}
+
+// EmbeddingContent builds the temporary text sent to the embedding model.
+// Virtual labels such as "第 1 段" are intentionally excluded because they
+// locate a chunk but do not add semantic meaning.
+func (p StructuredPart) EmbeddingContent(documentTitle string) string {
+	parts := make([]string, 0, 3)
+	if title := strings.TrimSpace(documentTitle); title != "" {
+		parts = append(parts, title)
+	}
+	if p.HeadingPathKind == HeadingPathSemantic && strings.TrimSpace(p.HeadingPath) != "" {
+		parts = append(parts, strings.TrimSpace(p.HeadingPath))
+	}
+	if body := strings.TrimSpace(p.Content); body != "" {
+		parts = append(parts, body)
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 func NewAdaptiveSplitter(size, overlap int) *AdaptiveSplitter {
@@ -263,7 +288,7 @@ func (s *AdaptiveSplitter) renderSections(sections []structuredSection) []Struct
 			continue
 		}
 		for _, part := range parts {
-			result = append(result, StructuredPart{Content: part, HeadingPath: path})
+			result = append(result, StructuredPart{Content: part, HeadingPath: path, HeadingPathKind: HeadingPathSemantic})
 		}
 	}
 	return result
@@ -394,7 +419,7 @@ func addVirtualPaths(filename string, parts []string) []StructuredPart {
 		if strings.TrimSpace(part) == "" {
 			continue
 		}
-		result = append(result, StructuredPart{Content: part, HeadingPath: filename + " > 第 " + itoa(index+1) + " 段"})
+		result = append(result, StructuredPart{Content: part, HeadingPath: filename + " > 第 " + itoa(index+1) + " 段", HeadingPathKind: HeadingPathVirtual})
 	}
 	return result
 }

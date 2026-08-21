@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
@@ -24,12 +25,13 @@ const (
 var ErrNoTask = errors.New("no pending document processing task")
 
 type Task struct {
-	ID              int64
-	DocumentID      int64
-	KnowledgeBaseID int64
-	AttemptCount    int
-	StoragePath     string
-	ContentType     string
+	ID               int64
+	DocumentID       int64
+	KnowledgeBaseID  int64
+	AttemptCount     int
+	StoragePath      string
+	OriginalFilename string
+	ContentType      string
 }
 
 type Store interface {
@@ -103,7 +105,7 @@ func NewEmbeddingChunkingProcessor(extractor TextExtractor, splitter TextSplitte
 		if len(contents) == 0 {
 			return Permanent(errors.New("document contains no chunks"))
 		}
-		embeddings, err := embedChunks(ctx, embedder, contents)
+		embeddings, err := embedChunks(ctx, embedder, embeddingContents(task.OriginalFilename, parts))
 		if err != nil {
 			return fmt.Errorf("embed document chunks: %w", err)
 		}
@@ -142,7 +144,7 @@ func NewEmbeddingHierarchicalChunkingProcessor(extractor TextExtractor, parentSp
 		}
 		childTexts := make([]string, len(children))
 		for index, child := range children {
-			childTexts[index] = child.Content
+			childTexts[index] = documentchunk.StructuredPart{Content: child.Content, HeadingPath: child.HeadingPath, HeadingPathKind: headingPathKind(parentParts[child.ParentPosition])}.EmbeddingContent(task.OriginalFilename)
 		}
 		embeddings, err := embedChunks(ctx, embedder, childTexts)
 		if err != nil {
@@ -165,7 +167,7 @@ func saveDiagnostics(ctx context.Context, chunks any, splitter TextSplitter, tas
 	if !ok {
 		return
 	}
-	_, diagnostics := structured.SplitDocumentPartsWithDiagnostics(filepath.Base(task.StoragePath), text)
+	_, diagnostics := structured.SplitDocumentPartsWithDiagnostics(documentTitle(task), text)
 	if err := store.SaveChunkingDiagnostics(ctx, task.DocumentID, diagnostics); err != nil {
 		slog.WarnContext(ctx, "save document chunking diagnostics failed", "document_id", task.DocumentID, "error", err)
 	}
@@ -173,7 +175,7 @@ func saveDiagnostics(ctx context.Context, chunks any, splitter TextSplitter, tas
 
 func splitDocument(splitter TextSplitter, task Task, text string) []documentchunk.StructuredPart {
 	if structured, ok := splitter.(DocumentTextSplitter); ok {
-		return structured.SplitDocumentParts(filepath.Base(task.StoragePath), text)
+		return structured.SplitDocumentParts(documentTitle(task), text)
 	}
 	parts := splitter.Split(text)
 	result := make([]documentchunk.StructuredPart, 0, len(parts))
@@ -181,6 +183,13 @@ func splitDocument(splitter TextSplitter, task Task, text string) []documentchun
 		result = append(result, documentchunk.StructuredPart{Content: part})
 	}
 	return result
+}
+
+func documentTitle(task Task) string {
+	if title := strings.TrimSpace(task.OriginalFilename); title != "" {
+		return title
+	}
+	return filepath.Base(task.StoragePath)
 }
 
 func structuredContents(parts []documentchunk.StructuredPart) []string {
@@ -191,6 +200,20 @@ func structuredContents(parts []documentchunk.StructuredPart) []string {
 		}
 	}
 	return result
+}
+
+func embeddingContents(documentTitle string, parts []documentchunk.StructuredPart) []string {
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if content := part.EmbeddingContent(documentTitle); content != "" {
+			result = append(result, content)
+		}
+	}
+	return result
+}
+
+func headingPathKind(part documentchunk.StructuredPart) documentchunk.HeadingPathKind {
+	return part.HeadingPathKind
 }
 
 func embedChunks(ctx context.Context, embedder Embedder, parts []string) ([][]float32, error) {
@@ -417,8 +440,8 @@ func (s *PostgresStore) ClaimNext(ctx context.Context) (Task, error) {
 		FROM next_task, documents AS document
 		WHERE task.id = next_task.id
 		  AND document.id = task.document_id
-			RETURNING task.id, document.id, document.knowledge_base_id, task.attempt_count, document.storage_path, document.content_type`).Scan(
-		&task.ID, &task.DocumentID, &task.KnowledgeBaseID, &task.AttemptCount, &task.StoragePath, &task.ContentType,
+			RETURNING task.id, document.id, document.knowledge_base_id, task.attempt_count, document.storage_path, document.original_filename, document.content_type`).Scan(
+		&task.ID, &task.DocumentID, &task.KnowledgeBaseID, &task.AttemptCount, &task.StoragePath, &task.OriginalFilename, &task.ContentType,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, ErrNoTask

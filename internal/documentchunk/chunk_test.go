@@ -141,3 +141,14 @@ func TestAdaptiveSplitterReportsDiagnostics(t *testing.T) {
 		t.Fatalf("missing structure diagnostics: %#v", diagnostics)
 	}
 }
+
+func TestStructuredPartEmbeddingContentExcludesVirtualPath(t *testing.T) {
+	semantic := documentchunk.StructuredPart{Content: "安装 Docker。", HeadingPath: "部署指南 > Windows", HeadingPathKind: documentchunk.HeadingPathSemantic}
+	if got := semantic.EmbeddingContent("内部部署手册"); got != "内部部署手册\n\n部署指南 > Windows\n\n安装 Docker。" {
+		t.Fatalf("semantic embedding content = %q", got)
+	}
+	virtual := documentchunk.StructuredPart{Content: "第一段正文。", HeadingPath: "guide.md > 第 1 段", HeadingPathKind: documentchunk.HeadingPathVirtual}
+	if got := virtual.EmbeddingContent("guide.md"); got != "guide.md\n\n第一段正文。" {
+		t.Fatalf("virtual embedding content = %q", got)
+	}
+}

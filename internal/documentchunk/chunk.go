@@ -520,11 +520,11 @@ func (s *PostgresStore) SearchKeywordWithDocuments(ctx context.Context, knowledg
 		"SELECT plainto_tsquery('simple', $2) AS terms" +
 		"), scored AS (" +
 		"SELECT chunks.document_id, documents.original_filename, chunks.position, chunks.content, chunks.heading_path, " +
-		"ts_rank_cd(chunks.content_search, search_query.terms) AS keyword_score, " +
-		"CASE WHEN lower(chunks.content) LIKE $3 ESCAPE E'\\\\' THEN 1.0 ELSE 0.0 END AS exact_score " +
+		"ts_rank_cd(chunks.content_search, search_query.terms) + 0.35 * ts_rank_cd(chunks.heading_search, search_query.terms) AS keyword_score, " +
+		"CASE WHEN lower(chunks.content) LIKE $3 ESCAPE E'\\\\' OR lower(chunks.heading_path) LIKE $3 ESCAPE E'\\\\' OR lower(documents.original_filename) LIKE $3 ESCAPE E'\\\\' THEN 1.0 ELSE 0.0 END AS exact_score " +
 		"FROM document_chunks AS chunks JOIN documents AS documents ON documents.id = chunks.document_id " +
 		"CROSS JOIN search_query WHERE documents.knowledge_base_id = $1 " +
-		"AND (chunks.content_search @@ search_query.terms OR lower(chunks.content) LIKE $3 ESCAPE E'\\\\') " +
+		"AND (chunks.content_search @@ search_query.terms OR chunks.heading_search @@ search_query.terms OR lower(chunks.content) LIKE $3 ESCAPE E'\\\\' OR lower(chunks.heading_path) LIKE $3 ESCAPE E'\\\\' OR lower(documents.original_filename) LIKE $3 ESCAPE E'\\\\') " +
 		"AND ($4::bigint[] IS NULL OR chunks.document_id = ANY($4::bigint[]))" +
 		") SELECT document_id, original_filename, position, content, heading_path, 0::float8 AS distance, GREATEST(keyword_score, exact_score) AS keyword_score " +
 		"FROM scored ORDER BY exact_score DESC, keyword_score DESC, position, document_id LIMIT $5"
