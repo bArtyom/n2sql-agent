@@ -41,10 +41,48 @@ func TestEvaluateComparesThresholdsWithoutCallingChat(t *testing.T) {
 	}
 }
 
+func TestEvaluateReportsDocumentHitAndReciprocalRank(t *testing.T) {
+	cases := []retrievaleval.Case{
+		{
+			ID:                  "labeled",
+			KnowledgeBaseID:     1,
+			Question:            "目标文档",
+			ExpectedRelevant:    true,
+			ExpectedDocumentIDs: []int64{2},
+		},
+	}
+	report, err := retrievaleval.Evaluate(context.Background(), searcherStub{distances: map[string][]float64{
+		"目标文档": {0.61, 0.62},
+	}}, cases, []float64{0.65})
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	result := report.Thresholds[0]
+	if result.DocumentHits != 1 || result.DocumentRecall != 1 || result.MRR != 0.5 {
+		t.Fatalf("document metrics = %#v, want hit=1 recall=1 mrr=0.5", result)
+	}
+	if !report.Thresholds[0].Cases[0].RelevantRetrieved || report.Thresholds[0].Cases[0].FirstRelevantRank != 2 {
+		t.Fatalf("case result = %#v, want hit at rank 2", report.Thresholds[0].Cases[0])
+	}
+}
+
 func TestLoadCasesRejectsUnknownFields(t *testing.T) {
 	_, err := retrievaleval.LoadCases(strings.NewReader(`[{"id":"q1","knowledge_base_id":1,"question":"问题","expected_relevant":true,"extra":1}]`))
 	if err == nil {
 		t.Fatal("LoadCases() error = nil, want invalid case file")
+	}
+}
+
+func TestLoadCasesRejectsDuplicateExpectedDocumentIDs(t *testing.T) {
+	_, err := retrievaleval.LoadCases(strings.NewReader(`[{
+		"id":"q1",
+		"knowledge_base_id":1,
+		"question":"问题",
+		"expected_relevant":true,
+		"expected_document_ids":[2,2]
+	}]`))
+	if err == nil {
+		t.Fatal("LoadCases() error = nil, want invalid document labels")
 	}
 }
 

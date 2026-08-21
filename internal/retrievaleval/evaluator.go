@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
@@ -24,33 +25,40 @@ var DefaultThresholds = []float64{0.55, 0.60, 0.65, 0.70, 0.75}
 
 // Case labels whether at least one useful chunk should exist for a question.
 type Case struct {
-	ID               string `json:"id"`
-	KnowledgeBaseID  int64  `json:"knowledge_base_id"`
-	Question         string `json:"question"`
-	ExpectedRelevant bool   `json:"expected_relevant"`
-	Notes            string `json:"notes,omitempty"`
+	ID                  string  `json:"id"`
+	KnowledgeBaseID     int64   `json:"knowledge_base_id"`
+	Question            string  `json:"question"`
+	ExpectedRelevant    bool    `json:"expected_relevant"`
+	ExpectedDocumentIDs []int64 `json:"expected_document_ids,omitempty"`
+	Notes               string  `json:"notes,omitempty"`
 }
 
 type CaseResult struct {
-	ID               string   `json:"id"`
-	ExpectedRelevant bool     `json:"expected_relevant"`
-	Retrieved        int      `json:"retrieved"`
-	MinimumDistance  *float64 `json:"minimum_distance,omitempty"`
+	ID                string   `json:"id"`
+	ExpectedRelevant  bool     `json:"expected_relevant"`
+	Retrieved         int      `json:"retrieved"`
+	MinimumDistance   *float64 `json:"minimum_distance,omitempty"`
+	RelevantRetrieved bool     `json:"relevant_retrieved,omitempty"`
+	FirstRelevantRank int      `json:"first_relevant_rank,omitempty"`
 }
 
 type ThresholdResult struct {
-	Threshold          float64      `json:"threshold"`
-	Total              int          `json:"total"`
-	ExpectedRelevant   int          `json:"expected_relevant"`
-	ExpectedIrrelevant int          `json:"expected_irrelevant"`
-	RelevantHits       int          `json:"relevant_hits"`
-	FalseRefusals      int          `json:"false_refusals"`
-	CorrectRefusals    int          `json:"correct_refusals"`
-	UnsupportedAccepts int          `json:"unsupported_accepts"`
-	Recall             float64      `json:"recall"`
-	RefusalRate        float64      `json:"refusal_rate"`
-	Accuracy           float64      `json:"accuracy"`
-	Cases              []CaseResult `json:"cases"`
+	Threshold            float64      `json:"threshold"`
+	Total                int          `json:"total"`
+	ExpectedRelevant     int          `json:"expected_relevant"`
+	ExpectedIrrelevant   int          `json:"expected_irrelevant"`
+	RelevantHits         int          `json:"relevant_hits"`
+	FalseRefusals        int          `json:"false_refusals"`
+	CorrectRefusals      int          `json:"correct_refusals"`
+	UnsupportedAccepts   int          `json:"unsupported_accepts"`
+	Recall               float64      `json:"recall"`
+	RefusalRate          float64      `json:"refusal_rate"`
+	Accuracy             float64      `json:"accuracy"`
+	LabeledDocumentCases int          `json:"labeled_document_cases,omitempty"`
+	DocumentHits         int          `json:"document_hits,omitempty"`
+	DocumentRecall       float64      `json:"document_recall,omitempty"`
+	MRR                  float64      `json:"mrr,omitempty"`
+	Cases                []CaseResult `json:"cases"`
 }
 
 type Report struct {
@@ -81,6 +89,9 @@ func LoadCases(reader io.Reader) ([]Case, error) {
 		if evaluationCase.ID == "" || strings.TrimSpace(evaluationCase.ID) != evaluationCase.ID ||
 			evaluationCase.KnowledgeBaseID <= 0 || strings.TrimSpace(evaluationCase.Question) == "" {
 			return nil, ErrInvalidCase
+		}
+		if err := validateDocumentIDs(evaluationCase.ExpectedDocumentIDs); err != nil {
+			return nil, err
 		}
 	}
 	return cases, nil
@@ -122,6 +133,9 @@ func Evaluate(ctx context.Context, searcher retrieval.Searcher, cases []Case, th
 		if evaluationCase.ID == "" || evaluationCase.KnowledgeBaseID <= 0 || strings.TrimSpace(evaluationCase.Question) == "" {
 			return Report{}, ErrInvalidCase
 		}
+		if err := validateDocumentIDs(evaluationCase.ExpectedDocumentIDs); err != nil {
+			return Report{}, err
+		}
 	}
 
 	caseResults := make([]CaseResult, 0, len(cases))
@@ -131,6 +145,20 @@ func Evaluate(ctx context.Context, searcher retrieval.Searcher, cases []Case, th
 			return Report{}, err
 		}
 		result := CaseResult{ID: evaluationCase.ID, ExpectedRelevant: evaluationCase.ExpectedRelevant, Retrieved: len(results)}
+		if len(evaluationCase.ExpectedDocumentIDs) > 0 {
+			expected := make(map[int64]struct{}, len(evaluationCase.ExpectedDocumentIDs))
+			for _, documentID := range evaluationCase.ExpectedDocumentIDs {
+				expected[documentID] = struct{}{}
+			}
+			for rank, item := range results {
+				if _, ok := expected[item.DocumentID]; !ok {
+					continue
+				}
+				result.RelevantRetrieved = true
+				result.FirstRelevantRank = rank + 1
+				break
+			}
+		}
 		for _, item := range results {
 			if result.MinimumDistance == nil || item.Distance < *result.MinimumDistance {
 				distance := item.Distance
@@ -161,6 +189,14 @@ func Evaluate(ctx context.Context, searcher retrieval.Searcher, cases []Case, th
 			} else {
 				thresholdReport.CorrectRefusals++
 			}
+			caseResult := caseResults[index]
+			if len(evaluationCase.ExpectedDocumentIDs) > 0 {
+				thresholdReport.LabeledDocumentCases++
+				if caseResult.RelevantRetrieved {
+					thresholdReport.DocumentHits++
+					thresholdReport.MRR += 1 / float64(caseResult.FirstRelevantRank)
+				}
+			}
 		}
 		if thresholdReport.ExpectedRelevant > 0 {
 			thresholdReport.Recall = float64(thresholdReport.RelevantHits) / float64(thresholdReport.ExpectedRelevant)
@@ -171,7 +207,25 @@ func Evaluate(ctx context.Context, searcher retrieval.Searcher, cases []Case, th
 		if thresholdReport.Total > 0 {
 			thresholdReport.Accuracy = float64(thresholdReport.RelevantHits+thresholdReport.CorrectRefusals) / float64(thresholdReport.Total)
 		}
+		if thresholdReport.LabeledDocumentCases > 0 {
+			thresholdReport.DocumentRecall = float64(thresholdReport.DocumentHits) / float64(thresholdReport.LabeledDocumentCases)
+			thresholdReport.MRR /= float64(thresholdReport.LabeledDocumentCases)
+		}
 		report.Thresholds = append(report.Thresholds, thresholdReport)
 	}
 	return report, nil
+}
+
+func validateDocumentIDs(documentIDs []int64) error {
+	if len(documentIDs) == 0 {
+		return nil
+	}
+	ids := append([]int64(nil), documentIDs...)
+	sort.Slice(ids, func(left, right int) bool { return ids[left] < ids[right] })
+	for index, documentID := range ids {
+		if documentID <= 0 || index > 0 && ids[index-1] == documentID {
+			return ErrInvalidCase
+		}
+	}
+	return nil
 }
