@@ -587,6 +587,10 @@ async function openDocumentPreview(item: DocumentItem) {
   }
 }
 
+function chunkKindLabel(source: Source): string {
+  return source.chunkKind === "summary" ? "文档摘要" : `第 ${source.position + 1} 段`;
+}
+
 async function loadMoreDocumentPreview() {
   const knowledgeBaseID = selectedKnowledgeBaseId.value;
   const item = selectedDocument.value;
@@ -2829,7 +2833,7 @@ onUnmounted(() => {
                       <div v-if="traceSources(message, trace).length" class="agent-trace-sources">
                         <span>本次引用：</span>
                         <button v-for="source in traceSources(message, trace)" :key="sourceKey(source)" type="button" @click="openSource(source)">
-                          {{ source.originalFilename || "未命名文档" }} · 第 {{ source.position + 1 }} 段
+                          {{ source.originalFilename || "未命名文档" }} · {{ chunkKindLabel(source) }}
                         </button>
                       </div>
                     </template>
@@ -2899,7 +2903,7 @@ onUnmounted(() => {
                 <div class="source-list">
                   <button v-for="(source, sourceIndex) in message.sources" :key="`${source.documentId}-${source.position}`" class="source-card" type="button" @click="openSource(source)">
                     <span class="source-card-index">{{ String(sourceIndex + 1).padStart(2, "0") }}</span>
-                    <span class="source-card-body"><strong>{{ source.originalFilename || "未命名文档" }} <em :class="`source-match source-match--${source.matchType || 'unknown'}`">{{ matchTypeLabel(source.matchType) }}</em></strong><small v-if="source.headingPath" class="source-heading-path">{{ source.headingPath }}</small><small>第 {{ source.position + 1 }} 段 · {{ sourceScoreLabel(source) }}</small><span>{{ sourcePreview(source.content) }}</span></span>
+                    <span class="source-card-body"><strong>{{ source.originalFilename || "未命名文档" }} <em :class="`source-match source-match--${source.matchType || 'unknown'}`">{{ matchTypeLabel(source.matchType) }}</em></strong><small v-if="source.headingPath" class="source-heading-path">{{ source.headingPath }}</small><small>{{ chunkKindLabel(source) }} · {{ sourceScoreLabel(source) }}</small><span>{{ sourcePreview(source.content) }}</span></span>
                     <span class="source-card-arrow">↗</span>
                   </button>
                 </div>
@@ -3038,7 +3042,7 @@ onUnmounted(() => {
         </header>
         <div class="source-panel-meta">
           <strong>{{ selectedSource.originalFilename || "未命名文档" }}</strong>
-          <span v-if="selectedSource.headingPath" class="source-heading-path">{{ selectedSource.headingPath }}</span><span>第 {{ selectedSource.position + 1 }} 段 · {{ matchTypeLabel(selectedSource.matchType) }} · {{ sourceScoreLabel(selectedSource) }}</span>
+          <span v-if="selectedSource.headingPath" class="source-heading-path">{{ selectedSource.headingPath }}</span><span>{{ chunkKindLabel(selectedSource) }} · {{ matchTypeLabel(selectedSource.matchType) }} · {{ sourceScoreLabel(selectedSource) }}</span>
         </div>
         <div class="source-panel-content"><p v-if="sourceLoading">正在读取引用原文…</p><template v-else><p>{{ sourceDisplayContent(selectedSource) }}</p><small v-if="selectedSource.contentTruncated">历史记录只保存了引用片段预览，原文已被截断。</small></template></div>
         <div class="source-panel-actions"><button class="source-copy-button" type="button" @click="copySource(selectedSource)">{{ copiedSourceKey === sourceKey(selectedSource) ? "已复制原文" : "复制原文" }}</button></div>

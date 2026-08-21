@@ -302,6 +302,13 @@ func TestHybridServiceKeepsSummaryAndTextAtSamePositionDistinct(t *testing.T) {
 	}
 }
 
+func TestContextContentLabelsSummaryHits(t *testing.T) {
+	content := retrieval.ContextContent(retrieval.Result{ChunkKind: "summary", Content: "文档摘要内容"})
+	if content != "[文档摘要]\n文档摘要内容" {
+		t.Fatalf("summary prompt content = %q", content)
+	}
+}
+
 func TestHybridServiceExpandsCandidatesBeforeReranking(t *testing.T) {
 	store := &candidateChunkStoreStub{}
 	reranker := &rerankerStub{}

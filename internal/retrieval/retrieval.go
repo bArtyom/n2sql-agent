@@ -348,6 +348,9 @@ func (s *Service) searchWithOptions(ctx context.Context, knowledgeBaseID int64, 
 // ContextContent formats one hit and its nearby chunks for a model prompt.
 // Ranking fields stay on the original result; only the prompt text expands.
 func ContextContent(result Result) string {
+	if result.ChunkKind == "summary" {
+		return "[文档摘要]\n" + result.Content
+	}
 	if result.ParentContent != "" {
 		return "[父块上下文]\n" + result.ParentContent + "\n\n[命中片段]\n" + result.Content
 	}
