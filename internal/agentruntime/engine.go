@@ -235,6 +235,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 	result := Result{Run: run}
 	emitter := newEventEmitter(runID, sink)
 	seenToolCalls := make(map[string]struct{})
+	loopWarnings := make(map[string]struct{})
 	if err := emitter.emit(agent.EventRunStarted, 0, map[string]any{
 		"status": string(agent.RunRunning),
 	}); err != nil {
@@ -347,7 +348,32 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				return addToolFailureWithEvents(result, toolCall.Function.Name, err, emitter)
 			}
 			if _, repeated := seenToolCalls[callKey]; repeated && !e.allowRepeatedToolCalls {
-				return completeWithAnswer(result, emitter, "已检测到模型重复调用相同工具和参数，本轮已安全停止，避免重复检索。")
+				if _, warned := loopWarnings[callKey]; !warned {
+					loopWarnings[callKey] = struct{}{}
+					if err := emitter.emit(agent.EventLoopDetected, len(run.Steps())+1, map[string]any{
+						"tool_name":    toolCall.Function.Name,
+						"arguments":    boundedEventText(toolCall.Function.Arguments),
+						"action":       "warn_model",
+						"repeat_count": 2,
+					}); err != nil {
+						return finishError(result, err)
+					}
+					toolContent, feedbackErr := e.recoverToolFailure(&result, emitter, toolCall, ErrRepeatedToolCall, "检测到相同工具和参数重复调用，已提醒模型改写查询或直接回答。")
+					if feedbackErr != nil {
+						return finishErrorWithEvents(result, feedbackErr, emitter)
+					}
+					conversation = append(conversation, modelclient.ChatMessage{Role: "tool", ToolCallID: toolCall.ID, Content: toolContent})
+					continue
+				}
+				if err := emitter.emit(agent.EventLoopDetected, len(run.Steps())+1, map[string]any{
+					"tool_name":    toolCall.Function.Name,
+					"arguments":    boundedEventText(toolCall.Function.Arguments),
+					"action":       "stop_run",
+					"repeat_count": 3,
+				}); err != nil {
+					return finishError(result, err)
+				}
+				return completeWithAnswer(result, emitter, "已检测到模型持续重复调用相同工具和参数，本轮已安全停止，避免无限循环。")
 			}
 			seenToolCalls[callKey] = struct{}{}
 

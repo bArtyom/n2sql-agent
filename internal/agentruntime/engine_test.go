@@ -413,8 +413,8 @@ func TestEngineStopsRepeatedIdenticalToolCall(t *testing.T) {
 	if result.Run.Status() != agent.RunSucceeded || !strings.Contains(result.Run.FinalAnswer(), "重复调用") {
 		t.Fatalf("run status = %s, answer = %q", result.Run.Status(), result.Run.FinalAnswer())
 	}
-	if modelCalls != 2 || string(tool.args) != `{"query":"年假"}` {
-		t.Fatalf("model calls = %d, tool args = %s, want two model calls and one tool call", modelCalls, tool.args)
+	if modelCalls != 3 || string(tool.args) != `{"query":"年假"}` {
+		t.Fatalf("model calls = %d, tool args = %s, want three model calls and one tool call", modelCalls, tool.args)
 	}
 }
 
