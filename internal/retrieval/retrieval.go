@@ -388,6 +388,9 @@ func (s *Service) expandContext(ctx context.Context, knowledgeBaseID int64, resu
 		references := make([]documentchunk.ChunkReference, 0, len(results))
 		seen := make(map[documentchunk.ChunkReference]struct{}, len(results))
 		for _, result := range results {
+			if result.ChunkKind == "summary" {
+				continue
+			}
 			reference := documentchunk.ChunkReference{DocumentID: result.DocumentID, Position: result.Position}
 			if _, exists := seen[reference]; exists {
 				continue
@@ -406,6 +409,9 @@ func (s *Service) expandContext(ctx context.Context, knowledgeBaseID int64, resu
 			return nil, fmt.Errorf("expand retrieval context: %w", err)
 		}
 		reference := documentchunk.ChunkReference{DocumentID: result.DocumentID, Position: result.Position}
+		if result.ChunkKind == "summary" {
+			continue
+		}
 		if parent, found := parents[reference]; found {
 			expanded[index].ParentContent = parent.Content
 			expanded[index].ParentPosition = parent.Position

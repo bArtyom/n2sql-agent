@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
@@ -108,6 +110,16 @@ func main() {
 	knowledgeBaseService := knowledgebase.NewServiceWithInvalidator(knowledgeBaseStore, fileStore, searchService)
 	answerService := rag.NewService(searchService, chatService)
 	documentSummaryService := documentsummary.NewService(chunkStore, documentStore, chatService, cfg.DocumentSummaryInputChars)
+	documentSummaryService.SetSummaryIndexer(func(ctx context.Context, knowledgeBaseID, documentID int64, content string) error {
+		embeddings, err := embeddingService.Embed(ctx, []string{content})
+		if err != nil {
+			return fmt.Errorf("embed document summary: %w", err)
+		}
+		if len(embeddings.Data) != 1 || len(embeddings.Data[0].Vector) == 0 {
+			return errors.New("embedding provider returned no summary vector")
+		}
+		return chunkStore.ReplaceSummary(ctx, documentID, content, embeddings.Data[0].Vector)
+	})
 	documentSummaryAsync := documentsummary.NewAsyncService(documentSummaryService, 1)
 	documentSummaryAsync.Run(context.Background())
 	runner := worker.NewRunnerWithMetricsAndInvalidator(worker.NewPostgresStore(db), processor, metricsRegistry, searchService)

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -134,11 +135,17 @@ type Chat interface {
 	ChatMessages(context.Context, []modelclient.ChatMessage) (modelclient.ChatResponse, error)
 }
 
+// SummaryIndexer stores the generated summary in the retrieval index. It is
+// deliberately an optional callback so summary generation stays independent
+// from the chunk/embedding implementation.
+type SummaryIndexer func(context.Context, int64, int64, string) error
+
 type Service struct {
 	source        Source
 	store         Store
 	chat          Chat
 	maxInputChars int
+	indexer       SummaryIndexer
 }
 
 func NewService(source Source, store Store, chat Chat, maxInputChars int) *Service {
@@ -146,6 +153,12 @@ func NewService(source Source, store Store, chat Chat, maxInputChars int) *Servi
 		maxInputChars = 12000
 	}
 	return &Service{source: source, store: store, chat: chat, maxInputChars: maxInputChars}
+}
+
+func (s *Service) SetSummaryIndexer(indexer SummaryIndexer) {
+	if s != nil {
+		s.indexer = indexer
+	}
 }
 
 func (s *Service) Status(ctx context.Context, knowledgeBaseID, documentID int64) (Summary, error) {
@@ -183,6 +196,13 @@ func (s *Service) generateAndSave(ctx context.Context, knowledgeBaseID, document
 	}
 	if err := s.store.SaveSummary(ctx, knowledgeBaseID, documentID, content); err != nil {
 		return Result{}, fmt.Errorf("save document summary: %w", err)
+	}
+	if s.indexer != nil {
+		if err := s.indexer(ctx, knowledgeBaseID, documentID, content); err != nil {
+			// The durable summary remains usable by document_summary even if
+			// embedding/indexing is temporarily unavailable.
+			slog.WarnContext(ctx, "document_summary_index_failed", "knowledge_base_id", knowledgeBaseID, "document_id", documentID, "error", err)
+		}
 	}
 	return Result{Content: content}, nil
 }

@@ -72,6 +72,24 @@ func TestServiceGeneratesAndCachesDocumentSummary(t *testing.T) {
 	}
 }
 
+func TestServiceIndexesGeneratedSummaryAfterSavingIt(t *testing.T) {
+	store := &storeStub{}
+	service := documentsummary.NewService(sourceStub{document: documentsummary.Document{Chunks: []string{"正文内容"}}}, store, &chatStub{}, 1000)
+	var indexedKB, indexedDocument int64
+	var indexedContent string
+	service.SetSummaryIndexer(func(_ context.Context, knowledgeBaseID, documentID int64, content string) error {
+		indexedKB, indexedDocument, indexedContent = knowledgeBaseID, documentID, content
+		return nil
+	})
+
+	if _, err := service.Summarize(context.Background(), 7, 9); err != nil {
+		t.Fatalf("summarize error = %v", err)
+	}
+	if indexedKB != 7 || indexedDocument != 9 || indexedContent != "这是文档摘要。" {
+		t.Fatalf("index callback = (%d, %d, %q)", indexedKB, indexedDocument, indexedContent)
+	}
+}
+
 func TestServiceUsesBoundedMapReduceForLongDocuments(t *testing.T) {
 	store := &storeStub{}
 	chat := &chatStub{}
