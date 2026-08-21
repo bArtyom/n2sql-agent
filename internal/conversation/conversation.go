@@ -98,6 +98,7 @@ type SourceReference struct {
 	DocumentID       int64   `json:"documentId"`
 	OriginalFilename string  `json:"originalFilename,omitempty"`
 	Position         int     `json:"position"`
+	ChunkKind        string  `json:"chunkKind,omitempty"`
 	Content          string  `json:"content"`
 	HeadingPath      string  `json:"headingPath,omitempty"`
 	ContentTruncated bool    `json:"contentTruncated,omitempty"`

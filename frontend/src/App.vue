@@ -34,6 +34,7 @@ type Source = {
   documentId: number;
   originalFilename?: string;
   position: number;
+  chunkKind?: "text" | "summary" | string;
   content: string;
   headingPath?: string;
   contentTruncated?: boolean;
@@ -694,7 +695,9 @@ function closeSourceOnEscape(event: KeyboardEvent) {
 }
 
 function sourceKey(source: Source): string {
-  return `${source.documentId}:${source.position}`;
+  return source.chunkKind === "summary"
+    ? `${source.documentId}:${source.position}:summary`
+    : `${source.documentId}:${source.position}`;
 }
 
 function toggleDocument(documentID: number) {

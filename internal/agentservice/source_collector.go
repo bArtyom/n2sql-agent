@@ -89,6 +89,9 @@ func isKnowledgeEvidenceTool(name string) bool {
 }
 
 func retrievalSourceKey(source retrieval.Result) string {
+	if source.ChunkKind == "summary" {
+		return fmt.Sprintf("%d:%d:summary", source.DocumentID, source.Position)
+	}
 	return fmt.Sprintf("%d:%d", source.DocumentID, source.Position)
 }
 

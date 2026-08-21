@@ -420,7 +420,7 @@ func conversationMetadataFromAgentResponse(response agentservice.Response) conve
 			if len(metadata.Sources) >= maxPersistedSources {
 				break
 			}
-			key := fmt.Sprintf("%d:%d", source.DocumentID, source.Position)
+			key := sourceReferenceKey(source)
 			if _, exists := seen[key]; exists {
 				continue
 			}
@@ -431,6 +431,7 @@ func conversationMetadataFromAgentResponse(response agentservice.Response) conve
 				DocumentID:       source.DocumentID,
 				OriginalFilename: source.OriginalFilename,
 				Position:         source.Position,
+				ChunkKind:        source.ChunkKind,
 				Content:          content,
 				HeadingPath:      source.HeadingPath,
 				ContentTruncated: contentTruncated,
@@ -500,7 +501,7 @@ func boundedTraceSourceKeys(keys []string, sources []retrieval.Result) []string 
 	}
 	allowed := make(map[string]struct{}, len(sources))
 	for _, source := range sources {
-		allowed[fmt.Sprintf("%d:%d", source.DocumentID, source.Position)] = struct{}{}
+		allowed[sourceReferenceKey(source)] = struct{}{}
 	}
 	result := make([]string, 0, len(keys))
 	seen := make(map[string]struct{}, len(keys))
@@ -518,6 +519,13 @@ func boundedTraceSourceKeys(keys []string, sources []retrieval.Result) []string 
 		result = append(result, key)
 	}
 	return result
+}
+
+func sourceReferenceKey(source retrieval.Result) string {
+	if source.ChunkKind == "summary" {
+		return fmt.Sprintf("%d:%d:summary", source.DocumentID, source.Position)
+	}
+	return fmt.Sprintf("%d:%d", source.DocumentID, source.Position)
 }
 
 func truncateMetadataValue(value string) string {
