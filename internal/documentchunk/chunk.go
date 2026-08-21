@@ -129,14 +129,16 @@ type RangeResult struct {
 }
 
 type ParentChunk struct {
-	Position int
-	Content  string
+	Position    int
+	Content     string
+	HeadingPath string
 }
 
 type ChildChunk struct {
 	Position       int
 	ParentPosition int
 	Content        string
+	HeadingPath    string
 }
 
 // ChunkReference identifies one child chunk in a document. It is used by
@@ -151,6 +153,7 @@ type SearchResult struct {
 	OriginalFilename  string         `json:"originalFilename,omitempty"`
 	Position          int            `json:"position"`
 	Content           string         `json:"content"`
+	HeadingPath       string         `json:"headingPath,omitempty"`
 	ParentContent     string         `json:"parentContent,omitempty"`
 	ParentPosition    int            `json:"parentPosition,omitempty"`
 	ContextBefore     []ContextChunk `json:"contextBefore,omitempty"`
@@ -182,11 +185,12 @@ func (s *PostgresStore) Read(ctx context.Context, knowledgeBaseID, documentID in
 		return SearchResult{}, ErrChunkNotFound
 	}
 	var result SearchResult
+	var headingPath string
 	var parentContent sql.NullString
 	var parentPosition sql.NullInt64
 	err := s.db.QueryRowContext(ctx, `
 		SELECT chunks.document_id, documents.original_filename, chunks.position,
-		       chunks.content, parents.content, parents.position
+		       chunks.content, chunks.heading_path, parents.content, parents.position
 		FROM document_chunks AS chunks
 		JOIN documents ON documents.id = chunks.document_id
 		JOIN knowledge_bases AS kb ON kb.id = documents.knowledge_base_id
@@ -201,6 +205,7 @@ func (s *PostgresStore) Read(ctx context.Context, knowledgeBaseID, documentID in
 		&result.OriginalFilename,
 		&result.Position,
 		&result.Content,
+		&headingPath,
 		&parentContent,
 		&parentPosition,
 	)
@@ -216,6 +221,7 @@ func (s *PostgresStore) Read(ctx context.Context, knowledgeBaseID, documentID in
 	if parentPosition.Valid {
 		result.ParentPosition = int(parentPosition.Int64)
 	}
+	result.HeadingPath = headingPath
 	return result, nil
 }
 
@@ -228,7 +234,7 @@ func (s *PostgresStore) ReadRange(ctx context.Context, knowledgeBaseID, document
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT chunks.document_id, documents.original_filename, chunks.position,
-		       chunks.content
+		       chunks.content, chunks.heading_path
 		FROM document_chunks AS chunks
 		JOIN documents ON documents.id = chunks.document_id
 		JOIN knowledge_bases AS kb ON kb.id = documents.knowledge_base_id
@@ -247,7 +253,7 @@ func (s *PostgresStore) ReadRange(ctx context.Context, knowledgeBaseID, document
 	bytesUsed := 0
 	for rows.Next() {
 		var chunk SearchResult
-		if err := rows.Scan(&chunk.DocumentID, &chunk.OriginalFilename, &chunk.Position, &chunk.Content); err != nil {
+		if err := rows.Scan(&chunk.DocumentID, &chunk.OriginalFilename, &chunk.Position, &chunk.Content, &chunk.HeadingPath); err != nil {
 			return RangeResult{}, fmt.Errorf("scan document chunk range: %w", err)
 		}
 		if len(result.Chunks) >= limit {
@@ -313,7 +319,7 @@ func (s *PostgresStore) Replace(ctx context.Context, documentID int64, chunks []
 		if len(embeddings) != 0 {
 			embedding = vectorLiteral(embeddings[position])
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO document_chunks (document_id, position, content, embedding) VALUES ($1, $2, $3, $4::vector)`, documentID, position, content, embedding); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO document_chunks (document_id, position, content, heading_path, embedding) VALUES ($1, $2, $3, '', $4::vector)`, documentID, position, content, embedding); err != nil {
 			return fmt.Errorf("create document chunk: %w", err)
 		}
 	}
@@ -344,7 +350,7 @@ func (s *PostgresStore) ReplaceHierarchical(ctx context.Context, documentID int6
 	}
 	for _, parent := range parents {
 		var parentID int64
-		err := tx.QueryRowContext(ctx, `INSERT INTO document_parent_chunks (document_id, position, content) VALUES ($1, $2, $3) RETURNING id`, documentID, parent.Position, parent.Content).Scan(&parentID)
+		err := tx.QueryRowContext(ctx, `INSERT INTO document_parent_chunks (document_id, position, content, heading_path) VALUES ($1, $2, $3, $4) RETURNING id`, documentID, parent.Position, parent.Content, parent.HeadingPath).Scan(&parentID)
 		if err != nil {
 			return fmt.Errorf("create document parent chunk: %w", err)
 		}
@@ -355,7 +361,7 @@ func (s *PostgresStore) ReplaceHierarchical(ctx context.Context, documentID int6
 		if !ok {
 			return fmt.Errorf("child position %d references unknown parent position %d", child.Position, child.ParentPosition)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO document_chunks (document_id, position, parent_chunk_id, content, embedding) VALUES ($1, $2, $3, $4, $5::vector)`, documentID, child.Position, parentID, child.Content, vectorLiteral(embeddings[index])); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO document_chunks (document_id, position, parent_chunk_id, content, heading_path, embedding) VALUES ($1, $2, $3, $4, $5, $6::vector)`, documentID, child.Position, parentID, child.Content, child.HeadingPath, vectorLiteral(embeddings[index])); err != nil {
 			return fmt.Errorf("create document child chunk: %w", err)
 		}
 	}
@@ -369,11 +375,11 @@ func (s *PostgresStore) ReplaceHierarchical(ctx context.Context, documentID int6
 // not an error so legacy chunks can continue through neighbor expansion.
 func (s *PostgresStore) ParentForChunk(ctx context.Context, knowledgeBaseID, documentID int64, position int) (ParentChunk, bool, error) {
 	var parent ParentChunk
-	err := s.db.QueryRowContext(ctx, `SELECT parents.position, parents.content
+	err := s.db.QueryRowContext(ctx, `SELECT parents.position, parents.content, parents.heading_path
 		FROM document_chunks AS chunks
 		JOIN document_parent_chunks AS parents ON parents.id = chunks.parent_chunk_id
 		JOIN documents AS documents ON documents.id = chunks.document_id
-		WHERE documents.knowledge_base_id = $1 AND chunks.document_id = $2 AND chunks.position = $3`, knowledgeBaseID, documentID, position).Scan(&parent.Position, &parent.Content)
+		WHERE documents.knowledge_base_id = $1 AND chunks.document_id = $2 AND chunks.position = $3`, knowledgeBaseID, documentID, position).Scan(&parent.Position, &parent.Content, &parent.HeadingPath)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ParentChunk{}, false, nil
 	}
@@ -400,7 +406,7 @@ func (s *PostgresStore) ParentsForChunks(ctx context.Context, knowledgeBaseID in
 		WITH requested AS (
 			SELECT * FROM unnest($2::bigint[], $3::bigint[]) AS requested(document_id, child_position)
 		)
-		SELECT chunks.document_id, chunks.position, parents.position, parents.content
+		SELECT chunks.document_id, chunks.position, parents.position, parents.content, parents.heading_path
 		FROM requested
 		JOIN document_chunks AS chunks
 		  ON chunks.document_id = requested.document_id
@@ -415,7 +421,7 @@ func (s *PostgresStore) ParentsForChunks(ctx context.Context, knowledgeBaseID in
 	for rows.Next() {
 		var reference ChunkReference
 		var parent ParentChunk
-		if err := rows.Scan(&reference.DocumentID, &reference.Position, &parent.Position, &parent.Content); err != nil {
+		if err := rows.Scan(&reference.DocumentID, &reference.Position, &parent.Position, &parent.Content, &parent.HeadingPath); err != nil {
 			return nil, fmt.Errorf("scan parent chunk: %w", err)
 		}
 		parents[reference] = parent
@@ -432,7 +438,7 @@ func (s *PostgresStore) Search(ctx context.Context, knowledgeBaseID int64, embed
 
 func (s *PostgresStore) SearchWithDocuments(ctx context.Context, knowledgeBaseID int64, embedding []float32, limit int, documentIDs []int64) ([]SearchResult, error) {
 	queryVector := vectorLiteral(embedding)
-	query := "SELECT chunks.document_id, documents.original_filename, chunks.position, chunks.content, " +
+	query := "SELECT chunks.document_id, documents.original_filename, chunks.position, chunks.content, chunks.heading_path, " +
 		"chunks.embedding <=> $2::vector AS distance " +
 		"FROM document_chunks AS chunks JOIN documents AS documents ON documents.id = chunks.document_id " +
 		"WHERE documents.knowledge_base_id = $1 AND chunks.embedding IS NOT NULL " +
@@ -447,7 +453,7 @@ func (s *PostgresStore) SearchWithDocuments(ctx context.Context, knowledgeBaseID
 	results := make([]SearchResult, 0, limit)
 	for rows.Next() {
 		var result SearchResult
-		if err := rows.Scan(&result.DocumentID, &result.OriginalFilename, &result.Position, &result.Content, &result.Distance); err != nil {
+		if err := rows.Scan(&result.DocumentID, &result.OriginalFilename, &result.Position, &result.Content, &result.HeadingPath, &result.Distance); err != nil {
 			return nil, fmt.Errorf("scan filtered document chunk: %w", err)
 		}
 		result.MatchType = "vector"
@@ -470,14 +476,14 @@ func (s *PostgresStore) SearchKeywordWithDocuments(ctx context.Context, knowledg
 	sqlQuery := "WITH search_query AS (" +
 		"SELECT plainto_tsquery('simple', $2) AS terms" +
 		"), scored AS (" +
-		"SELECT chunks.document_id, documents.original_filename, chunks.position, chunks.content, " +
+		"SELECT chunks.document_id, documents.original_filename, chunks.position, chunks.content, chunks.heading_path, " +
 		"ts_rank_cd(chunks.content_search, search_query.terms) AS keyword_score, " +
 		"CASE WHEN lower(chunks.content) LIKE $3 ESCAPE E'\\\\' THEN 1.0 ELSE 0.0 END AS exact_score " +
 		"FROM document_chunks AS chunks JOIN documents AS documents ON documents.id = chunks.document_id " +
 		"CROSS JOIN search_query WHERE documents.knowledge_base_id = $1 " +
 		"AND (chunks.content_search @@ search_query.terms OR lower(chunks.content) LIKE $3 ESCAPE E'\\\\') " +
 		"AND ($4::bigint[] IS NULL OR chunks.document_id = ANY($4::bigint[]))" +
-		") SELECT document_id, original_filename, position, content, 0::float8 AS distance, GREATEST(keyword_score, exact_score) AS keyword_score " +
+		") SELECT document_id, original_filename, position, content, heading_path, 0::float8 AS distance, GREATEST(keyword_score, exact_score) AS keyword_score " +
 		"FROM scored ORDER BY exact_score DESC, keyword_score DESC, position, document_id LIMIT $5"
 	rows, err := s.db.QueryContext(ctx, sqlQuery, knowledgeBaseID, query, exactPattern, documentIDsArgument(documentIDs), limit)
 	if err != nil {
@@ -488,7 +494,7 @@ func (s *PostgresStore) SearchKeywordWithDocuments(ctx context.Context, knowledg
 	results := make([]SearchResult, 0, limit)
 	for rows.Next() {
 		var result SearchResult
-		if err := rows.Scan(&result.DocumentID, &result.OriginalFilename, &result.Position, &result.Content, &result.Distance, &result.KeywordScore); err != nil {
+		if err := rows.Scan(&result.DocumentID, &result.OriginalFilename, &result.Position, &result.Content, &result.HeadingPath, &result.Distance, &result.KeywordScore); err != nil {
 			return nil, fmt.Errorf("scan filtered keyword document chunk: %w", err)
 		}
 		result.MatchType = "keyword"

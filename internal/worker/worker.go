@@ -56,7 +56,7 @@ type TextExtractor interface {
 type TextSplitter interface{ Split(string) []string }
 type DocumentTextSplitter interface {
 	TextSplitter
-	SplitDocument(string, string) []string
+	SplitDocumentParts(string, string) []documentchunk.StructuredPart
 }
 type ChunkStore interface {
 	Replace(context.Context, int64, []string, [][]float32) error
@@ -76,10 +76,11 @@ func NewChunkingProcessor(extractor TextExtractor, splitter TextSplitter, chunks
 			return err
 		}
 		parts := splitDocument(splitter, task, text)
-		if len(parts) == 0 {
+		contents := structuredContents(parts)
+		if len(contents) == 0 {
 			return Permanent(errors.New("document contains no chunks"))
 		}
-		return chunks.Replace(ctx, task.DocumentID, parts, nil)
+		return chunks.Replace(ctx, task.DocumentID, contents, nil)
 	}
 }
 
@@ -90,14 +91,15 @@ func NewEmbeddingChunkingProcessor(extractor TextExtractor, splitter TextSplitte
 			return err
 		}
 		parts := splitDocument(splitter, task, text)
-		if len(parts) == 0 {
+		contents := structuredContents(parts)
+		if len(contents) == 0 {
 			return Permanent(errors.New("document contains no chunks"))
 		}
-		embeddings, err := embedChunks(ctx, embedder, parts)
+		embeddings, err := embedChunks(ctx, embedder, contents)
 		if err != nil {
 			return fmt.Errorf("embed document chunks: %w", err)
 		}
-		return chunks.Replace(ctx, task.DocumentID, parts, embeddings)
+		return chunks.Replace(ctx, task.DocumentID, contents, embeddings)
 	}
 }
 
@@ -117,10 +119,10 @@ func NewEmbeddingHierarchicalChunkingProcessor(extractor TextExtractor, parentSp
 		parents := make([]documentchunk.ParentChunk, len(parentParts))
 		children := make([]documentchunk.ChildChunk, 0)
 		for parentPosition, parentContent := range parentParts {
-			parents[parentPosition] = documentchunk.ParentChunk{Position: parentPosition, Content: parentContent}
-			childParts := childSplitter.Split(parentContent)
+			parents[parentPosition] = documentchunk.ParentChunk{Position: parentPosition, Content: parentContent.Content, HeadingPath: parentContent.HeadingPath}
+			childParts := childSplitter.Split(parentContent.Content)
 			for _, childContent := range childParts {
-				children = append(children, documentchunk.ChildChunk{Position: len(children), ParentPosition: parentPosition, Content: childContent})
+				children = append(children, documentchunk.ChildChunk{Position: len(children), ParentPosition: parentPosition, Content: childContent, HeadingPath: parentContent.HeadingPath})
 			}
 		}
 		if len(children) == 0 {
@@ -138,11 +140,26 @@ func NewEmbeddingHierarchicalChunkingProcessor(extractor TextExtractor, parentSp
 	}
 }
 
-func splitDocument(splitter TextSplitter, task Task, text string) []string {
+func splitDocument(splitter TextSplitter, task Task, text string) []documentchunk.StructuredPart {
 	if structured, ok := splitter.(DocumentTextSplitter); ok {
-		return structured.SplitDocument(filepath.Base(task.StoragePath), text)
+		return structured.SplitDocumentParts(filepath.Base(task.StoragePath), text)
 	}
-	return splitter.Split(text)
+	parts := splitter.Split(text)
+	result := make([]documentchunk.StructuredPart, 0, len(parts))
+	for _, part := range parts {
+		result = append(result, documentchunk.StructuredPart{Content: part})
+	}
+	return result
+}
+
+func structuredContents(parts []documentchunk.StructuredPart) []string {
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part.Content != "" {
+			result = append(result, part.Content)
+		}
+	}
+	return result
 }
 
 func embedChunks(ctx context.Context, embedder Embedder, parts []string) ([][]float32, error) {

@@ -13,6 +13,7 @@ type documentChunkResponse struct {
 	OriginalFilename string `json:"originalFilename,omitempty"`
 	Position         int    `json:"position"`
 	Content          string `json:"content"`
+	HeadingPath      string `json:"headingPath,omitempty"`
 	ParentContent    string `json:"parentContent,omitempty"`
 	ParentPosition   int    `json:"parentPosition,omitempty"`
 }
@@ -55,6 +56,7 @@ func NewDocumentChunk(reader documentchunk.Reader) http.Handler {
 			OriginalFilename: chunk.OriginalFilename,
 			Position:         chunk.Position,
 			Content:          chunk.Content,
+			HeadingPath:      chunk.HeadingPath,
 			ParentContent:    chunk.ParentContent,
 			ParentPosition:   chunk.ParentPosition,
 		})

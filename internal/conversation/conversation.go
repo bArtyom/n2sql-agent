@@ -99,6 +99,7 @@ type SourceReference struct {
 	OriginalFilename string  `json:"originalFilename,omitempty"`
 	Position         int     `json:"position"`
 	Content          string  `json:"content"`
+	HeadingPath      string  `json:"headingPath,omitempty"`
 	ContentTruncated bool    `json:"contentTruncated,omitempty"`
 	ParentContent    string  `json:"parentContent,omitempty"`
 	ParentPosition   int     `json:"parentPosition,omitempty"`

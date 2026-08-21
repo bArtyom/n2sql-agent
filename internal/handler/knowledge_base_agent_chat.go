@@ -432,6 +432,7 @@ func conversationMetadataFromAgentResponse(response agentservice.Response) conve
 				OriginalFilename: source.OriginalFilename,
 				Position:         source.Position,
 				Content:          content,
+				HeadingPath:      source.HeadingPath,
 				ContentTruncated: contentTruncated,
 				ParentContent:    parentContent,
 				ParentPosition:   source.ParentPosition,

@@ -20,6 +20,11 @@ type AdaptiveSplitter struct {
 	recursive *Splitter
 }
 
+type StructuredPart struct {
+	Content     string
+	HeadingPath string
+}
+
 func NewAdaptiveSplitter(size, overlap int) *AdaptiveSplitter {
 	return &AdaptiveSplitter{recursive: NewSplitter(size, overlap)}
 }
@@ -27,10 +32,24 @@ func NewAdaptiveSplitter(size, overlap int) *AdaptiveSplitter {
 // Split keeps the existing TextSplitter interface. Call SplitDocument when a
 // filename is available so heading-less documents get a useful virtual title.
 func (s *AdaptiveSplitter) Split(text string) []string {
-	return s.SplitDocument("文档", text)
+	parts := s.SplitDocumentParts("文档", text)
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		result = append(result, part.Content)
+	}
+	return result
 }
 
 func (s *AdaptiveSplitter) SplitDocument(filename, text string) []string {
+	parts := s.SplitDocumentParts(filename, text)
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		result = append(result, part.Content)
+	}
+	return result
+}
+
+func (s *AdaptiveSplitter) SplitDocumentParts(filename, text string) []StructuredPart {
 	if s == nil || s.recursive == nil || strings.TrimSpace(text) == "" {
 		return nil
 	}
@@ -178,35 +197,31 @@ func isHeuristicHeading(line string) bool {
 		allCapsHeading.MatchString(line)
 }
 
-func (s *AdaptiveSplitter) renderSections(sections []structuredSection) []string {
-	result := make([]string, 0, len(sections))
+func (s *AdaptiveSplitter) renderSections(sections []structuredSection) []StructuredPart {
+	result := make([]StructuredPart, 0, len(sections))
 	for _, section := range sections {
 		if strings.TrimSpace(section.content) == "" {
 			continue
 		}
 		path := strings.Join(section.path, " > ")
-		if path == "" {
-			path = "前言"
-		}
-		prefix := "结构路径：" + path
 		parts := s.recursive.Split(section.content)
 		if len(parts) == 0 {
 			continue
 		}
 		for _, part := range parts {
-			result = append(result, prefix+"\n\n"+part)
+			result = append(result, StructuredPart{Content: part, HeadingPath: path})
 		}
 	}
 	return result
 }
 
-func addVirtualPaths(filename string, parts []string) []string {
-	result := make([]string, 0, len(parts))
+func addVirtualPaths(filename string, parts []string) []StructuredPart {
+	result := make([]StructuredPart, 0, len(parts))
 	for index, part := range parts {
 		if strings.TrimSpace(part) == "" {
 			continue
 		}
-		result = append(result, "结构路径："+filename+" > 第 "+itoa(index+1)+" 段\n\n"+part)
+		result = append(result, StructuredPart{Content: part, HeadingPath: filename + " > 第 " + itoa(index+1) + " 段"})
 	}
 	return result
 }

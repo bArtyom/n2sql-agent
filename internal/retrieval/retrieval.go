@@ -409,6 +409,9 @@ func (s *Service) expandContext(ctx context.Context, knowledgeBaseID int64, resu
 		if parent, found := parents[reference]; found {
 			expanded[index].ParentContent = parent.Content
 			expanded[index].ParentPosition = parent.Position
+			if expanded[index].HeadingPath == "" {
+				expanded[index].HeadingPath = parent.HeadingPath
+			}
 			continue
 		}
 		if hasParentSearch && !hasBatchParentSearch {
@@ -419,6 +422,9 @@ func (s *Service) expandContext(ctx context.Context, knowledgeBaseID int64, resu
 			if found {
 				expanded[index].ParentContent = parent.Content
 				expanded[index].ParentPosition = parent.Position
+				if expanded[index].HeadingPath == "" {
+					expanded[index].HeadingPath = parent.HeadingPath
+				}
 				continue
 			}
 		}
