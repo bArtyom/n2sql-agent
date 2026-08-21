@@ -46,13 +46,13 @@ func (c *sourceCollector) observe(event agent.Event) {
 	if failed, _ := data["failed"].(bool); failed {
 		return
 	}
-	toolName, _ := data["tool_name"].(string)
-	if isKnowledgeTool(toolName) && data["no_relevant_results"] != true {
-		c.grounded = true
-	}
 	sources := decodeSources(data["sources"])
 	if len(sources) == 0 || len(c.sources) >= maxResponseSources {
 		return
+	}
+	toolName, _ := data["tool_name"].(string)
+	if isKnowledgeEvidenceTool(toolName) && data["no_relevant_results"] != true {
+		c.grounded = true
 	}
 	for _, source := range sources {
 		if len(c.sources) >= maxResponseSources {
@@ -70,6 +70,18 @@ func (c *sourceCollector) observe(event agent.Event) {
 func isKnowledgeTool(name string) bool {
 	switch name {
 	case "knowledge_search", "document_list", "document_info", "document_read", "document_summary":
+		return true
+	default:
+		return false
+	}
+}
+
+// isKnowledgeEvidenceTool separates content-bearing tools from metadata
+// tools. Listing a document proves only that it exists; it cannot ground a
+// factual answer in strict knowledge-base-only mode.
+func isKnowledgeEvidenceTool(name string) bool {
+	switch name {
+	case "knowledge_search", "document_read", "document_summary":
 		return true
 	default:
 		return false
