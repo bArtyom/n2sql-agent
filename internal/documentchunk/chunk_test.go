@@ -61,3 +61,44 @@ func TestAdaptiveSplitterDetectsHeuristicSections(t *testing.T) {
 		t.Fatalf("heuristic path missing: %q", chunks[1])
 	}
 }
+
+func TestAdaptiveSplitterDetectsMultilingualNumberedAndVisualSections(t *testing.T) {
+	splitter := documentchunk.NewAdaptiveSplitter(300, 0)
+	text := "1. Overview\n\nEnglish section.\n\n2.3 Details\n\nNested section.\n\nKAPITEL 3: Setup\n\nGerman section.\n\n---\n\nFINAL NOTES\n\nLast section."
+	chunks := splitter.SplitDocument("guide.txt", text)
+	if len(chunks) != 4 {
+		t.Fatalf("chunks = %#v, want four heuristic sections", chunks)
+	}
+	for _, want := range []string{"1. Overview", "2.3 Details", "KAPITEL 3: Setup", "FINAL NOTES"} {
+		found := false
+		for _, chunk := range chunks {
+			if strings.Contains(chunk, "结构路径："+want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing heuristic path %q in %#v", want, chunks)
+		}
+	}
+}
+
+func TestAdaptiveSplitterDoesNotSplitProtectedCodeHeading(t *testing.T) {
+	splitter := documentchunk.NewAdaptiveSplitter(300, 0)
+	text := "说明\n\n```text\n# not a heading\n1. not a section\n```\n\n第二章 真正章节\n\n正文。"
+	chunks := splitter.SplitDocument("guide.txt", text)
+	if len(chunks) != 2 {
+		t.Fatalf("chunks = %#v, want two sections", chunks)
+	}
+	if !strings.Contains(chunks[0], "# not a heading") || strings.Contains(chunks[0], "结构路径：# not a heading") {
+		t.Fatalf("protected code was treated as heading: %q", chunks[0])
+	}
+}
+
+func TestAdaptiveSplitterTreatsFormFeedAsPageBoundary(t *testing.T) {
+	splitter := documentchunk.NewAdaptiveSplitter(300, 0)
+	chunks := splitter.SplitDocument("scan.txt", "第一页内容\f第二页内容")
+	if len(chunks) != 2 {
+		t.Fatalf("chunks = %#v, want two page sections", chunks)
+	}
+}

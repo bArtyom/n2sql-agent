@@ -38,7 +38,9 @@ func (s *AdaptiveSplitter) SplitDocument(filename, text string) []string {
 	if filename == "" {
 		filename = "文档"
 	}
-	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\f", "\n"+pageBreakMarker+"\n")
+	lines := strings.Split(text, "\n")
 	if sections, ok := parseMarkdownSections(lines); ok {
 		return s.renderSections(sections)
 	}
@@ -55,7 +57,17 @@ type structuredSection struct {
 }
 
 var markdownHeading = regexp.MustCompile(`^(#{1,6})[ \t]+(.+?)\s*#*\s*$`)
-var heuristicHeading = regexp.MustCompile(`^(第[一二三四五六七八九十百千万0-9]+[章节篇部分].{0,80}|[一二三四五六七八九十]+、.{1,80}|[0-9]+[.)、][^。！？]{1,80}|[A-Z][A-Z0-9 _-]{3,80})$`)
+var (
+	chineseChapterHeading = regexp.MustCompile(`^第[ \t]*[一二三四五六七八九十百千万零〇0-9]+[ \t]*(?:章|节|節|部分|篇)[ \t]?.{0,200}$`)
+	chineseNumberHeading  = regexp.MustCompile(`^[一二三四五六七八九十]+、.{1,200}$`)
+	numberedHeading       = regexp.MustCompile(`^(?:\d+(?:\.\d+){0,3}\.?|[IVX]{1,5}\.)[ \t]+\S.{0,200}$`)
+	englishChapterHeading = regexp.MustCompile(`(?i)^(?:chapter|section|part)[ \t]+(?:\d+|[IVX]{1,5})[.:]?[ \t]+\S.{0,200}$`)
+	germanChapterHeading  = regexp.MustCompile(`(?i)^(?:kapitel|abschnitt|teil)[ \t]+(?:\d+|[IVX]{1,5})[.:]?[ \t]+\S.{0,200}$`)
+	allCapsHeading        = regexp.MustCompile(`^[A-ZÄÖÜ][A-ZÄÖÜ \t\-]{3,80}:?$`)
+	visualSeparator       = regexp.MustCompile(`^(?:-{3,}|={3,}|\*{3,}|_{3,})$`)
+)
+
+const pageBreakMarker = "\uE000DOCUMENT_PAGE_BREAK\uE001"
 
 func parseMarkdownSections(lines []string) ([]structuredSection, bool) {
 	var sections []structuredSection
@@ -100,6 +112,8 @@ func parseHeuristicSections(lines []string) ([]structuredSection, bool) {
 	var sections []structuredSection
 	var current *structuredSection
 	found := false
+	inFence := false
+	pageNumber := 1
 	flush := func() {
 		if current == nil || strings.TrimSpace(current.content) == "" {
 			return
@@ -109,7 +123,35 @@ func parseHeuristicSections(lines []string) ([]structuredSection, bool) {
 	}
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if heuristicHeading.MatchString(trimmed) {
+		if trimmed == pageBreakMarker {
+			flush()
+			pageNumber++
+			current = &structuredSection{path: []string{"第 " + itoa(pageNumber) + " 页"}}
+			found = true
+			continue
+		}
+		if strings.HasPrefix(trimmed, "```") {
+			if current == nil {
+				current = &structuredSection{}
+			}
+			current.content += line + "\n"
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			if current == nil {
+				current = &structuredSection{}
+			}
+			current.content += line + "\n"
+			continue
+		}
+		if visualSeparator.MatchString(trimmed) {
+			flush()
+			current = nil
+			found = true
+			continue
+		}
+		if isHeuristicHeading(trimmed) {
 			flush()
 			current = &structuredSection{path: []string{trimmed}}
 			found = true
@@ -122,6 +164,18 @@ func parseHeuristicSections(lines []string) ([]structuredSection, bool) {
 	}
 	flush()
 	return sections, found
+}
+
+func isHeuristicHeading(line string) bool {
+	if line == "" || len([]rune(line)) > 220 {
+		return false
+	}
+	return chineseChapterHeading.MatchString(line) ||
+		chineseNumberHeading.MatchString(line) ||
+		numberedHeading.MatchString(line) ||
+		englishChapterHeading.MatchString(line) ||
+		germanChapterHeading.MatchString(line) ||
+		allCapsHeading.MatchString(line)
 }
 
 func (s *AdaptiveSplitter) renderSections(sections []structuredSection) []string {
