@@ -498,7 +498,7 @@ func (s *PostgresStore) ClaimNext(ctx context.Context) (Run, error) {
 		UPDATE agent_runs AS run
 		SET status = 'running', attempt_count = attempt_count + 1,
 			started_at = CURRENT_TIMESTAMP, finished_at = NULL,
-			error_message = NULL,
+			error_message = NULL, stop_reason = NULL,
 			lease_until = CURRENT_TIMESTAMP + INTERVAL '5 minutes',
 			lease_token = md5(random()::text || clock_timestamp()::text || run.id::text),
 			heartbeat_at = CURRENT_TIMESTAMP,
@@ -858,7 +858,7 @@ func (s *PostgresStore) ResumeParentIfChildrenTerminal(ctx context.Context, pare
 		SELECT EXISTS (
 			SELECT 1 FROM agent_runs
 			WHERE parent_run_id = $1
-			  AND status NOT IN ('succeeded', 'failed', 'canceled')
+			  AND status NOT IN ('succeeded', 'failed', 'timeout', 'canceled')
 		)`, parentID).Scan(&unfinished); err != nil {
 		return false, fmt.Errorf("check child agent runs: %w", err)
 	}
