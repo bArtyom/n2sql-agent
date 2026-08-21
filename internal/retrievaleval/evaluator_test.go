@@ -13,6 +13,15 @@ type searcherStub struct {
 	distances map[string][]float64
 }
 
+type explainableSearcherStub struct{}
+
+func (explainableSearcherStub) Search(context.Context, int64, string, int) ([]retrieval.Result, error) {
+	return []retrieval.Result{
+		{DocumentID: 9, Position: 2, Distance: 0.2, MatchType: "hybrid", HeadingScore: 0.8},
+		{DocumentID: 4, Position: 1, Distance: 0.3, MatchType: "keyword"},
+	}, nil
+}
+
 func (s searcherStub) Search(_ context.Context, _ int64, query string, _ int) ([]retrieval.Result, error) {
 	results := make([]retrieval.Result, 0)
 	for index, distance := range s.distances[query] {
@@ -63,6 +72,19 @@ func TestEvaluateReportsDocumentHitAndReciprocalRank(t *testing.T) {
 	}
 	if !report.Thresholds[0].Cases[0].RelevantRetrieved || report.Thresholds[0].Cases[0].FirstRelevantRank != 2 {
 		t.Fatalf("case result = %#v, want hit at rank 2", report.Thresholds[0].Cases[0])
+	}
+}
+
+func TestEvaluateReportsHeadingPathEvidence(t *testing.T) {
+	report, err := retrievaleval.Evaluate(context.Background(), explainableSearcherStub{}, []retrievaleval.Case{{
+		ID: "heading", KnowledgeBaseID: 1, Question: "Windows 安装", ExpectedRelevant: true, ExpectedDocumentIDs: []int64{9},
+	}}, []float64{0.5})
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	result := report.Thresholds[0]
+	if result.HeadingPathHits != 1 || result.Cases[0].FirstRelevantMatchType != "hybrid" || result.Cases[0].FirstRelevantHeadingScore != 0.8 {
+		t.Fatalf("heading evidence = %#v, want one heading hit and hybrid first result", result)
 	}
 }
 

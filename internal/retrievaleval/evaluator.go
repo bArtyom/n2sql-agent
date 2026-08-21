@@ -34,12 +34,15 @@ type Case struct {
 }
 
 type CaseResult struct {
-	ID                string   `json:"id"`
-	ExpectedRelevant  bool     `json:"expected_relevant"`
-	Retrieved         int      `json:"retrieved"`
-	MinimumDistance   *float64 `json:"minimum_distance,omitempty"`
-	RelevantRetrieved bool     `json:"relevant_retrieved,omitempty"`
-	FirstRelevantRank int      `json:"first_relevant_rank,omitempty"`
+	ID                        string   `json:"id"`
+	ExpectedRelevant          bool     `json:"expected_relevant"`
+	Retrieved                 int      `json:"retrieved"`
+	MinimumDistance           *float64 `json:"minimum_distance,omitempty"`
+	RelevantRetrieved         bool     `json:"relevant_retrieved,omitempty"`
+	FirstRelevantRank         int      `json:"first_relevant_rank,omitempty"`
+	FirstRelevantMatchType    string   `json:"first_relevant_match_type,omitempty"`
+	FirstRelevantHeadingScore float64  `json:"first_relevant_heading_score,omitempty"`
+	HeadingPathHits           int      `json:"heading_path_hits,omitempty"`
 }
 
 type ThresholdResult struct {
@@ -58,6 +61,7 @@ type ThresholdResult struct {
 	DocumentHits         int          `json:"document_hits,omitempty"`
 	DocumentRecall       float64      `json:"document_recall,omitempty"`
 	MRR                  float64      `json:"mrr,omitempty"`
+	HeadingPathHits      int          `json:"heading_path_hits,omitempty"`
 	Cases                []CaseResult `json:"cases"`
 }
 
@@ -145,6 +149,11 @@ func Evaluate(ctx context.Context, searcher retrieval.Searcher, cases []Case, th
 			return Report{}, err
 		}
 		result := CaseResult{ID: evaluationCase.ID, ExpectedRelevant: evaluationCase.ExpectedRelevant, Retrieved: len(results)}
+		for _, item := range results {
+			if item.HeadingScore > 0 {
+				result.HeadingPathHits++
+			}
+		}
 		if len(evaluationCase.ExpectedDocumentIDs) > 0 {
 			expected := make(map[int64]struct{}, len(evaluationCase.ExpectedDocumentIDs))
 			for _, documentID := range evaluationCase.ExpectedDocumentIDs {
@@ -156,6 +165,8 @@ func Evaluate(ctx context.Context, searcher retrieval.Searcher, cases []Case, th
 				}
 				result.RelevantRetrieved = true
 				result.FirstRelevantRank = rank + 1
+				result.FirstRelevantMatchType = item.MatchType
+				result.FirstRelevantHeadingScore = item.HeadingScore
 				break
 			}
 		}
@@ -190,6 +201,7 @@ func Evaluate(ctx context.Context, searcher retrieval.Searcher, cases []Case, th
 				thresholdReport.CorrectRefusals++
 			}
 			caseResult := caseResults[index]
+			thresholdReport.HeadingPathHits += caseResult.HeadingPathHits
 			if len(evaluationCase.ExpectedDocumentIDs) > 0 {
 				thresholdReport.LabeledDocumentCases++
 				if caseResult.RelevantRetrieved {
