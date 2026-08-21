@@ -257,7 +257,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 	seenToolCalls := make(map[string]struct{})
 	loopWarnings := make(map[string]struct{})
 	var resumedDecision *modelclient.ChatResponse
-	if e.resumeDecision != nil && len(e.resumeDecision.ToolCalls) > 0 && len(e.resumeCheckpoints) == 0 {
+	if e.resumeDecision != nil && len(e.resumeDecision.ToolCalls) > 0 {
 		resumedDecision = &modelclient.ChatResponse{ToolCalls: e.resumeDecision.ToolCalls}
 	}
 	if err := emitter.emit(agent.EventRunStarted, 0, map[string]any{
@@ -272,6 +272,9 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 	}
 	conversation = append(conversation, resumedMessages...)
 	for _, checkpoint := range resumedCheckpoints {
+		if e.resumeDecision != nil && checkpoint.DecisionID == e.resumeDecision.DecisionID {
+			continue
+		}
 		seenToolCalls[normalizedToolCallKey(checkpoint.ToolName, checkpoint.Arguments)] = struct{}{}
 		if err := emitter.emit(agent.EventToolFinished, checkpoint.StepNumber, map[string]any{
 			"tool_call_id":            checkpoint.ToolCallID,
@@ -1145,6 +1148,12 @@ func (e *Engine) resumeConversation(run *agent.AgentRun) ([]modelclient.ChatMess
 	}
 	messages := make([]modelclient.ChatMessage, 0, len(selected)*2)
 	for _, group := range groups {
+		if e.resumeDecision != nil && group.decisionID == e.resumeDecision.DecisionID {
+			// The decision itself is restored as the pending response below.
+			// Completed calls in this group are reused by resumeCheckpoint;
+			// unfinished calls will execute through the normal tool loop.
+			continue
+		}
 		assistant := modelclient.ChatMessage{Role: "assistant", ToolCalls: make([]modelclient.ToolCall, 0, len(group.checkpoints))}
 		for _, checkpoint := range group.checkpoints {
 			assistant.ToolCalls = append(assistant.ToolCalls, modelclient.ToolCall{
