@@ -281,6 +281,27 @@ func TestHybridServiceMergesVectorAndKeywordResultsWithoutDuplicates(t *testing.
 	}
 }
 
+type summaryCollisionStore struct{}
+
+func (summaryCollisionStore) Search(context.Context, int64, []float32, int) ([]documentchunk.SearchResult, error) {
+	return []documentchunk.SearchResult{{DocumentID: 1, Position: 0, Content: "正文"}}, nil
+}
+
+func (summaryCollisionStore) SearchKeyword(context.Context, int64, string, int) ([]retrieval.Result, error) {
+	return []retrieval.Result{{DocumentID: 1, Position: 0, ChunkKind: "summary", Content: "摘要"}}, nil
+}
+
+func TestHybridServiceKeepsSummaryAndTextAtSamePositionDistinct(t *testing.T) {
+	service := retrieval.NewHybridService(&embeddingStub{}, summaryCollisionStore{}, summaryCollisionStore{})
+	results, err := service.Search(context.Background(), 7, "问题", 5)
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(results) != 2 || results[0].ChunkKind == results[1].ChunkKind {
+		t.Fatalf("results = %#v, want separate text and summary results", results)
+	}
+}
+
 func TestHybridServiceExpandsCandidatesBeforeReranking(t *testing.T) {
 	store := &candidateChunkStoreStub{}
 	reranker := &rerankerStub{}

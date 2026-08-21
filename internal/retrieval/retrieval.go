@@ -721,5 +721,8 @@ func mergeCandidateResults(existing, incoming []Result, limit int) []Result {
 }
 
 func resultKey(result Result) string {
+	if result.ChunkKind == "summary" {
+		return fmt.Sprintf("%d:%d:summary", result.DocumentID, result.Position)
+	}
 	return fmt.Sprintf("%d:%d", result.DocumentID, result.Position)
 }
