@@ -42,7 +42,7 @@ func TestAdaptiveSplitterKeepsMarkdownHeadingPath(t *testing.T) {
 
 func TestAdaptiveSplitterUsesVirtualTitlesWithoutHeadings(t *testing.T) {
 	splitter := documentchunk.NewAdaptiveSplitter(10, 0)
-	chunks := splitter.SplitDocument("notes.md", "第一段内容。\n\n第二段内容。\n\n第三段内容。")
+	chunks := splitter.Split("第一段内容。\n\n第二段内容。\n\n第三段内容。")
 	if len(chunks) < 2 {
 		t.Fatalf("chunks = %#v, want multiple virtual sections", chunks)
 	}
@@ -66,7 +66,7 @@ func TestAdaptiveSplitterDetectsHeuristicSections(t *testing.T) {
 func TestAdaptiveSplitterDetectsMultilingualNumberedAndVisualSections(t *testing.T) {
 	splitter := documentchunk.NewAdaptiveSplitter(300, 0)
 	text := "1. Overview\n\nEnglish section.\n\n2.3 Details\n\nNested section.\n\nKAPITEL 3: Setup\n\nGerman section.\n\n---\n\nFINAL NOTES\n\nLast section."
-	chunks := splitter.SplitDocument("guide.txt", text)
+	chunks := splitter.Split(text)
 	if len(chunks) != 4 {
 		t.Fatalf("chunks = %#v, want four heuristic sections", chunks)
 	}
@@ -87,7 +87,7 @@ func TestAdaptiveSplitterDetectsMultilingualNumberedAndVisualSections(t *testing
 func TestAdaptiveSplitterDoesNotSplitProtectedCodeHeading(t *testing.T) {
 	splitter := documentchunk.NewAdaptiveSplitter(300, 0)
 	text := "说明\n\n```text\n# not a heading\n1. not a section\n```\n\n第二章 真正章节\n\n正文。"
-	chunks := splitter.SplitDocument("guide.txt", text)
+	chunks := splitter.Split(text)
 	if len(chunks) != 2 {
 		t.Fatalf("chunks = %#v, want two sections", chunks)
 	}
@@ -98,7 +98,7 @@ func TestAdaptiveSplitterDoesNotSplitProtectedCodeHeading(t *testing.T) {
 
 func TestAdaptiveSplitterTreatsFormFeedAsPageBoundary(t *testing.T) {
 	splitter := documentchunk.NewAdaptiveSplitter(300, 0)
-	chunks := splitter.SplitDocument("scan.txt", "第一页内容\f第二页内容")
+	chunks := splitter.Split("第一页内容\f第二页内容")
 	if len(chunks) != 2 {
 		t.Fatalf("chunks = %#v, want two page sections", chunks)
 	}

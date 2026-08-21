@@ -29,19 +29,10 @@ func NewAdaptiveSplitter(size, overlap int) *AdaptiveSplitter {
 	return &AdaptiveSplitter{recursive: NewSplitter(size, overlap)}
 }
 
-// Split keeps the existing TextSplitter interface. Call SplitDocument when a
-// filename is available so heading-less documents get a useful virtual title.
+// Split keeps the generic TextSplitter interface for callers that only need
+// content. The Worker uses SplitDocumentParts so metadata is not lost.
 func (s *AdaptiveSplitter) Split(text string) []string {
 	parts := s.SplitDocumentParts("文档", text)
-	result := make([]string, 0, len(parts))
-	for _, part := range parts {
-		result = append(result, part.Content)
-	}
-	return result
-}
-
-func (s *AdaptiveSplitter) SplitDocument(filename, text string) []string {
-	parts := s.SplitDocumentParts(filename, text)
 	result := make([]string, 0, len(parts))
 	for _, part := range parts {
 		result = append(result, part.Content)
