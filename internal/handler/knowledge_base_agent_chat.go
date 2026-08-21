@@ -439,6 +439,7 @@ func conversationMetadataFromAgentResponse(response agentservice.Response) conve
 				Distance:         source.Distance,
 				MatchType:        source.MatchType,
 				KeywordScore:     source.KeywordScore,
+				HeadingScore:     source.HeadingScore,
 				FusionScore:      source.FusionScore,
 				RerankScore:      source.RerankScore,
 			})

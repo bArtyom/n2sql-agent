@@ -44,6 +44,7 @@ type Source = {
   distance: number;
   matchType?: "vector" | "keyword" | "hybrid" | string;
   keywordScore?: number;
+  headingScore?: number;
   fusionScore?: number;
   rerankScore?: number;
 };

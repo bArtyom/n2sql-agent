@@ -106,6 +106,7 @@ type SourceReference struct {
 	Distance         float64 `json:"distance"`
 	MatchType        string  `json:"matchType,omitempty"`
 	KeywordScore     float64 `json:"keywordScore,omitempty"`
+	HeadingScore     float64 `json:"headingScore,omitempty"`
 	FusionScore      float64 `json:"fusionScore,omitempty"`
 	RerankScore      float64 `json:"rerankScore,omitempty"`
 }

@@ -663,6 +663,9 @@ func mergeResults(vectorResults, keywordResults []Result, limit int) []Result {
 				merged[index].KeywordScore = result.KeywordScore
 				merged[index].KeywordScoreKnown = true
 			}
+			if result.HeadingScore > merged[index].HeadingScore {
+				merged[index].HeadingScore = result.HeadingScore
+			}
 			return
 		}
 		result.MatchType = matchType
@@ -696,6 +699,9 @@ func mergeCandidateResults(existing, incoming []Result, limit int) []Result {
 				merged[index].MatchType = "hybrid"
 			}
 			merged[index].FusionScore += result.FusionScore
+			if result.HeadingScore > merged[index].HeadingScore {
+				merged[index].HeadingScore = result.HeadingScore
+			}
 			continue
 		}
 		if len(merged) >= limit {

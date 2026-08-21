@@ -166,6 +166,7 @@ type SearchResult struct {
 	Distance          float64        `json:"distance"`
 	MatchType         string         `json:"matchType,omitempty"`
 	KeywordScore      float64        `json:"keywordScore,omitempty"`
+	HeadingScore      float64        `json:"headingScore,omitempty"`
 	KeywordScoreKnown bool           `json:"-"`
 	FusionScore       float64        `json:"fusionScore,omitempty"`
 	RerankScore       float64        `json:"rerankScore,omitempty"`
@@ -521,12 +522,13 @@ func (s *PostgresStore) SearchKeywordWithDocuments(ctx context.Context, knowledg
 		"), scored AS (" +
 		"SELECT chunks.document_id, documents.original_filename, chunks.position, chunks.content, chunks.heading_path, " +
 		"ts_rank_cd(chunks.content_search, search_query.terms) + 0.35 * ts_rank_cd(chunks.heading_search, search_query.terms) AS keyword_score, " +
+		"ts_rank_cd(chunks.heading_search, search_query.terms) AS heading_score, " +
 		"CASE WHEN lower(chunks.content) LIKE $3 ESCAPE E'\\\\' OR lower(chunks.heading_path) LIKE $3 ESCAPE E'\\\\' OR lower(documents.original_filename) LIKE $3 ESCAPE E'\\\\' THEN 1.0 ELSE 0.0 END AS exact_score " +
 		"FROM document_chunks AS chunks JOIN documents AS documents ON documents.id = chunks.document_id " +
 		"CROSS JOIN search_query WHERE documents.knowledge_base_id = $1 " +
 		"AND (chunks.content_search @@ search_query.terms OR chunks.heading_search @@ search_query.terms OR lower(chunks.content) LIKE $3 ESCAPE E'\\\\' OR lower(chunks.heading_path) LIKE $3 ESCAPE E'\\\\' OR lower(documents.original_filename) LIKE $3 ESCAPE E'\\\\') " +
 		"AND ($4::bigint[] IS NULL OR chunks.document_id = ANY($4::bigint[]))" +
-		") SELECT document_id, original_filename, position, content, heading_path, 0::float8 AS distance, GREATEST(keyword_score, exact_score) AS keyword_score " +
+		") SELECT document_id, original_filename, position, content, heading_path, 0::float8 AS distance, GREATEST(keyword_score, exact_score) AS keyword_score, heading_score " +
 		"FROM scored ORDER BY exact_score DESC, keyword_score DESC, position, document_id LIMIT $5"
 	rows, err := s.db.QueryContext(ctx, sqlQuery, knowledgeBaseID, query, exactPattern, documentIDsArgument(documentIDs), limit)
 	if err != nil {
@@ -537,7 +539,7 @@ func (s *PostgresStore) SearchKeywordWithDocuments(ctx context.Context, knowledg
 	results := make([]SearchResult, 0, limit)
 	for rows.Next() {
 		var result SearchResult
-		if err := rows.Scan(&result.DocumentID, &result.OriginalFilename, &result.Position, &result.Content, &result.HeadingPath, &result.Distance, &result.KeywordScore); err != nil {
+		if err := rows.Scan(&result.DocumentID, &result.OriginalFilename, &result.Position, &result.Content, &result.HeadingPath, &result.Distance, &result.KeywordScore, &result.HeadingScore); err != nil {
 			return nil, fmt.Errorf("scan filtered keyword document chunk: %w", err)
 		}
 		result.MatchType = "keyword"
