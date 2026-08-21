@@ -47,6 +47,11 @@ type RetryStore interface {
 
 type Processor func(context.Context, Task) error
 
+// SuccessHook runs after the document chunks have been durably committed and
+// the processing task has entered succeeded. Hooks are best-effort and must
+// not turn a successful document indexing task into a failed one.
+type SuccessHook func(context.Context, Task)
+
 type CacheInvalidator interface {
 	ClearCache(int64)
 }
@@ -251,6 +256,7 @@ type Runner struct {
 	metrics     *metrics.Registry
 	retryPolicy RetryPolicy
 	invalidator CacheInvalidator
+	successHook SuccessHook
 }
 
 func NewRunner(store Store, processor Processor) *Runner {
@@ -278,6 +284,12 @@ func NewRunnerWithMetricsAndPolicyAndInvalidator(store Store, processor Processo
 		policy = DefaultRetryPolicy
 	}
 	return &Runner{store: store, processor: processor, metrics: registry, retryPolicy: policy, invalidator: invalidator}
+}
+
+func (r *Runner) SetSuccessHook(hook SuccessHook) {
+	if r != nil {
+		r.successHook = hook
+	}
 }
 
 func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
@@ -324,6 +336,9 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 		}
 		r.recordTask(ctx, slog.LevelError, "document_task_status_update_failed", task, metrics.WorkerStatusStatusUpdateFailed, started, "target_status", "succeeded", "error", err)
 		return true, fmt.Errorf("mark document processing task succeeded: %w", err)
+	}
+	if r.successHook != nil {
+		r.successHook(context.WithoutCancel(ctx), task)
 	}
 	r.recordTask(ctx, slog.LevelInfo, "document_task_succeeded", task, metrics.WorkerStatusSucceeded, started)
 	return true, nil

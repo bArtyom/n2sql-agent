@@ -86,6 +86,17 @@ func (s *AsyncService) Start(ctx context.Context, knowledgeBaseID, documentID in
 	}
 }
 
+// PreGenerate schedules a summary after document indexing. It is idempotent:
+// an existing cached or processing summary is reused rather than calling the
+// model again.
+func (s *AsyncService) PreGenerate(ctx context.Context, knowledgeBaseID, documentID int64) error {
+	if s == nil || s.service == nil {
+		return errors.New("document summary service unavailable")
+	}
+	_, err := s.Start(ctx, knowledgeBaseID, documentID)
+	return err
+}
+
 func (s *AsyncService) Run(ctx context.Context) {
 	if s == nil || s.service == nil {
 		return

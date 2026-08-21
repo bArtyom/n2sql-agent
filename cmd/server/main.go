@@ -106,11 +106,16 @@ func main() {
 	fileStore := document.NewLocalFileStore(cfg.UploadDir)
 	documentService := document.NewServiceWithInvalidator(documentStore, fileStore, searchService)
 	knowledgeBaseService := knowledgebase.NewServiceWithInvalidator(knowledgeBaseStore, fileStore, searchService)
-	runner := worker.NewRunnerWithMetricsAndInvalidator(worker.NewPostgresStore(db), processor, metricsRegistry, searchService)
 	answerService := rag.NewService(searchService, chatService)
 	documentSummaryService := documentsummary.NewService(chunkStore, documentStore, chatService, cfg.DocumentSummaryInputChars)
 	documentSummaryAsync := documentsummary.NewAsyncService(documentSummaryService, 1)
 	documentSummaryAsync.Run(context.Background())
+	runner := worker.NewRunnerWithMetricsAndInvalidator(worker.NewPostgresStore(db), processor, metricsRegistry, searchService)
+	runner.SetSuccessHook(func(ctx context.Context, task worker.Task) {
+		if err := documentSummaryAsync.PreGenerate(ctx, task.KnowledgeBaseID, task.DocumentID); err != nil {
+			slog.WarnContext(ctx, "document_summary_pregeneration_failed", "document_id", task.DocumentID, "knowledge_base_id", task.KnowledgeBaseID, "error", err)
+		}
+	})
 	var historySummarizer agentservice.HistorySummarizer
 	if cfg.AgentHistorySummaryEnabled {
 		historySummarizer = agentservice.NewModelHistorySummarizerWithTimeout(chatService, cfg.AgentHistorySummaryTimeout)

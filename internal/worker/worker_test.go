@@ -298,6 +298,20 @@ func TestRunnerClearsRetrievalCacheAfterSuccessfulProcessing(t *testing.T) {
 	}
 }
 
+func TestRunnerInvokesSuccessHookAfterTaskCommit(t *testing.T) {
+	store := &taskStoreStub{task: worker.Task{ID: 9, DocumentID: 4, KnowledgeBaseID: 7}}
+	var hooked worker.Task
+	runner := worker.NewRunner(store, func(context.Context, worker.Task) error { return nil })
+	runner.SetSuccessHook(func(_ context.Context, task worker.Task) { hooked = task })
+
+	if _, err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+	if store.succeeded != 9 || hooked.DocumentID != 4 || hooked.KnowledgeBaseID != 7 {
+		t.Fatalf("succeeded=%d hooked=%#v, want committed task hook", store.succeeded, hooked)
+	}
+}
+
 func TestRunnerLogsSuccessfulTask(t *testing.T) {
 	output := captureLogs(t)
 	store := &taskStoreStub{task: worker.Task{ID: 9, DocumentID: 4}}
