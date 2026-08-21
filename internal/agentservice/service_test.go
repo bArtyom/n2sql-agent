@@ -196,6 +196,35 @@ func TestServiceAnswersUsingScopedKnowledgeSearchTool(t *testing.T) {
 	}
 }
 
+func TestServiceKnowledgeBaseOnlyRefusesWithoutEvidence(t *testing.T) {
+	chat := chatStub{call: func(messages []modelclient.ChatMessage, definitions []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		if !strings.Contains(messages[0].Content, "严格知识库问答模式") {
+			t.Fatalf("system prompt = %q, want closed-book policy", messages[0].Content)
+		}
+		if len(definitions) != 1 || definitions[0].Name != "knowledge_search" {
+			t.Fatalf("definitions = %#v, want only knowledge search", definitions)
+		}
+		return modelclient.ChatResponse{Message: "根据常识，这个问题的答案是……"}, nil
+	}}
+	service, err := agentservice.NewService(chat, &searcherStub{}, 2, time.Minute)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	response, err := service.Answer(context.Background(), 7, agentservice.ChatRequest{
+		Message:         "知识库没有覆盖的问题",
+		KnowledgePolicy: agentservice.KnowledgeBaseOnly,
+	})
+	if err != nil {
+		t.Fatalf("Answer() error = %v", err)
+	}
+	if response.Answer != "知识库中没有找到足够资料，暂时无法回答这个问题。" {
+		t.Fatalf("answer = %q, want refusal", response.Answer)
+	}
+	if response.Status != agent.RunSucceeded {
+		t.Fatalf("status = %v, want succeeded with refusal answer", response.Status)
+	}
+}
+
 func TestServiceUsesSelectedChatModelRunner(t *testing.T) {
 	chat := &modelSelectingChatStub{}
 	service, err := agentservice.NewService(chat, &searcherStub{}, 2, time.Minute)

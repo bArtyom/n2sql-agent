@@ -39,6 +39,16 @@ type CachedHistorySummary struct {
 	Content          string
 }
 
+// KnowledgePolicy controls whether an answer must be grounded in this
+// knowledge base. The empty value keeps the existing knowledge-base-preferred
+// behavior; KnowledgeBaseOnly is intended for closed-book RAG evaluation.
+type KnowledgePolicy string
+
+const (
+	KnowledgeBasePreferred KnowledgePolicy = "knowledge_base_preferred"
+	KnowledgeBaseOnly      KnowledgePolicy = "knowledge_base_only"
+)
+
 // ChatRequest contains the current question and an optional bounded conversation history.
 type ChatRequest struct {
 	Message string `json:"message"`
@@ -53,6 +63,7 @@ type ChatRequest struct {
 	Attachments         []ChatAttachment                `json:"attachments,omitempty"`
 	SimilarityThreshold float64                         `json:"similarity_threshold,omitempty"`
 	KeywordThreshold    float64                         `json:"keyword_threshold,omitempty"`
+	KnowledgePolicy     KnowledgePolicy                 `json:"knowledge_policy,omitempty"`
 	DocumentIDs         []int64                         `json:"document_ids,omitempty"`
 	QueryRewrite        bool                            `json:"query_rewrite,omitempty"`
 	History             []HistoryMessage                `json:"history,omitempty"`
