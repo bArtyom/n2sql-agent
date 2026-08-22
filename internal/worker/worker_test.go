@@ -77,12 +77,14 @@ type chunkStoreStub struct {
 }
 
 type hierarchicalChunkStoreStub struct {
-	parents    []documentchunk.ParentChunk
-	children   []documentchunk.ChildChunk
-	embeddings [][]float32
+	parents      []documentchunk.ParentChunk
+	children     []documentchunk.ChildChunk
+	embeddings   [][]float32
+	replacements int
 }
 
 func (s *hierarchicalChunkStoreStub) ReplaceHierarchical(_ context.Context, _ int64, parents []documentchunk.ParentChunk, children []documentchunk.ChildChunk, embeddings [][]float32) error {
+	s.replacements++
 	s.parents, s.children, s.embeddings = parents, children, embeddings
 	return nil
 }
@@ -236,6 +238,26 @@ func TestEmbeddingHierarchicalProcessorIndexesWithChunkQualityWarning(t *testing
 	}
 	if len(embedder.batches) == 0 || store.parents == nil || store.children == nil {
 		t.Fatalf("quality warning stopped indexing: batches=%#v parents=%#v children=%#v", embedder.batches, store.parents, store.children)
+	}
+}
+
+func TestEmbeddingHierarchicalProcessorReplacesIndexOnReprocess(t *testing.T) {
+	store := &hierarchicalChunkStoreStub{}
+	processor := worker.NewEmbeddingHierarchicalChunkingProcessor(
+		extractorStub{},
+		fixedSplitter{chunks: []string{"parent"}},
+		fixedSplitter{chunks: []string{"child"}},
+		store,
+		embedderStub{},
+	)
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := processor(context.Background(), worker.Task{DocumentID: 4}); err != nil {
+			t.Fatalf("reprocess attempt %d error = %v", attempt+1, err)
+		}
+	}
+	if store.replacements != 2 || len(store.parents) != 1 || len(store.children) != 1 {
+		t.Fatalf("replacements=%d parents=%#v children=%#v, want two complete replacements", store.replacements, store.parents, store.children)
 	}
 }
 
