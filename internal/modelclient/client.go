@@ -168,9 +168,10 @@ type ToolCallFunction struct {
 }
 
 type OCRRequest struct {
-	Model  string
-	Prompt string
-	Image  []byte
+	Model    string
+	Prompt   string
+	MIMEType string
+	Image    []byte
 }
 
 type OCRResponse struct {
@@ -458,7 +459,7 @@ func (c *HTTPClient) OCR(ctx context.Context, baseURL, apiKey string, ocrRequest
 					{Type: "text", Text: ocrRequest.Prompt},
 					{Type: "image_url", ImageURL: &struct {
 						URL string `json:"url"`
-					}{URL: "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(ocrRequest.Image)}},
+					}{URL: "data:" + ocrMIMEType(ocrRequest.MIMEType) + ";base64," + base64.StdEncoding.EncodeToString(ocrRequest.Image)}},
 				},
 			},
 		},
@@ -511,6 +512,13 @@ func (c *HTTPClient) OCR(ctx context.Context, baseURL, apiKey string, ocrRequest
 		return OCRResponse{}, fmt.Errorf("OCR response does not contain text")
 	}
 	return OCRResponse{Text: text}, nil
+}
+
+func ocrMIMEType(value string) string {
+	if value == "image/png" || value == "image/jpeg" || value == "image/webp" {
+		return value
+	}
+	return "image/jpeg"
 }
 
 func decodeOCRContent(raw json.RawMessage) (string, error) {

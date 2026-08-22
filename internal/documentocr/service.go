@@ -136,3 +136,18 @@ func (s *Service) Extract(ctx context.Context, pdf []byte) (string, error) {
 	}
 	return strings.Join(blocks, "\n\n"), nil
 }
+
+func (s *Service) ExtractImage(ctx context.Context, mimeType string, image []byte) (string, error) {
+	if s == nil || s.provider == nil {
+		return "", ErrNotConfigured
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if provider, ok := s.provider.(interface {
+		RecognizeWithMIME(context.Context, string, []byte) (string, error)
+	}); ok {
+		return provider.RecognizeWithMIME(ctx, mimeType, image)
+	}
+	return s.provider.Recognize(ctx, image)
+}

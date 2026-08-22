@@ -21,6 +21,18 @@ func (scannedPDFProcessorStub) Extract(context.Context, []byte) (string, error) 
 	return "OCR scanned page", nil
 }
 
+type imageProcessorStub struct {
+	mime string
+}
+
+func (s *imageProcessorStub) ExtractImage(_ context.Context, mime string, image []byte) (string, error) {
+	s.mime = mime
+	if len(image) == 0 {
+		return "", errors.New("image was empty")
+	}
+	return "OCR image text", nil
+}
+
 func TestExtractorReadsTextAndMarkdown(t *testing.T) {
 	root := t.TempDir()
 	directory := filepath.Join(root, "documents")
@@ -353,6 +365,24 @@ func TestExtractorUsesOCRForPDFWithoutTextLayer(t *testing.T) {
 	}
 	if text != "OCR scanned page" {
 		t.Fatalf("Extract scanned PDF text = %q, want OCR output", text)
+	}
+}
+
+func TestExtractorUsesOCRForUploadedImage(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "documents"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "documents", "scan.png"), []byte("PNG image bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	processor := &imageProcessorStub{}
+	text, err := documentextractor.NewWithOCRAndImages(root, nil, processor).Extract(context.Background(), "documents/scan.png", "image/png")
+	if err != nil {
+		t.Fatalf("Extract image = %v", err)
+	}
+	if text != "OCR image text" || processor.mime != "image/png" {
+		t.Fatalf("Extract image = %q, mime=%q", text, processor.mime)
 	}
 }
 

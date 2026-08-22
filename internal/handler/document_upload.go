@@ -99,6 +99,27 @@ func uploadContentType(filename string, content *bufio.Reader) (string, error) {
 		}
 		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", nil
 	}
+	if extension == ".png" {
+		magic, err := content.Peek(8)
+		if err != nil || len(magic) != 8 || string(magic) != "\x89PNG\r\n\x1a\n" {
+			return "", document.ErrUnsupportedFile
+		}
+		return "image/png", nil
+	}
+	if extension == ".jpg" || extension == ".jpeg" {
+		magic, err := content.Peek(3)
+		if err != nil || len(magic) != 3 || string(magic) != "\xff\xd8\xff" {
+			return "", document.ErrUnsupportedFile
+		}
+		return "image/jpeg", nil
+	}
+	if extension == ".webp" {
+		magic, err := content.Peek(12)
+		if err != nil || len(magic) != 12 || string(magic[:4]) != "RIFF" || string(magic[8:]) != "WEBP" {
+			return "", document.ErrUnsupportedFile
+		}
+		return "image/webp", nil
+	}
 	if extension != ".pdf" {
 		return "", document.ErrUnsupportedFile
 	}

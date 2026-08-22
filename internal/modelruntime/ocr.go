@@ -35,6 +35,10 @@ func NewOCRService(providers modelprovider.Store, ocrer modelclient.OCRer, apiKe
 }
 
 func (s *OCRService) Recognize(ctx context.Context, image []byte) (string, error) {
+	return s.RecognizeWithMIME(ctx, "image/jpeg", image)
+}
+
+func (s *OCRService) RecognizeWithMIME(ctx context.Context, mimeType string, image []byte) (string, error) {
 	if s == nil || s.ocrer == nil {
 		return "", ErrOCRModelNotConfigured
 	}
@@ -53,9 +57,10 @@ func (s *OCRService) Recognize(ctx context.Context, image []byte) (string, error
 		return "", ErrAPIKeyNotConfigured
 	}
 	response, err := s.ocrer.OCR(ctx, provider.BaseURL, apiKey, modelclient.OCRRequest{
-		Model:  s.model,
-		Prompt: s.prompt,
-		Image:  image,
+		Model:    s.model,
+		Prompt:   s.prompt,
+		MIMEType: mimeType,
+		Image:    image,
 	})
 	if err != nil {
 		return "", fmt.Errorf("OCR image: %w", err)

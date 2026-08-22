@@ -207,7 +207,7 @@ func (s *LocalFileStore) Save(ctx context.Context, extension string, content io.
 	if err := ctx.Err(); err != nil {
 		return "", 0, "", err
 	}
-	if extension != ".md" && extension != ".txt" && extension != ".html" && extension != ".pdf" && extension != ".docx" && extension != ".pptx" && extension != ".xlsx" {
+	if extension != ".md" && extension != ".txt" && extension != ".html" && extension != ".pdf" && extension != ".docx" && extension != ".pptx" && extension != ".xlsx" && extension != ".png" && extension != ".jpg" && extension != ".webp" {
 		return "", 0, "", ErrUnsupportedFile
 	}
 	directory := filepath.Join(s.root, "documents")
@@ -564,6 +564,12 @@ func extensionForContentType(contentType string) (string, bool) {
 		return ".pptx", true
 	case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
 		return ".xlsx", true
+	case "image/png":
+		return ".png", true
+	case "image/jpeg":
+		return ".jpg", true
+	case "image/webp":
+		return ".webp", true
 	default:
 		return "", false
 	}

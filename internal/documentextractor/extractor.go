@@ -33,9 +33,14 @@ type ScannedPDFProcessor interface {
 	Extract(context.Context, []byte) (string, error)
 }
 
+type ImageProcessor interface {
+	ExtractImage(context.Context, string, []byte) (string, error)
+}
+
 type Extractor struct {
 	root       string
 	scannedPDF ScannedPDFProcessor
+	image      ImageProcessor
 }
 
 func New(root string) *Extractor { return &Extractor{root: root} }
@@ -44,11 +49,15 @@ func NewWithOCR(root string, scannedPDF ScannedPDFProcessor) *Extractor {
 	return &Extractor{root: root, scannedPDF: scannedPDF}
 }
 
+func NewWithOCRAndImages(root string, scannedPDF ScannedPDFProcessor, image ImageProcessor) *Extractor {
+	return &Extractor{root: root, scannedPDF: scannedPDF, image: image}
+}
+
 func (e *Extractor) Extract(ctx context.Context, storagePath, contentType string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if contentType != "text/plain" && contentType != "text/markdown" && contentType != "text/html" && contentType != "application/pdf" && contentType != "application/vnd.openxmlformats-officedocument.wordprocessingml.document" && contentType != "application/vnd.openxmlformats-officedocument.presentationml.presentation" && contentType != "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" {
+	if !supportedContentType(contentType) {
 		return "", ErrUnsupportedType
 	}
 	normalizedPath := filepath.FromSlash(storagePath)
@@ -68,7 +77,15 @@ func (e *Extractor) Extract(ctx context.Context, storagePath, contentType string
 		return "", fmt.Errorf("extracted text is too large")
 	}
 	text := string(content)
-	if contentType == "application/pdf" {
+	if strings.HasPrefix(contentType, "image/") {
+		if e.image == nil {
+			return "", ErrEmptyText
+		}
+		text, err = e.image.ExtractImage(ctx, contentType, content)
+		if err != nil {
+			return "", fmt.Errorf("OCR image: %w", err)
+		}
+	} else if contentType == "application/pdf" {
 		text, err = extractPDFText(ctx, content)
 		if err == nil && strings.TrimSpace(text) == "" {
 			err = ErrEmptyText
@@ -107,6 +124,19 @@ func (e *Extractor) Extract(ctx context.Context, storagePath, contentType string
 		return "", ErrEmptyText
 	}
 	return text, nil
+}
+
+func supportedContentType(contentType string) bool {
+	switch contentType {
+	case "text/plain", "text/markdown", "text/html", "application/pdf",
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		"image/png", "image/jpeg", "image/webp":
+		return true
+	default:
+		return false
+	}
 }
 
 func extractPPTXText(ctx context.Context, content []byte) (string, error) {
