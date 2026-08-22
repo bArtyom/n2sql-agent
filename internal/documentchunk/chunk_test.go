@@ -133,12 +133,15 @@ func TestAdaptiveSplitterSplitsOversizedProtectedBlock(t *testing.T) {
 
 func TestAdaptiveSplitterReportsDiagnostics(t *testing.T) {
 	splitter := documentchunk.NewAdaptiveSplitter(200, 0)
-	parts, diagnostics := splitter.SplitDocumentPartsWithDiagnostics("guide.md", "# 标题\n\n正文。\n\n```go\nfmt.Println(1)\n```")
+	parts, diagnostics := splitter.SplitDocumentPartsWithDiagnostics("guide.md", "# 标题\n\n正文。\n\n| 名称 | 值 |\n| --- | --- |\n| 模式 | 深度 |\n\n```go\nfmt.Println(1)\n```")
 	if len(parts) != diagnostics.ChunkCount || diagnostics.Strategy != documentchunk.StrategyHeading {
 		t.Fatalf("parts and diagnostics disagree: parts=%d diagnostics=%#v", len(parts), diagnostics)
 	}
-	if diagnostics.HeadingCount != 1 || diagnostics.ProtectedBlockCount != 1 {
+	if diagnostics.HeadingCount != 1 || diagnostics.ProtectedBlockCount != 2 {
 		t.Fatalf("missing structure diagnostics: %#v", diagnostics)
+	}
+	if diagnostics.TableBlockCount != 1 || diagnostics.CodeBlockCount != 1 || diagnostics.FormulaBlockCount != 0 {
+		t.Fatalf("protected block diagnostics = %#v", diagnostics)
 	}
 }
 

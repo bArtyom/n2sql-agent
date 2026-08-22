@@ -32,6 +32,9 @@ type SplitDiagnostics struct {
 	ChunkCount          int           `json:"chunkCount"`
 	HeadingCount        int           `json:"headingCount"`
 	ProtectedBlockCount int           `json:"protectedBlockCount"`
+	TableBlockCount     int           `json:"tableBlockCount"`
+	CodeBlockCount      int           `json:"codeBlockCount"`
+	FormulaBlockCount   int           `json:"formulaBlockCount"`
 	TotalRunes          int           `json:"totalRunes"`
 	MinChunkRunes       int           `json:"minChunkRunes"`
 	MaxChunkRunes       int           `json:"maxChunkRunes"`
@@ -99,7 +102,17 @@ func (s *AdaptiveSplitter) SplitDocumentPartsWithDiagnostics(filename, text stri
 	text = strings.ReplaceAll(text, "\f", "\n"+pageBreakMarker+"\n")
 	lines := strings.Split(text, "\n")
 	diagnostics.TotalRunes = utf8.RuneCountInString(text)
-	diagnostics.ProtectedBlockCount = len(findProtectedBlocks(text))
+	for _, block := range findProtectedBlocks(text) {
+		diagnostics.ProtectedBlockCount++
+		switch block.kind {
+		case protectedBlockTable:
+			diagnostics.TableBlockCount++
+		case protectedBlockCode:
+			diagnostics.CodeBlockCount++
+		case protectedBlockFormula:
+			diagnostics.FormulaBlockCount++
+		}
+	}
 	if sections, ok := parseMarkdownSections(lines); ok {
 		diagnostics.Strategy = StrategyHeading
 		diagnostics.HeadingCount = len(sections)
@@ -297,7 +310,16 @@ func (s *AdaptiveSplitter) renderSections(sections []structuredSection) []Struct
 type protectedBlock struct {
 	start int
 	end   int
+	kind  protectedBlockKind
 }
+
+type protectedBlockKind uint8
+
+const (
+	protectedBlockCode protectedBlockKind = iota + 1
+	protectedBlockFormula
+	protectedBlockTable
+)
 
 // splitContent keeps fenced code, LaTeX blocks and Markdown tables together.
 // A block larger than the configured budget is the only case where the
@@ -350,14 +372,14 @@ func findProtectedBlocks(text string) []protectedBlock {
 					closing := strings.TrimSpace(strings.TrimRight(lines[index], "\r\n"))
 					offset += len(lines[index])
 					if strings.HasPrefix(closing, "```") {
-						blocks = append(blocks, protectedBlock{start: blockStart, end: offset})
+						blocks = append(blocks, protectedBlock{start: blockStart, end: offset, kind: protectedBlockCode})
 						inFence = false
 						closed = true
 						break
 					}
 				}
 				if !closed && offset > blockStart {
-					blocks = append(blocks, protectedBlock{start: blockStart, end: offset})
+					blocks = append(blocks, protectedBlock{start: blockStart, end: offset, kind: protectedBlockCode})
 				}
 			}
 			continue
@@ -367,13 +389,13 @@ func findProtectedBlocks(text string) []protectedBlock {
 				latexStart = start
 				inLatex = true
 			} else if trimmed == "$$" {
-				blocks = append(blocks, protectedBlock{start: latexStart, end: offset})
+				blocks = append(blocks, protectedBlock{start: latexStart, end: offset, kind: protectedBlockFormula})
 				inLatex = false
 			}
 			continue
 		}
 		if inLatex && trimmed == "\\]" {
-			blocks = append(blocks, protectedBlock{start: latexStart, end: offset})
+			blocks = append(blocks, protectedBlock{start: latexStart, end: offset, kind: protectedBlockFormula})
 			inLatex = false
 			continue
 		}
@@ -391,12 +413,12 @@ func findProtectedBlocks(text string) []protectedBlock {
 				index++
 				blockEnd += len(lines[index])
 			}
-			blocks = append(blocks, protectedBlock{start: blockStart, end: blockEnd})
+			blocks = append(blocks, protectedBlock{start: blockStart, end: blockEnd, kind: protectedBlockTable})
 			offset = blockEnd
 		}
 	}
 	if inLatex && offset > latexStart {
-		blocks = append(blocks, protectedBlock{start: latexStart, end: offset})
+		blocks = append(blocks, protectedBlock{start: latexStart, end: offset, kind: protectedBlockFormula})
 	}
 	return blocks
 }
