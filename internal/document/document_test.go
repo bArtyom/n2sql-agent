@@ -80,6 +80,9 @@ func TestServiceUploadsDocumentAndCreatesPendingTask(t *testing.T) {
 	if store.input.StoragePath == "" || store.input.SizeBytes != int64(len("hello knowledge base")) {
 		t.Fatalf("create input = %#v", store.input)
 	}
+	if store.input.ContentSHA256 != "2b7199f223d19ebf4ef20d51b3ad6cab5482f54709f96460db1337ed2471ef15" {
+		t.Fatalf("content sha256 = %q", store.input.ContentSHA256)
+	}
 	content, err := os.ReadFile(filepath.Join(root, store.input.StoragePath))
 	if err != nil {
 		t.Fatalf("read stored file: %v", err)

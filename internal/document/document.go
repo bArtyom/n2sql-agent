@@ -3,6 +3,7 @@ package document
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -27,6 +28,7 @@ var (
 	ErrDeleteUnavailable     = errors.New("document deletion is unavailable")
 	ErrUnsupportedFile       = errors.New("unsupported file")
 	ErrFileTooLarge          = errors.New("file is too large")
+	ErrDuplicateDocument     = errors.New("document already exists")
 )
 
 type Document struct {
@@ -35,6 +37,7 @@ type Document struct {
 	OriginalFilename    string                         `json:"originalFilename"`
 	ContentType         string                         `json:"contentType"`
 	SizeBytes           int64                          `json:"sizeBytes"`
+	ContentSHA256       string                         `json:"contentSha256,omitempty"`
 	ProcessingStatus    string                         `json:"processingStatus"`
 	SummaryStatus       string                         `json:"summaryStatus,omitempty"`
 	SummaryIndexStatus  string                         `json:"summaryIndexStatus,omitempty"`
@@ -70,6 +73,7 @@ type CreateInput struct {
 	StoragePath      string
 	ContentType      string
 	SizeBytes        int64
+	ContentSHA256    string
 }
 
 type Store interface {
@@ -95,7 +99,7 @@ type Reader interface {
 }
 
 type FileStore interface {
-	Save(context.Context, string, io.Reader) (string, int64, error)
+	Save(context.Context, string, io.Reader) (string, int64, string, error)
 	Delete(context.Context, string) error
 }
 
@@ -122,7 +126,7 @@ func (s *Service) Upload(ctx context.Context, input UploadInput) (Document, erro
 	if err := s.store.EnsureKnowledgeBase(ctx, input.KnowledgeBaseID); err != nil {
 		return Document{}, err
 	}
-	storagePath, sizeBytes, err := s.files.Save(ctx, extension, io.LimitReader(input.Content, MaxFileBytes+1))
+	storagePath, sizeBytes, contentSHA256, err := s.files.Save(ctx, extension, io.LimitReader(input.Content, MaxFileBytes+1))
 	if err != nil {
 		return Document{}, err
 	}
@@ -136,6 +140,7 @@ func (s *Service) Upload(ctx context.Context, input UploadInput) (Document, erro
 		StoragePath:      storagePath,
 		ContentType:      input.ContentType,
 		SizeBytes:        sizeBytes,
+		ContentSHA256:    contentSHA256,
 	})
 	if err != nil {
 		_ = s.files.Delete(context.WithoutCancel(ctx), storagePath)
@@ -198,40 +203,41 @@ type LocalFileStore struct{ root string }
 
 func NewLocalFileStore(root string) *LocalFileStore { return &LocalFileStore{root: root} }
 
-func (s *LocalFileStore) Save(ctx context.Context, extension string, content io.Reader) (string, int64, error) {
+func (s *LocalFileStore) Save(ctx context.Context, extension string, content io.Reader) (string, int64, string, error) {
 	if err := ctx.Err(); err != nil {
-		return "", 0, err
+		return "", 0, "", err
 	}
 	if extension != ".md" && extension != ".txt" && extension != ".html" && extension != ".pdf" && extension != ".docx" {
-		return "", 0, ErrUnsupportedFile
+		return "", 0, "", ErrUnsupportedFile
 	}
 	directory := filepath.Join(s.root, "documents")
 	if err := os.MkdirAll(directory, 0o750); err != nil {
-		return "", 0, fmt.Errorf("create document directory: %w", err)
+		return "", 0, "", fmt.Errorf("create document directory: %w", err)
 	}
 	temporary, err := os.CreateTemp(directory, ".upload-*")
 	if err != nil {
-		return "", 0, fmt.Errorf("create temporary document: %w", err)
+		return "", 0, "", fmt.Errorf("create temporary document: %w", err)
 	}
 	temporaryPath := temporary.Name()
 	defer func() { _ = os.Remove(temporaryPath) }()
-	sizeBytes, copyErr := io.Copy(temporary, content)
+	hasher := sha256.New()
+	sizeBytes, copyErr := io.Copy(io.MultiWriter(temporary, hasher), content)
 	closeErr := temporary.Close()
 	if copyErr != nil {
-		return "", 0, fmt.Errorf("write document: %w", copyErr)
+		return "", 0, "", fmt.Errorf("write document: %w", copyErr)
 	}
 	if closeErr != nil {
-		return "", 0, fmt.Errorf("close document: %w", closeErr)
+		return "", 0, "", fmt.Errorf("close document: %w", closeErr)
 	}
 	identifier := make([]byte, 16)
 	if _, err := rand.Read(identifier); err != nil {
-		return "", 0, fmt.Errorf("generate document path: %w", err)
+		return "", 0, "", fmt.Errorf("generate document path: %w", err)
 	}
 	relativePath := filepath.Join("documents", hex.EncodeToString(identifier)+extension)
 	if err := os.Rename(temporaryPath, filepath.Join(s.root, relativePath)); err != nil {
-		return "", 0, fmt.Errorf("finalize document: %w", err)
+		return "", 0, "", fmt.Errorf("finalize document: %w", err)
 	}
-	return relativePath, sizeBytes, nil
+	return relativePath, sizeBytes, hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 func (s *LocalFileStore) Delete(ctx context.Context, storagePath string) error {
@@ -271,7 +277,7 @@ func (s *PostgresStore) EnsureKnowledgeBase(ctx context.Context, id int64) error
 
 func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Document, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT d.id, d.knowledge_base_id, d.original_filename, d.content_type, d.size_bytes,
+		SELECT d.id, d.knowledge_base_id, d.original_filename, d.content_type, d.size_bytes, d.content_sha256,
 		       d.chunking_diagnostics, d.summary_status, d.summary_index_status,
 		       COALESCE(task.status, 'pending') AS processing_status
 		FROM documents AS d
@@ -303,6 +309,7 @@ func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Docu
 			&document.OriginalFilename,
 			&document.ContentType,
 			&document.SizeBytes,
+			&document.ContentSHA256,
 			&diagnostics,
 			&document.SummaryStatus,
 			&document.SummaryIndexStatus,
@@ -462,15 +469,18 @@ func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Document
 	defer tx.Rollback()
 	var document Document
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO documents (knowledge_base_id, original_filename, storage_path, content_type, size_bytes)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, knowledge_base_id, original_filename, content_type, size_bytes`,
-		input.KnowledgeBaseID, input.OriginalFilename, input.StoragePath, input.ContentType, input.SizeBytes,
-	).Scan(&document.ID, &document.KnowledgeBaseID, &document.OriginalFilename, &document.ContentType, &document.SizeBytes)
+		INSERT INTO documents (knowledge_base_id, original_filename, storage_path, content_type, size_bytes, content_sha256)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id, knowledge_base_id, original_filename, content_type, size_bytes, content_sha256`,
+		input.KnowledgeBaseID, input.OriginalFilename, input.StoragePath, input.ContentType, input.SizeBytes, input.ContentSHA256,
+	).Scan(&document.ID, &document.KnowledgeBaseID, &document.OriginalFilename, &document.ContentType, &document.SizeBytes, &document.ContentSHA256)
 	if err != nil {
 		var pgError *pgconn.PgError
 		if errors.As(err, &pgError) && pgError.Code == "23503" {
 			return Document{}, ErrKnowledgeBaseNotFound
+		}
+		if errors.As(err, &pgError) && pgError.ConstraintName == "documents_knowledge_base_content_sha256_idx" {
+			return Document{}, ErrDuplicateDocument
 		}
 		return Document{}, fmt.Errorf("create document: %w", err)
 	}

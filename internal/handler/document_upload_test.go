@@ -131,6 +131,21 @@ func TestDocumentUploadReportsMissingKnowledgeBase(t *testing.T) {
 	}
 }
 
+func TestDocumentUploadReportsDuplicate(t *testing.T) {
+	endpoint := handler.NewDocumentUpload(&documentUploaderStub{err: document.ErrDuplicateDocument})
+	body, contentType := multipartBody(t, "notes.txt", []byte("hello"))
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/4/documents", body)
+	request.Header.Set("Content-Type", contentType)
+	request.SetPathValue("id", "4")
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusConflict)
+	}
+}
+
 func TestDocumentListReturnsDocuments(t *testing.T) {
 	endpoint := handler.NewDocumentList(documentReaderStub{documents: []document.Document{
 		{ID: 12, KnowledgeBaseID: 4, OriginalFilename: "notes.txt", ProcessingStatus: "processing"},
