@@ -75,6 +75,21 @@ func TestDocumentChunkReadsSummaryCitation(t *testing.T) {
 	}
 }
 
+func TestDocumentChunkRejectsUnknownKind(t *testing.T) {
+	reader := &chunkReaderStub{}
+	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/3/documents/7/chunks/0?kind=parent", nil)
+	request.SetPathValue("id", "3")
+	request.SetPathValue("documentID", "7")
+	request.SetPathValue("position", "0")
+	response := httptest.NewRecorder()
+
+	handler.NewDocumentChunk(reader).ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest || reader.calls != 0 {
+		t.Fatalf("response = %d %s, calls=%d", response.Code, response.Body.String(), reader.calls)
+	}
+}
+
 func TestDocumentChunkRejectsInvalidRoute(t *testing.T) {
 	reader := &chunkReaderStub{}
 	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/3/documents/no/chunks/2", nil)
