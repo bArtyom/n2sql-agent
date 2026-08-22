@@ -31,6 +31,7 @@ type Case struct {
 	ExpectedRelevant    bool     `json:"expected_relevant"`
 	ExpectedDocumentIDs []int64  `json:"expected_document_ids,omitempty"`
 	ExpectedChunkIDs    []string `json:"expected_chunk_ids,omitempty"`
+	ReferenceAnswer     string   `json:"reference_answer,omitempty"`
 	Notes               string   `json:"notes,omitempty"`
 }
 

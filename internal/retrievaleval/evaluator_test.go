@@ -153,6 +153,18 @@ func TestLoadCasesRejectsDuplicateExpectedChunkIDs(t *testing.T) {
 	}
 }
 
+func TestScoreGenerationMatchesMetricShape(t *testing.T) {
+	perfect := retrievaleval.ScoreGeneration("PostgreSQL supports vector search.", "PostgreSQL supports vector search.")
+	if perfect.BLEU1 != 1 || perfect.BLEU2 != 1 || perfect.BLEU4 != 1 ||
+		perfect.ROUGE1 != 1 || perfect.ROUGE2 != 1 || perfect.ROUGEL != 1 {
+		t.Fatalf("perfect generation metrics = %#v", perfect)
+	}
+	empty := retrievaleval.ScoreGeneration("", "参考答案")
+	if empty.BLEU1 != 0 || empty.ROUGE1 != 0 {
+		t.Fatalf("empty generation metrics = %#v", empty)
+	}
+}
+
 func TestValidateThresholdsRejectsOutsideCosineDistanceRange(t *testing.T) {
 	if err := retrievaleval.ValidateThresholds([]float64{-0.1}); err == nil {
 		t.Fatal("ValidateThresholds() error = nil for negative threshold")
