@@ -114,6 +114,11 @@ func extractHTMLText(ctx context.Context, content []byte) (string, error) {
 		}
 		if node.Type == html.ElementNode {
 			switch node.Data {
+			case "table":
+				if table := renderHTMLTable(node); table != "" {
+					lines = append(lines, table)
+				}
+				return
 			case "h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "blockquote":
 				value := strings.TrimSpace(strings.Join(strings.Fields(htmlText(node)), " "))
 				if value != "" {
@@ -141,6 +146,34 @@ func extractHTMLText(ctx context.Context, content []byte) (string, error) {
 		return "", errors.New("HTML text is too large")
 	}
 	return text, nil
+}
+
+func renderHTMLTable(table *html.Node) string {
+	var rows [][]string
+	var visit func(*html.Node)
+	visit = func(node *html.Node) {
+		if node == nil {
+			return
+		}
+		if node.Type == html.ElementNode && node.Data == "tr" {
+			var row []string
+			for child := node.FirstChild; child != nil; child = child.NextSibling {
+				if child.Type != html.ElementNode || (child.Data != "th" && child.Data != "td") {
+					continue
+				}
+				row = append(row, normalizeTableCell(htmlText(child)))
+			}
+			if len(row) > 0 {
+				rows = append(rows, row)
+			}
+			return
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			visit(child)
+		}
+	}
+	visit(table)
+	return renderMarkdownTable(rows)
 }
 
 func htmlText(node *html.Node) string {
@@ -202,6 +235,14 @@ func extractDOCXText(ctx context.Context, content []byte) (string, error) {
 		switch element := token.(type) {
 		case xml.StartElement:
 			switch element.Name.Local {
+			case "tbl":
+				var table docxTable
+				if err := decoder.DecodeElement(&table, &element); err != nil {
+					return "", fmt.Errorf("read DOCX table: %w", err)
+				}
+				if markdown := renderDOCXTable(table); markdown != "" {
+					paragraphs = append(paragraphs, markdown)
+				}
 			case "p":
 				paragraphDepth++
 				if paragraphDepth == 1 {
@@ -239,6 +280,79 @@ func extractDOCXText(ctx context.Context, content []byte) (string, error) {
 		return "", ErrEmptyText
 	}
 	return text, nil
+}
+
+type docxTable struct {
+	Rows []docxRow `xml:"tr"`
+}
+
+type docxRow struct {
+	Cells []docxCell `xml:"tc"`
+}
+
+type docxCell struct {
+	Paragraphs []docxParagraph `xml:"p"`
+}
+
+type docxParagraph struct {
+	Texts []string `xml:"r>t"`
+}
+
+func renderDOCXTable(table docxTable) string {
+	rows := make([][]string, 0, len(table.Rows))
+	for _, sourceRow := range table.Rows {
+		row := make([]string, 0, len(sourceRow.Cells))
+		for _, cell := range sourceRow.Cells {
+			var values []string
+			for _, paragraph := range cell.Paragraphs {
+				values = append(values, strings.Join(paragraph.Texts, ""))
+			}
+			row = append(row, normalizeTableCell(strings.Join(values, " ")))
+		}
+		if len(row) > 0 {
+			rows = append(rows, row)
+		}
+	}
+	return renderMarkdownTable(rows)
+}
+
+func normalizeTableCell(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	return strings.ReplaceAll(value, "|", `\|`)
+}
+
+func renderMarkdownTable(rows [][]string) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	columnCount := 0
+	for _, row := range rows {
+		if len(row) > columnCount {
+			columnCount = len(row)
+		}
+	}
+	if columnCount == 0 {
+		return ""
+	}
+	for index := range rows {
+		for len(rows[index]) < columnCount {
+			rows[index] = append(rows[index], "")
+		}
+	}
+	lines := []string{markdownTableRow(rows[0])}
+	separator := make([]string, columnCount)
+	for index := range separator {
+		separator[index] = "---"
+	}
+	lines = append(lines, markdownTableRow(separator))
+	for _, row := range rows[1:] {
+		lines = append(lines, markdownTableRow(row))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func markdownTableRow(cells []string) string {
+	return "| " + strings.Join(cells, " | ") + " |"
 }
 
 func headingPrefix(style string) string {

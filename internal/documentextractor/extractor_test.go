@@ -78,6 +78,41 @@ func TestExtractorReadsDOCXHeadingsAndParagraphs(t *testing.T) {
 	}
 }
 
+func TestExtractorPreservesDOCXTableAsMarkdown(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "documents")
+	if err := os.Mkdir(directory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "table.docx")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := zip.NewWriter(file)
+	entry, err := archive.Create("word/document.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = entry.Write([]byte(`<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>Name</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Value</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:p><w:r><w:t>Mode</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Deep</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	text, err := documentextractor.New(root).Extract(context.Background(), "documents/table.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+	if err != nil {
+		t.Fatalf("Extract DOCX table = %v", err)
+	}
+	if text != "| Name | Value |\n| --- | --- |\n| Mode | Deep |" {
+		t.Fatalf("Extract DOCX table = %q", text)
+	}
+}
+
 func TestExtractorReadsHTMLStructureWithoutScriptOrStyle(t *testing.T) {
 	root := t.TempDir()
 	directory := filepath.Join(root, "documents")
@@ -93,6 +128,24 @@ func TestExtractorReadsHTMLStructureWithoutScriptOrStyle(t *testing.T) {
 	}
 	if text != "# Install\nRun the service.\nCheck logs" {
 		t.Fatalf("Extract HTML = %q", text)
+	}
+}
+
+func TestExtractorPreservesHTMLTableAsMarkdown(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "documents")
+	if err := os.Mkdir(directory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "table.html"), []byte(`<table><tr><th>Name</th><th>Value</th></tr><tr><td>Mode</td><td>Deep</td></tr></table>`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	text, err := documentextractor.New(root).Extract(context.Background(), "documents/table.html", "text/html")
+	if err != nil {
+		t.Fatalf("Extract HTML table = %v", err)
+	}
+	if text != "| Name | Value |\n| --- | --- |\n| Mode | Deep |" {
+		t.Fatalf("Extract HTML table = %q", text)
 	}
 }
 
