@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf16"
@@ -47,7 +48,7 @@ func (e *Extractor) Extract(ctx context.Context, storagePath, contentType string
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if contentType != "text/plain" && contentType != "text/markdown" && contentType != "text/html" && contentType != "application/pdf" && contentType != "application/vnd.openxmlformats-officedocument.wordprocessingml.document" {
+	if contentType != "text/plain" && contentType != "text/markdown" && contentType != "text/html" && contentType != "application/pdf" && contentType != "application/vnd.openxmlformats-officedocument.wordprocessingml.document" && contentType != "application/vnd.openxmlformats-officedocument.presentationml.presentation" && contentType != "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" {
 		return "", ErrUnsupportedType
 	}
 	normalizedPath := filepath.FromSlash(storagePath)
@@ -86,6 +87,16 @@ func (e *Extractor) Extract(ctx context.Context, storagePath, contentType string
 		if err != nil {
 			return "", err
 		}
+	} else if contentType == "application/vnd.openxmlformats-officedocument.presentationml.presentation" {
+		text, err = extractPPTXText(ctx, content)
+		if err != nil {
+			return "", err
+		}
+	} else if contentType == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" {
+		text, err = extractXLSXText(ctx, content)
+		if err != nil {
+			return "", err
+		}
 	} else if contentType == "text/html" {
 		text, err = extractHTMLText(ctx, content)
 		if err != nil {
@@ -94,6 +105,264 @@ func (e *Extractor) Extract(ctx context.Context, storagePath, contentType string
 	}
 	if strings.TrimSpace(text) == "" {
 		return "", ErrEmptyText
+	}
+	return text, nil
+}
+
+func extractPPTXText(ctx context.Context, content []byte) (string, error) {
+	archive, err := zip.NewReader(bytes.NewReader(content), int64(len(content)))
+	if err != nil {
+		return "", fmt.Errorf("invalid PPTX archive: %w", err)
+	}
+	slides := make([]*zip.File, 0)
+	for _, file := range archive.File {
+		if strings.HasPrefix(file.Name, "ppt/slides/slide") && strings.HasSuffix(file.Name, ".xml") {
+			slides = append(slides, file)
+		}
+	}
+	sort.Slice(slides, func(i, j int) bool { return slides[i].Name < slides[j].Name })
+	if len(slides) == 0 {
+		return "", errors.New("PPTX contains no slides")
+	}
+	sections := make([]string, 0, len(slides))
+	for index, file := range slides {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		reader, err := file.Open()
+		if err != nil {
+			return "", fmt.Errorf("open PPTX slide: %w", err)
+		}
+		slide, parseErr := parsePPTXSlide(ctx, io.LimitReader(reader, maxExtractedTextBytes+1))
+		_ = reader.Close()
+		if parseErr != nil {
+			return "", fmt.Errorf("parse PPTX slide %d: %w", index+1, parseErr)
+		}
+		if strings.TrimSpace(slide) != "" {
+			sections = append(sections, fmt.Sprintf("# Slide %d\n%s", index+1, slide))
+		}
+	}
+	if len(sections) == 0 {
+		return "", ErrEmptyText
+	}
+	return joinExtractedText(sections, "PPTX")
+}
+
+func parsePPTXSlide(ctx context.Context, source io.Reader) (string, error) {
+	decoder := xml.NewDecoder(source)
+	paragraphs := make([]string, 0)
+	var current strings.Builder
+	inParagraph := false
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		switch element := token.(type) {
+		case xml.StartElement:
+			if element.Name.Local == "p" {
+				inParagraph = true
+				current.Reset()
+			} else if element.Name.Local == "t" && inParagraph {
+				var value string
+				if err := decoder.DecodeElement(&value, &element); err != nil {
+					return "", err
+				}
+				current.WriteString(value)
+			}
+		case xml.EndElement:
+			if element.Name.Local == "p" && inParagraph {
+				if value := strings.TrimSpace(current.String()); value != "" {
+					paragraphs = append(paragraphs, value)
+				}
+				inParagraph = false
+			}
+		}
+	}
+	return strings.Join(paragraphs, "\n"), nil
+}
+
+func extractXLSXText(ctx context.Context, content []byte) (string, error) {
+	archive, err := zip.NewReader(bytes.NewReader(content), int64(len(content)))
+	if err != nil {
+		return "", fmt.Errorf("invalid XLSX archive: %w", err)
+	}
+	sharedStrings := []string{}
+	for _, file := range archive.File {
+		if file.Name == "xl/sharedStrings.xml" {
+			reader, openErr := file.Open()
+			if openErr != nil {
+				return "", fmt.Errorf("open XLSX shared strings: %w", openErr)
+			}
+			sharedStrings, err = parseXLSXSharedStrings(ctx, io.LimitReader(reader, maxExtractedTextBytes+1))
+			_ = reader.Close()
+			if err != nil {
+				return "", fmt.Errorf("parse XLSX shared strings: %w", err)
+			}
+			break
+		}
+	}
+	sheets := make([]*zip.File, 0)
+	for _, file := range archive.File {
+		if strings.HasPrefix(file.Name, "xl/worksheets/sheet") && strings.HasSuffix(file.Name, ".xml") {
+			sheets = append(sheets, file)
+		}
+	}
+	sort.Slice(sheets, func(i, j int) bool { return sheets[i].Name < sheets[j].Name })
+	if len(sheets) == 0 {
+		return "", errors.New("XLSX contains no worksheets")
+	}
+	sections := make([]string, 0, len(sheets))
+	for index, file := range sheets {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		reader, err := file.Open()
+		if err != nil {
+			return "", fmt.Errorf("open XLSX worksheet: %w", err)
+		}
+		rows, parseErr := parseXLSXSheet(ctx, io.LimitReader(reader, maxExtractedTextBytes+1), sharedStrings)
+		_ = reader.Close()
+		if parseErr != nil {
+			return "", fmt.Errorf("parse XLSX worksheet %d: %w", index+1, parseErr)
+		}
+		if len(rows) > 0 {
+			sections = append(sections, fmt.Sprintf("# Sheet %d\n%s", index+1, strings.Join(rows, "\n")))
+		}
+	}
+	if len(sections) == 0 {
+		return "", ErrEmptyText
+	}
+	return joinExtractedText(sections, "XLSX")
+}
+
+func parseXLSXSharedStrings(ctx context.Context, source io.Reader) ([]string, error) {
+	decoder := xml.NewDecoder(source)
+	values := make([]string, 0)
+	var current strings.Builder
+	inItem := false
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		switch element := token.(type) {
+		case xml.StartElement:
+			switch element.Name.Local {
+			case "si":
+				inItem = true
+				current.Reset()
+			case "t":
+				if inItem {
+					var value string
+					if err := decoder.DecodeElement(&value, &element); err != nil {
+						return nil, err
+					}
+					current.WriteString(value)
+				}
+			}
+		case xml.EndElement:
+			if element.Name.Local == "si" && inItem {
+				values = append(values, current.String())
+				inItem = false
+			}
+		}
+	}
+	return values, nil
+}
+
+func parseXLSXSheet(ctx context.Context, source io.Reader, sharedStrings []string) ([]string, error) {
+	decoder := xml.NewDecoder(source)
+	rows := make([]string, 0)
+	var cells []string
+	var cellValue strings.Builder
+	cellType := ""
+	inRow := false
+	inCell := false
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		switch element := token.(type) {
+		case xml.StartElement:
+			switch element.Name.Local {
+			case "row":
+				inRow = true
+				cells = nil
+			case "c":
+				if inRow {
+					inCell = true
+					cellValue.Reset()
+					cellType = ""
+					for _, attr := range element.Attr {
+						if attr.Name.Local == "t" {
+							cellType = attr.Value
+						}
+					}
+				}
+			case "v", "t":
+				if inCell {
+					var value string
+					if err := decoder.DecodeElement(&value, &element); err != nil {
+						return nil, err
+					}
+					cellValue.WriteString(value)
+				}
+			}
+		case xml.EndElement:
+			switch element.Name.Local {
+			case "c":
+				if inCell {
+					value := cellValue.String()
+					if cellType == "s" {
+						index, parseErr := strconv.Atoi(value)
+						if parseErr != nil || index < 0 || index >= len(sharedStrings) {
+							return nil, errors.New("XLSX shared string index is invalid")
+						}
+						value = sharedStrings[index]
+					}
+					cells = append(cells, strings.TrimSpace(value))
+					inCell = false
+				}
+			case "row":
+				if inRow {
+					for len(cells) > 0 && cells[len(cells)-1] == "" {
+						cells = cells[:len(cells)-1]
+					}
+					if len(cells) > 0 {
+						rows = append(rows, strings.Join(cells, "\t"))
+					}
+					inRow = false
+				}
+			}
+		}
+	}
+	return rows, nil
+}
+
+func joinExtractedText(sections []string, format string) (string, error) {
+	text := strings.TrimSpace(strings.Join(sections, "\n"))
+	if int64(len(text)) > maxExtractedTextBytes {
+		return "", fmt.Errorf("%s text is too large", format)
 	}
 	return text, nil
 }

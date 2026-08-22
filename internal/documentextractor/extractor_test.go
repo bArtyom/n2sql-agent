@@ -78,6 +78,75 @@ func TestExtractorReadsDOCXHeadingsAndParagraphs(t *testing.T) {
 	}
 }
 
+func TestExtractorReadsPPTXSlidesAsStructuredText(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "documents")
+	if err := os.Mkdir(directory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeZipFile(t, filepath.Join(directory, "deck.pptx"), map[string]string{
+		"ppt/slides/slide2.xml": `<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><a:p><a:r><a:t>Second slide</a:t></a:r></a:p></p:cSld></p:sld>`,
+		"ppt/slides/slide1.xml": `<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><a:p><a:r><a:t>Title</a:t></a:r></a:p><a:p><a:r><a:t>Body</a:t></a:r></a:p></p:cSld></p:sld>`,
+	})
+
+	text, err := documentextractor.New(root).Extract(context.Background(), "documents/deck.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation")
+	if err != nil {
+		t.Fatalf("Extract PPTX = %v", err)
+	}
+	want := "# Slide 1\nTitle\nBody\n# Slide 2\nSecond slide"
+	if text != want {
+		t.Fatalf("Extract PPTX = %q, want %q", text, want)
+	}
+}
+
+func TestExtractorReadsXLSXRowsAndSharedStrings(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "documents")
+	if err := os.Mkdir(directory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeZipFile(t, filepath.Join(directory, "table.xlsx"), map[string]string{
+		"xl/sharedStrings.xml":     `<sst xmlns="s"><si><t>Name</t></si><si><t>Value</t></si><si><t>Deep</t></si></sst>`,
+		"xl/worksheets/sheet1.xml": `<worksheet xmlns="s"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row><row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2"><v>42</v></c></row></sheetData></worksheet>`,
+	})
+
+	text, err := documentextractor.New(root).Extract(context.Background(), "documents/table.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	if err != nil {
+		t.Fatalf("Extract XLSX = %v", err)
+	}
+	want := "# Sheet 1\nName\tValue\nDeep\t42"
+	if text != want {
+		t.Fatalf("Extract XLSX = %q, want %q", text, want)
+	}
+}
+
+func writeZipFile(t *testing.T, path string, files map[string]string) {
+	t.Helper()
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := zip.NewWriter(file)
+	for name, content := range files {
+		entry, err := archive.Create(name)
+		if err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+		if _, err := entry.Write([]byte(content)); err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := archive.Close(); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestExtractorPreservesDOCXTableAsMarkdown(t *testing.T) {
 	root := t.TempDir()
 	directory := filepath.Join(root, "documents")
