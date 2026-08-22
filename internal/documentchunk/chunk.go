@@ -162,6 +162,7 @@ type ChunkReference struct {
 type SearchResult struct {
 	DocumentID        int64          `json:"documentId"`
 	OriginalFilename  string         `json:"originalFilename,omitempty"`
+	AssetURL          string         `json:"assetUrl,omitempty"`
 	Position          int            `json:"position"`
 	Content           string         `json:"content"`
 	ChunkKind         string         `json:"chunkKind,omitempty"`

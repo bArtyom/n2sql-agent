@@ -430,6 +430,7 @@ func conversationMetadataFromAgentResponse(response agentservice.Response) conve
 			metadata.Sources = append(metadata.Sources, conversation.SourceReference{
 				DocumentID:       source.DocumentID,
 				OriginalFilename: source.OriginalFilename,
+				AssetURL:         source.AssetURL,
 				Position:         source.Position,
 				ChunkKind:        source.ChunkKind,
 				Content:          content,

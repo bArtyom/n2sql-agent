@@ -119,6 +119,9 @@ func New(dependencies Dependencies) http.Handler {
 		if reprocessor, ok := dependencies.Documents.(document.Reprocessor); ok {
 			mux.Handle("POST /api/knowledge-bases/{id}/documents/{documentID}/reprocess", handler.NewDocumentReprocess(reprocessor))
 		}
+		if assetReader, ok := dependencies.Documents.(document.AssetReader); ok {
+			mux.Handle("GET /api/knowledge-bases/{id}/documents/{documentID}/asset", handler.NewDocumentAsset(assetReader))
+		}
 	}
 	if dependencies.ChunkReader != nil {
 		mux.Handle("GET /api/knowledge-bases/{id}/documents/{documentID}/chunks/{position}", handler.NewDocumentChunk(dependencies.ChunkReader))

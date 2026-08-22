@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
@@ -29,6 +30,7 @@ var (
 	ErrUnsupportedFile       = errors.New("unsupported file")
 	ErrFileTooLarge          = errors.New("file is too large")
 	ErrDuplicateDocument     = errors.New("document already exists")
+	ErrInvalidStoragePath    = errors.New("invalid document storage path")
 )
 
 type Document struct {
@@ -103,6 +105,26 @@ type FileStore interface {
 	Delete(context.Context, string) error
 }
 
+type Asset struct {
+	OriginalFilename string
+	ContentType      string
+	SizeBytes        int64
+	Content          io.ReadSeeker
+	Close            func() error
+}
+
+type AssetReader interface {
+	OpenAsset(context.Context, int64, int64) (Asset, error)
+}
+
+type assetMetadataStore interface {
+	AssetMetadata(context.Context, int64, int64) (string, string, string, int64, error)
+}
+
+type assetFileOpener interface {
+	Open(context.Context, string) (io.ReadSeeker, func() error, error)
+}
+
 type Service struct {
 	store       Store
 	files       FileStore
@@ -147,6 +169,26 @@ func (s *Service) Upload(ctx context.Context, input UploadInput) (Document, erro
 		return Document{}, err
 	}
 	return document, nil
+}
+
+func (s *Service) OpenAsset(ctx context.Context, knowledgeBaseID, documentID int64) (Asset, error) {
+	metadataStore, ok := s.store.(assetMetadataStore)
+	if !ok {
+		return Asset{}, ErrUnsupportedFile
+	}
+	opener, ok := s.files.(assetFileOpener)
+	if !ok {
+		return Asset{}, ErrUnsupportedFile
+	}
+	storagePath, filename, contentType, sizeBytes, err := metadataStore.AssetMetadata(ctx, knowledgeBaseID, documentID)
+	if err != nil {
+		return Asset{}, err
+	}
+	content, closeFile, err := opener.Open(ctx, storagePath)
+	if err != nil {
+		return Asset{}, err
+	}
+	return Asset{OriginalFilename: filename, ContentType: contentType, SizeBytes: sizeBytes, Content: content, Close: closeFile}, nil
 }
 
 func (s *Service) List(ctx context.Context, knowledgeBaseID int64) ([]Document, error) {
@@ -240,6 +282,21 @@ func (s *LocalFileStore) Save(ctx context.Context, extension string, content io.
 	return relativePath, sizeBytes, hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
+func (s *LocalFileStore) Open(ctx context.Context, storagePath string) (io.ReadSeeker, func() error, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	storagePath = filepath.FromSlash(storagePath)
+	if filepath.IsAbs(storagePath) || filepath.Clean(storagePath) != storagePath || filepath.Dir(storagePath) != "documents" {
+		return nil, nil, ErrInvalidStoragePath
+	}
+	file, err := os.Open(filepath.Join(s.root, storagePath))
+	if err != nil {
+		return nil, nil, fmt.Errorf("open document asset: %w", err)
+	}
+	return file, file.Close, nil
+}
+
 func (s *LocalFileStore) Delete(ctx context.Context, storagePath string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -273,6 +330,28 @@ func (s *PostgresStore) EnsureKnowledgeBase(ctx context.Context, id int64) error
 		return ErrKnowledgeBaseNotFound
 	}
 	return nil
+}
+
+func (s *PostgresStore) AssetMetadata(ctx context.Context, knowledgeBaseID, documentID int64) (string, string, string, int64, error) {
+	var storagePath, filename, contentType string
+	var sizeBytes int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT d.storage_path, d.original_filename, d.content_type, d.size_bytes
+		FROM documents AS d
+		JOIN knowledge_bases AS kb ON kb.id = d.knowledge_base_id
+		WHERE d.id = $1 AND d.knowledge_base_id = $2
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, documentID, knowledgeBaseID).
+		Scan(&storagePath, &filename, &contentType, &sizeBytes)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", "", 0, ErrDocumentNotFound
+	}
+	if err != nil {
+		return "", "", "", 0, fmt.Errorf("read document asset metadata: %w", err)
+	}
+	if !strings.HasPrefix(contentType, "image/") {
+		return "", "", "", 0, ErrUnsupportedFile
+	}
+	return storagePath, filename, contentType, sizeBytes, nil
 }
 
 func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Document, error) {

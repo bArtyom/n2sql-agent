@@ -184,7 +184,8 @@ func NormalizeDocumentIDs(documentIDs []int64) ([]int64, error) {
 }
 
 func (s *Service) SearchWithOptions(ctx context.Context, knowledgeBaseID int64, query string, limit int, options SearchOptions) ([]Result, error) {
-	return s.searchWithOptions(ctx, knowledgeBaseID, query, limit, options)
+	results, err := s.searchWithOptions(ctx, knowledgeBaseID, query, limit, options)
+	return attachAssetURLs(knowledgeBaseID, results), err
 }
 
 // FilterByMaxDistance keeps only results close enough to the query. pgvector
@@ -270,7 +271,24 @@ func (s *Service) ClearCache(knowledgeBaseID int64) {
 }
 
 func (s *Service) Search(ctx context.Context, knowledgeBaseID int64, query string, limit int) ([]Result, error) {
-	return s.searchWithOptions(ctx, knowledgeBaseID, query, limit, SearchOptions{})
+	return s.SearchWithOptions(ctx, knowledgeBaseID, query, limit, SearchOptions{})
+}
+
+func attachAssetURLs(knowledgeBaseID int64, results []Result) []Result {
+	if knowledgeBaseID <= 0 {
+		return results
+	}
+	for index := range results {
+		if isImageFilename(results[index].OriginalFilename) {
+			results[index].AssetURL = fmt.Sprintf("/api/knowledge-bases/%d/documents/%d/asset", knowledgeBaseID, results[index].DocumentID)
+		}
+	}
+	return results
+}
+
+func isImageFilename(filename string) bool {
+	filename = strings.ToLower(strings.TrimSpace(filename))
+	return strings.HasSuffix(filename, ".png") || strings.HasSuffix(filename, ".jpg") || strings.HasSuffix(filename, ".jpeg") || strings.HasSuffix(filename, ".webp")
 }
 
 func (s *Service) searchWithOptions(ctx context.Context, knowledgeBaseID int64, query string, limit int, options SearchOptions) ([]Result, error) {

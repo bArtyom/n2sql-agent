@@ -97,6 +97,7 @@ type MessageMetadata struct {
 type SourceReference struct {
 	DocumentID       int64   `json:"documentId"`
 	OriginalFilename string  `json:"originalFilename,omitempty"`
+	AssetURL         string  `json:"assetUrl,omitempty"`
 	Position         int     `json:"position"`
 	ChunkKind        string  `json:"chunkKind,omitempty"`
 	Content          string  `json:"content"`
