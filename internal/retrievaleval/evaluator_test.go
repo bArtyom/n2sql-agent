@@ -15,10 +15,21 @@ type searcherStub struct {
 
 type explainableSearcherStub struct{}
 
+type passageSearcherStub struct{}
+
 func (explainableSearcherStub) Search(context.Context, int64, string, int) ([]retrieval.Result, error) {
 	return []retrieval.Result{
 		{DocumentID: 9, Position: 2, Distance: 0.2, MatchType: "hybrid", HeadingScore: 0.8},
 		{DocumentID: 4, Position: 1, Distance: 0.3, MatchType: "keyword", ChunkKind: "summary"},
+	}, nil
+}
+
+func (passageSearcherStub) Search(context.Context, int64, string, int) ([]retrieval.Result, error) {
+	return []retrieval.Result{
+		{DocumentID: 1, Position: 0, Distance: 0.10},
+		{DocumentID: 2, Position: 0, Distance: 0.20},
+		{DocumentID: 1, Position: 1, Distance: 0.30},
+		{DocumentID: 3, Position: 0, Distance: 0.40},
 	}, nil
 }
 
@@ -88,6 +99,29 @@ func TestEvaluateReportsHeadingPathEvidence(t *testing.T) {
 	}
 }
 
+func TestEvaluateReportsPassageRankingMetrics(t *testing.T) {
+	report, err := retrievaleval.Evaluate(context.Background(), passageSearcherStub{}, []retrievaleval.Case{{
+		ID:               "passages",
+		KnowledgeBaseID:  1,
+		Question:         "段落问题",
+		ExpectedRelevant: true,
+		ExpectedChunkIDs: []string{"1:0", "1:1"},
+	}}, []float64{0.35})
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	result := report.Thresholds[0]
+	if result.LabeledChunkCases != 1 || result.PassageRecall != 1 || result.ChunkMRR != 1 {
+		t.Fatalf("passage recall metrics = %#v", result)
+	}
+	if result.PrecisionAt3 != 2.0/3.0 || result.PrecisionAt10 != 0.2 {
+		t.Fatalf("precision metrics = %#v", result)
+	}
+	if result.NDCG3 <= 0.7 || result.NDCG10 <= 0.7 || result.MAP <= 0.8 {
+		t.Fatalf("ranking metrics = %#v", result)
+	}
+}
+
 func TestLoadCasesRejectsUnknownFields(t *testing.T) {
 	_, err := retrievaleval.LoadCases(strings.NewReader(`[{"id":"q1","knowledge_base_id":1,"question":"问题","expected_relevant":true,"extra":1}]`))
 	if err == nil {
@@ -105,6 +139,13 @@ func TestLoadCasesRejectsDuplicateExpectedDocumentIDs(t *testing.T) {
 	}]`))
 	if err == nil {
 		t.Fatal("LoadCases() error = nil, want invalid document labels")
+	}
+}
+
+func TestLoadCasesRejectsDuplicateExpectedChunkIDs(t *testing.T) {
+	_, err := retrievaleval.LoadCases(strings.NewReader(`[{"id":"q1","knowledge_base_id":1,"question":"问题","expected_relevant":true,"expected_chunk_ids":["1:0","1:0"]}]`))
+	if err == nil {
+		t.Fatal("LoadCases() error = nil, want invalid chunk labels")
 	}
 }
 

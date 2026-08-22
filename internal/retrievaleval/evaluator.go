@@ -25,25 +25,27 @@ var DefaultThresholds = []float64{0.55, 0.60, 0.65, 0.70, 0.75}
 
 // Case labels whether at least one useful chunk should exist for a question.
 type Case struct {
-	ID                  string  `json:"id"`
-	KnowledgeBaseID     int64   `json:"knowledge_base_id"`
-	Question            string  `json:"question"`
-	ExpectedRelevant    bool    `json:"expected_relevant"`
-	ExpectedDocumentIDs []int64 `json:"expected_document_ids,omitempty"`
-	Notes               string  `json:"notes,omitempty"`
+	ID                  string   `json:"id"`
+	KnowledgeBaseID     int64    `json:"knowledge_base_id"`
+	Question            string   `json:"question"`
+	ExpectedRelevant    bool     `json:"expected_relevant"`
+	ExpectedDocumentIDs []int64  `json:"expected_document_ids,omitempty"`
+	ExpectedChunkIDs    []string `json:"expected_chunk_ids,omitempty"`
+	Notes               string   `json:"notes,omitempty"`
 }
 
 type CaseResult struct {
-	ID                        string   `json:"id"`
-	ExpectedRelevant          bool     `json:"expected_relevant"`
-	Retrieved                 int      `json:"retrieved"`
-	MinimumDistance           *float64 `json:"minimum_distance,omitempty"`
-	RelevantRetrieved         bool     `json:"relevant_retrieved,omitempty"`
-	FirstRelevantRank         int      `json:"first_relevant_rank,omitempty"`
-	FirstRelevantMatchType    string   `json:"first_relevant_match_type,omitempty"`
-	FirstRelevantHeadingScore float64  `json:"first_relevant_heading_score,omitempty"`
-	HeadingPathHits           int      `json:"heading_path_hits,omitempty"`
-	SummaryHits               int      `json:"summary_hits,omitempty"`
+	ID                        string             `json:"id"`
+	ExpectedRelevant          bool               `json:"expected_relevant"`
+	Retrieved                 int                `json:"retrieved"`
+	MinimumDistance           *float64           `json:"minimum_distance,omitempty"`
+	RelevantRetrieved         bool               `json:"relevant_retrieved,omitempty"`
+	FirstRelevantRank         int                `json:"first_relevant_rank,omitempty"`
+	FirstRelevantMatchType    string             `json:"first_relevant_match_type,omitempty"`
+	FirstRelevantHeadingScore float64            `json:"first_relevant_heading_score,omitempty"`
+	HeadingPathHits           int                `json:"heading_path_hits,omitempty"`
+	SummaryHits               int                `json:"summary_hits,omitempty"`
+	results                   []retrieval.Result `json:"-"`
 }
 
 type ThresholdResult struct {
@@ -64,6 +66,14 @@ type ThresholdResult struct {
 	MRR                  float64      `json:"mrr,omitempty"`
 	HeadingPathHits      int          `json:"heading_path_hits,omitempty"`
 	SummaryHits          int          `json:"summary_hits,omitempty"`
+	LabeledChunkCases    int          `json:"labeled_chunk_cases,omitempty"`
+	PassageRecall        float64      `json:"passage_recall,omitempty"`
+	PrecisionAt3         float64      `json:"precision_at_3,omitempty"`
+	PrecisionAt10        float64      `json:"precision_at_10,omitempty"`
+	NDCG3                float64      `json:"ndcg3,omitempty"`
+	NDCG10               float64      `json:"ndcg10,omitempty"`
+	ChunkMRR             float64      `json:"chunk_mrr,omitempty"`
+	MAP                  float64      `json:"map,omitempty"`
 	Cases                []CaseResult `json:"cases"`
 }
 
@@ -97,6 +107,9 @@ func LoadCases(reader io.Reader) ([]Case, error) {
 			return nil, ErrInvalidCase
 		}
 		if err := validateDocumentIDs(evaluationCase.ExpectedDocumentIDs); err != nil {
+			return nil, err
+		}
+		if err := validateChunkIDs(evaluationCase.ExpectedChunkIDs); err != nil {
 			return nil, err
 		}
 	}
@@ -142,6 +155,9 @@ func Evaluate(ctx context.Context, searcher retrieval.Searcher, cases []Case, th
 		if err := validateDocumentIDs(evaluationCase.ExpectedDocumentIDs); err != nil {
 			return Report{}, err
 		}
+		if err := validateChunkIDs(evaluationCase.ExpectedChunkIDs); err != nil {
+			return Report{}, err
+		}
 	}
 
 	caseResults := make([]CaseResult, 0, len(cases))
@@ -181,6 +197,7 @@ func Evaluate(ctx context.Context, searcher retrieval.Searcher, cases []Case, th
 				result.MinimumDistance = &distance
 			}
 		}
+		result.results = results
 		caseResults = append(caseResults, result)
 	}
 
@@ -193,7 +210,8 @@ func Evaluate(ctx context.Context, searcher retrieval.Searcher, cases []Case, th
 			} else {
 				thresholdReport.ExpectedIrrelevant++
 			}
-			hit := caseResults[index].MinimumDistance != nil && *caseResults[index].MinimumDistance <= threshold
+			eligible := resultsWithinThreshold(caseResults[index].results, threshold)
+			hit := len(eligible) > 0
 			if evaluationCase.ExpectedRelevant {
 				if hit {
 					thresholdReport.RelevantHits++
@@ -210,10 +228,21 @@ func Evaluate(ctx context.Context, searcher retrieval.Searcher, cases []Case, th
 			thresholdReport.SummaryHits += caseResult.SummaryHits
 			if len(evaluationCase.ExpectedDocumentIDs) > 0 {
 				thresholdReport.LabeledDocumentCases++
-				if caseResult.RelevantRetrieved {
+				if hasRelevantDocument(eligible, evaluationCase.ExpectedDocumentIDs) {
 					thresholdReport.DocumentHits++
-					thresholdReport.MRR += 1 / float64(caseResult.FirstRelevantRank)
+					thresholdReport.MRR += reciprocalRankForDocuments(eligible, evaluationCase.ExpectedDocumentIDs)
 				}
+			}
+			if len(evaluationCase.ExpectedChunkIDs) > 0 {
+				thresholdReport.LabeledChunkCases++
+				metrics := chunkMetrics(eligible, evaluationCase.ExpectedChunkIDs)
+				thresholdReport.PassageRecall += metrics.Recall
+				thresholdReport.PrecisionAt3 += metrics.PrecisionAt3
+				thresholdReport.PrecisionAt10 += metrics.PrecisionAt10
+				thresholdReport.NDCG3 += metrics.NDCG3
+				thresholdReport.NDCG10 += metrics.NDCG10
+				thresholdReport.ChunkMRR += metrics.MRR
+				thresholdReport.MAP += metrics.MAP
 			}
 		}
 		if thresholdReport.ExpectedRelevant > 0 {
@@ -228,6 +257,16 @@ func Evaluate(ctx context.Context, searcher retrieval.Searcher, cases []Case, th
 		if thresholdReport.LabeledDocumentCases > 0 {
 			thresholdReport.DocumentRecall = float64(thresholdReport.DocumentHits) / float64(thresholdReport.LabeledDocumentCases)
 			thresholdReport.MRR /= float64(thresholdReport.LabeledDocumentCases)
+		}
+		if thresholdReport.LabeledChunkCases > 0 {
+			count := float64(thresholdReport.LabeledChunkCases)
+			thresholdReport.PassageRecall /= count
+			thresholdReport.PrecisionAt3 /= count
+			thresholdReport.PrecisionAt10 /= count
+			thresholdReport.NDCG3 /= count
+			thresholdReport.NDCG10 /= count
+			thresholdReport.ChunkMRR /= count
+			thresholdReport.MAP /= count
 		}
 		report.Thresholds = append(report.Thresholds, thresholdReport)
 	}
