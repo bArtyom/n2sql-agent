@@ -219,7 +219,7 @@ func TestEmbeddingChunkingProcessorDoesNotStoreWhenBatchFails(t *testing.T) {
 	}
 }
 
-func TestEmbeddingHierarchicalProcessorStopsOnFinalChunkQualityFailure(t *testing.T) {
+func TestEmbeddingHierarchicalProcessorIndexesWithChunkQualityWarning(t *testing.T) {
 	store := &hierarchicalChunkStoreStub{}
 	embedder := &recordingEmbedderStub{}
 	processor := worker.NewEmbeddingHierarchicalChunkingProcessor(
@@ -231,11 +231,11 @@ func TestEmbeddingHierarchicalProcessorStopsOnFinalChunkQualityFailure(t *testin
 	)
 
 	err := processor(context.Background(), worker.Task{DocumentID: 4})
-	if err == nil || !strings.Contains(err.Error(), "chunk quality check failed") {
-		t.Fatalf("processor error = %v, want chunk quality failure", err)
+	if err != nil {
+		t.Fatalf("processor error = %v, want warning-only success", err)
 	}
-	if len(embedder.batches) != 0 || store.parents != nil || store.children != nil {
-		t.Fatalf("quality failure reached embedding/store: batches=%#v parents=%#v children=%#v", embedder.batches, store.parents, store.children)
+	if len(embedder.batches) == 0 || store.parents == nil || store.children == nil {
+		t.Fatalf("quality warning stopped indexing: batches=%#v parents=%#v children=%#v", embedder.batches, store.parents, store.children)
 	}
 }
 

@@ -216,7 +216,11 @@ func splitDocumentWithQuality(splitter TextSplitter, task Task, text string) ([]
 			} else if len(diagnostics.StrategyRejections) > 0 {
 				reason = diagnostics.StrategyRejections[len(diagnostics.StrategyRejections)-1].Reason
 			}
-			return nil, Permanent(fmt.Errorf("chunk quality check failed: %s", reason))
+			if len(parts) > 0 {
+				slog.WarnContext(context.Background(), "document chunk quality warning", "document_id", task.DocumentID, "reason", reason)
+				return parts, nil
+			}
+			return parts, Permanent(fmt.Errorf("chunk quality check failed: %s", reason))
 		}
 		return parts, nil
 	}
