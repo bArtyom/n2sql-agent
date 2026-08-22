@@ -57,6 +57,7 @@ func NewAgentRunStatus(reader agentrun.Reader) http.Handler {
 						"run_id":        child.RunID,
 						"status":        child.Status,
 						"attempt_count": child.AttemptCount,
+						"stop_reason":   child.StopReason,
 						"updated_at":    child.UpdatedAt,
 					})
 				}

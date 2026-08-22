@@ -25,7 +25,7 @@ func (s agentRunChildrenReaderStub) ListChildren(context.Context, int64, int64) 
 
 func TestAgentRunChildrenReturnsExecutionTree(t *testing.T) {
 	parent := agentrun.Run{ID: 1, RunID: "parent-1", KnowledgeBaseID: 7, RunKind: agentrun.KindRoot, Status: agentrun.StatusRunning}
-	child := agentrun.Run{ID: 2, RunID: "child-1", ParentRunID: 1, KnowledgeBaseID: 7, RunKind: agentrun.KindChild, Status: agentrun.StatusSucceeded}
+	child := agentrun.Run{ID: 2, RunID: "child-1", ParentRunID: 1, KnowledgeBaseID: 7, RunKind: agentrun.KindChild, Status: agentrun.StatusTimeout, StopReason: agentrun.StopReasonTimeout}
 	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/7/agent-runs/parent-1/children", nil)
 	request.SetPathValue("id", "7")
 	request.SetPathValue("runID", "parent-1")
@@ -39,12 +39,13 @@ func TestAgentRunChildrenReturnsExecutionTree(t *testing.T) {
 		Children []struct {
 			RunID       string `json:"run_id"`
 			ParentRunID string `json:"parent_run_id"`
+			StopReason  string `json:"stop_reason"`
 		} `json:"children"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if body.RunID != "parent-1" || len(body.Children) != 1 || body.Children[0].RunID != "child-1" || body.Children[0].ParentRunID != "parent-1" {
+	if body.RunID != "parent-1" || len(body.Children) != 1 || body.Children[0].RunID != "child-1" || body.Children[0].ParentRunID != "parent-1" || body.Children[0].StopReason != agentrun.StopReasonTimeout {
 		t.Fatalf("tree = %#v", body)
 	}
 }

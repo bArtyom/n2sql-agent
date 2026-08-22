@@ -81,7 +81,7 @@ func TestAgentRunStatusIncludesSafeChildSummaries(t *testing.T) {
 	created := time.Date(2026, time.August, 20, 12, 0, 0, 0, time.UTC)
 	endpoint := handler.NewAgentRunStatus(agentRunReaderStub{
 		run:      agentrun.Run{ID: 10, RunID: "parent-1", KnowledgeBaseID: 7, Status: agentrun.StatusWaitingChildren, UpdatedAt: created},
-		children: []agentrun.Run{{RunID: "child-1", Status: agentrun.StatusRunning, AttemptCount: 1, ErrorMessage: "secret provider detail", UpdatedAt: created}},
+		children: []agentrun.Run{{RunID: "child-1", Status: agentrun.StatusRunning, AttemptCount: 1, StopReason: agentrun.StopReasonToolError, ErrorMessage: "secret provider detail", UpdatedAt: created}},
 	})
 	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/7/agent-runs/parent-1", nil)
 	request.SetPathValue("id", "7")
@@ -92,6 +92,9 @@ func TestAgentRunStatusIncludesSafeChildSummaries(t *testing.T) {
 	body := response.Body.String()
 	if !strings.Contains(body, `"status":"waiting_children"`) || !strings.Contains(body, `"run_id":"child-1"`) {
 		t.Fatalf("body = %q, want parent and child status", body)
+	}
+	if !strings.Contains(body, `"stop_reason":"tool_error"`) {
+		t.Fatalf("body = %q, want child stop reason", body)
 	}
 	if strings.Contains(body, "secret provider detail") {
 		t.Fatalf("body = %q, must not expose child error details", body)

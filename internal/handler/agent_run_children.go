@@ -54,9 +54,11 @@ type agentRunTreeNode struct {
 	Status       agentrun.Status    `json:"status"`
 	AttemptCount int                `json:"attempt_count"`
 	Error        string             `json:"error,omitempty"`
+	StopReason   string             `json:"stop_reason,omitempty"`
 	CreatedAt    interface{}        `json:"created_at"`
 	StartedAt    interface{}        `json:"started_at,omitempty"`
 	FinishedAt   interface{}        `json:"finished_at,omitempty"`
+	UpdatedAt    interface{}        `json:"updated_at"`
 	Response     any                `json:"response,omitempty"`
 	Children     []agentRunTreeNode `json:"children,omitempty"`
 }
@@ -64,7 +66,7 @@ type agentRunTreeNode struct {
 func buildAgentRunTree(ctx context.Context, reader agentrun.ChildReader, run agentrun.Run, depth int) (agentRunTreeNode, error) {
 	node := agentRunTreeNode{
 		RunID: run.RunID, RunKind: run.RunKind, Status: run.Status, AttemptCount: run.AttemptCount,
-		Error: run.ErrorMessage, CreatedAt: run.CreatedAt, StartedAt: run.StartedAt, FinishedAt: run.FinishedAt,
+		Error: run.ErrorMessage, StopReason: run.StopReason, CreatedAt: run.CreatedAt, StartedAt: run.StartedAt, FinishedAt: run.FinishedAt, UpdatedAt: run.UpdatedAt,
 	}
 	if len(run.Response) > 0 {
 		_ = json.Unmarshal(run.Response, &node.Response)
