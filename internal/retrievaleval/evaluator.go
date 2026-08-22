@@ -45,6 +45,13 @@ type CaseResult struct {
 	FirstRelevantHeadingScore float64            `json:"first_relevant_heading_score,omitempty"`
 	HeadingPathHits           int                `json:"heading_path_hits,omitempty"`
 	SummaryHits               int                `json:"summary_hits,omitempty"`
+	PassageRecall             float64            `json:"passage_recall,omitempty"`
+	PrecisionAt3              float64            `json:"precision_at_3,omitempty"`
+	PrecisionAt10             float64            `json:"precision_at_10,omitempty"`
+	NDCG3                     float64            `json:"ndcg3,omitempty"`
+	NDCG10                    float64            `json:"ndcg10,omitempty"`
+	ChunkMRR                  float64            `json:"chunk_mrr,omitempty"`
+	MAP                       float64            `json:"map,omitempty"`
 	results                   []retrieval.Result `json:"-"`
 }
 
@@ -226,6 +233,17 @@ func Evaluate(ctx context.Context, searcher retrieval.Searcher, cases []Case, th
 			caseResult := caseResults[index]
 			thresholdReport.HeadingPathHits += caseResult.HeadingPathHits
 			thresholdReport.SummaryHits += caseResult.SummaryHits
+			if len(evaluationCase.ExpectedChunkIDs) > 0 {
+				metrics := chunkMetrics(eligible, evaluationCase.ExpectedChunkIDs)
+				caseResult.PassageRecall = metrics.Recall
+				caseResult.PrecisionAt3 = metrics.PrecisionAt3
+				caseResult.PrecisionAt10 = metrics.PrecisionAt10
+				caseResult.NDCG3 = metrics.NDCG3
+				caseResult.NDCG10 = metrics.NDCG10
+				caseResult.ChunkMRR = metrics.MRR
+				caseResult.MAP = metrics.MAP
+			}
+			thresholdReport.Cases[index] = caseResult
 			if len(evaluationCase.ExpectedDocumentIDs) > 0 {
 				thresholdReport.LabeledDocumentCases++
 				if hasRelevantDocument(eligible, evaluationCase.ExpectedDocumentIDs) {

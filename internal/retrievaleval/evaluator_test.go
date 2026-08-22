@@ -120,6 +120,10 @@ func TestEvaluateReportsPassageRankingMetrics(t *testing.T) {
 	if result.NDCG3 <= 0.7 || result.NDCG10 <= 0.7 || result.MAP <= 0.8 {
 		t.Fatalf("ranking metrics = %#v", result)
 	}
+	caseResult := result.Cases[0]
+	if caseResult.PassageRecall != 1 || caseResult.ChunkMRR != 1 || caseResult.MAP <= 0.8 {
+		t.Fatalf("case passage metrics = %#v", caseResult)
+	}
 }
 
 func TestLoadCasesRejectsUnknownFields(t *testing.T) {
