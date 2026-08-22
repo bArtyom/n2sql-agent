@@ -28,18 +28,26 @@ const (
 // It describes the selected structure strategy and the quality of the final
 // chunks without retaining the source document a second time.
 type SplitDiagnostics struct {
-	Strategy            SplitStrategy `json:"strategy"`
-	ChunkCount          int           `json:"chunkCount"`
-	HeadingCount        int           `json:"headingCount"`
-	ProtectedBlockCount int           `json:"protectedBlockCount"`
-	TableBlockCount     int           `json:"tableBlockCount"`
-	CodeBlockCount      int           `json:"codeBlockCount"`
-	FormulaBlockCount   int           `json:"formulaBlockCount"`
-	TotalRunes          int           `json:"totalRunes"`
-	MinChunkRunes       int           `json:"minChunkRunes"`
-	MaxChunkRunes       int           `json:"maxChunkRunes"`
-	ShortChunkCount     int           `json:"shortChunkCount"`
-	OversizeChunkCount  int           `json:"oversizeChunkCount"`
+	Strategy            SplitStrategy       `json:"strategy"`
+	ChunkCount          int                 `json:"chunkCount"`
+	HeadingCount        int                 `json:"headingCount"`
+	ProtectedBlockCount int                 `json:"protectedBlockCount"`
+	TableBlockCount     int                 `json:"tableBlockCount"`
+	CodeBlockCount      int                 `json:"codeBlockCount"`
+	FormulaBlockCount   int                 `json:"formulaBlockCount"`
+	QualityPassed       bool                `json:"qualityPassed"`
+	QualityIssues       []string            `json:"qualityIssues,omitempty"`
+	StrategyRejections  []StrategyRejection `json:"strategyRejections,omitempty"`
+	TotalRunes          int                 `json:"totalRunes"`
+	MinChunkRunes       int                 `json:"minChunkRunes"`
+	MaxChunkRunes       int                 `json:"maxChunkRunes"`
+	ShortChunkCount     int                 `json:"shortChunkCount"`
+	OversizeChunkCount  int                 `json:"oversizeChunkCount"`
+}
+
+type StrategyRejection struct {
+	Strategy SplitStrategy `json:"strategy"`
+	Reason   string        `json:"reason"`
 }
 
 type AdaptiveSplitter struct {
@@ -113,22 +121,72 @@ func (s *AdaptiveSplitter) SplitDocumentPartsWithDiagnostics(filename, text stri
 			diagnostics.FormulaBlockCount++
 		}
 	}
+	try := func(strategy SplitStrategy, parts []StructuredPart, headingCount int) ([]StructuredPart, bool) {
+		if ok, reason := validateStructuredParts(parts, diagnostics.TotalRunes, s.recursive.size); !ok {
+			diagnostics.StrategyRejections = append(diagnostics.StrategyRejections, StrategyRejection{Strategy: strategy, Reason: reason})
+			return nil, false
+		}
+		diagnostics.Strategy = strategy
+		diagnostics.HeadingCount = headingCount
+		diagnostics.QualityPassed = true
+		return parts, true
+	}
 	if sections, ok := parseMarkdownSections(lines); ok {
-		diagnostics.Strategy = StrategyHeading
-		diagnostics.HeadingCount = len(sections)
-		parts := s.renderSections(sections)
-		return parts, finalizeDiagnostics(diagnostics, parts, s.recursive.size)
+		if parts, accepted := try(StrategyHeading, s.renderSections(sections), len(sections)); accepted {
+			return parts, finalizeDiagnostics(diagnostics, parts, s.recursive.size)
+		}
 	}
 	if sections, ok := parseHeuristicSections(lines); ok {
-		diagnostics.Strategy = StrategyHeuristic
-		diagnostics.HeadingCount = len(sections)
-		parts := s.renderSections(sections)
-		return parts, finalizeDiagnostics(diagnostics, parts, s.recursive.size)
+		if parts, accepted := try(StrategyHeuristic, s.renderSections(sections), len(sections)); accepted {
+			return parts, finalizeDiagnostics(diagnostics, parts, s.recursive.size)
+		}
 	}
 	diagnostics.Strategy = StrategyRecursive
 	contentParts := s.splitContent(text)
 	parts := addVirtualPaths(filename, contentParts)
+	if ok, reason := validateStructuredParts(parts, diagnostics.TotalRunes, s.recursive.size); !ok {
+		diagnostics.StrategyRejections = append(diagnostics.StrategyRejections, StrategyRejection{Strategy: StrategyRecursive, Reason: reason})
+		diagnostics.QualityIssues = []string{reason}
+	} else {
+		diagnostics.QualityPassed = true
+	}
 	return parts, finalizeDiagnostics(diagnostics, parts, s.recursive.size)
+}
+
+func validateStructuredParts(parts []StructuredPart, totalRunes, target int) (bool, string) {
+	if len(parts) == 0 {
+		return false, "no chunks produced"
+	}
+	if target <= 0 {
+		return false, "invalid chunk target"
+	}
+	if len(parts) == 1 && totalRunes > 2*target {
+		return false, "single chunk for large document"
+	}
+	maxLength := 0
+	tinyCount := 0
+	for index, part := range parts {
+		length := utf8.RuneCountInString(part.Content)
+		if length > maxLength {
+			maxLength = length
+		}
+		if index < len(parts)-1 && length < maxInt(32, target/10) {
+			tinyCount++
+		}
+	}
+	// A short document may legitimately contain several small sections. Only
+	// reject when the fragmentation is clearly widespread, matching the
+	// permissive behavior of WeKnora's validator.
+	if tinyCount > len(parts)/4 && tinyCount > 3 {
+		return false, "too many tiny chunks"
+	}
+	if maxLength < target/4 && totalRunes > target {
+		return false, "all chunks far below target size"
+	}
+	if maxLength > 2*target {
+		return false, "chunk exceeds 2x target size"
+	}
+	return true, ""
 }
 
 func finalizeDiagnostics(diagnostics SplitDiagnostics, parts []StructuredPart, target int) SplitDiagnostics {

@@ -145,6 +145,30 @@ func TestAdaptiveSplitterReportsDiagnostics(t *testing.T) {
 	}
 }
 
+func TestAdaptiveSplitterFallsBackWhenHeadingCreatesTinyChunks(t *testing.T) {
+	splitter := documentchunk.NewAdaptiveSplitter(120, 0)
+	text := "# 文档\n\n" +
+		"## 一\n短。\n\n" +
+		"## 二\n短。\n\n" +
+		"## 三\n短。\n\n" +
+		"## 四\n短。\n\n" +
+		"## 五\n短。\n\n" +
+		"## 六\n短。\n\n" +
+		"## 七\n短。\n\n" +
+		"## 八\n短。\n\n" +
+		strings.Repeat("这是文档后面的正文内容，用于让总长度明显超过目标块大小。", 8)
+	parts, diagnostics := splitter.SplitDocumentPartsWithDiagnostics("guide.md", text)
+	if len(parts) == 0 {
+		t.Fatal("expected fallback chunks")
+	}
+	if diagnostics.Strategy != documentchunk.StrategyRecursive {
+		t.Fatalf("selected strategy = %q, want recursive; diagnostics=%#v", diagnostics.Strategy, diagnostics)
+	}
+	if len(diagnostics.StrategyRejections) == 0 || diagnostics.QualityPassed != true {
+		t.Fatalf("fallback diagnostics = %#v", diagnostics)
+	}
+}
+
 func TestStructuredPartEmbeddingContentExcludesVirtualPath(t *testing.T) {
 	semantic := documentchunk.StructuredPart{Content: "安装 Docker。", HeadingPath: "部署指南 > Windows", HeadingPathKind: documentchunk.HeadingPathSemantic}
 	if got := semantic.EmbeddingContent("内部部署手册"); got != "内部部署手册\n\n部署指南 > Windows\n\n安装 Docker。" {
