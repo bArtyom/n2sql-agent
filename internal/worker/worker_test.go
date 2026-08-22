@@ -57,6 +57,12 @@ func (extractorStub) Extract(context.Context, string, string) (string, error) {
 	return "source text", nil
 }
 
+type oversizedProtectedBlockExtractor struct{}
+
+func (oversizedProtectedBlockExtractor) Extract(context.Context, string, string) (string, error) {
+	return "```go\n" + strings.Repeat("x", 40) + "\n```", nil
+}
+
 type splitterStub struct{}
 
 func (splitterStub) Split(string) []string { return []string{"first", "second"} }
@@ -210,6 +216,26 @@ func TestEmbeddingChunkingProcessorDoesNotStoreWhenBatchFails(t *testing.T) {
 	}
 	if store.chunks != nil || store.embeddings != nil {
 		t.Fatalf("store received partial data: chunks=%#v embeddings=%#v", store.chunks, store.embeddings)
+	}
+}
+
+func TestEmbeddingHierarchicalProcessorStopsOnFinalChunkQualityFailure(t *testing.T) {
+	store := &hierarchicalChunkStoreStub{}
+	embedder := &recordingEmbedderStub{}
+	processor := worker.NewEmbeddingHierarchicalChunkingProcessor(
+		oversizedProtectedBlockExtractor{},
+		documentchunk.NewAdaptiveSplitter(1, 0),
+		fixedSplitter{chunks: []string{"child"}},
+		store,
+		embedder,
+	)
+
+	err := processor(context.Background(), worker.Task{DocumentID: 4})
+	if err == nil || !strings.Contains(err.Error(), "chunk quality check failed") {
+		t.Fatalf("processor error = %v, want chunk quality failure", err)
+	}
+	if len(embedder.batches) != 0 || store.parents != nil || store.children != nil {
+		t.Fatalf("quality failure reached embedding/store: batches=%#v parents=%#v children=%#v", embedder.batches, store.parents, store.children)
 	}
 }
 

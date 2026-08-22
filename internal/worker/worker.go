@@ -86,7 +86,11 @@ func NewChunkingProcessor(extractor TextExtractor, splitter TextSplitter, chunks
 		if err != nil {
 			return err
 		}
-		parts := splitDocument(splitter, task, text)
+		parts, qualityErr := splitDocumentWithQuality(splitter, task, text)
+		if qualityErr != nil {
+			saveDiagnostics(ctx, chunks, splitter, task, text)
+			return qualityErr
+		}
 		contents := structuredContents(parts)
 		if len(contents) == 0 {
 			return Permanent(errors.New("document contains no chunks"))
@@ -105,7 +109,11 @@ func NewEmbeddingChunkingProcessor(extractor TextExtractor, splitter TextSplitte
 		if err != nil {
 			return err
 		}
-		parts := splitDocument(splitter, task, text)
+		parts, qualityErr := splitDocumentWithQuality(splitter, task, text)
+		if qualityErr != nil {
+			saveDiagnostics(ctx, chunks, splitter, task, text)
+			return qualityErr
+		}
 		contents := structuredContents(parts)
 		if len(contents) == 0 {
 			return Permanent(errors.New("document contains no chunks"))
@@ -131,7 +139,11 @@ func NewEmbeddingHierarchicalChunkingProcessor(extractor TextExtractor, parentSp
 		if err != nil {
 			return err
 		}
-		parentParts := splitDocument(parentSplitter, task, text)
+		parentParts, qualityErr := splitDocumentWithQuality(parentSplitter, task, text)
+		if qualityErr != nil {
+			saveDiagnostics(ctx, chunks, parentSplitter, task, text)
+			return qualityErr
+		}
 		if len(parentParts) == 0 {
 			return Permanent(errors.New("document contains no parent chunks"))
 		}
@@ -139,9 +151,13 @@ func NewEmbeddingHierarchicalChunkingProcessor(extractor TextExtractor, parentSp
 		children := make([]documentchunk.ChildChunk, 0)
 		for parentPosition, parentContent := range parentParts {
 			parents[parentPosition] = documentchunk.ParentChunk{Position: parentPosition, Content: parentContent.Content, HeadingPath: parentContent.HeadingPath}
-			childParts := childSplitter.Split(parentContent.Content)
+			childParts, qualityErr := splitDocumentWithQuality(childSplitter, task, parentContent.Content)
+			if qualityErr != nil {
+				saveDiagnostics(ctx, chunks, childSplitter, task, parentContent.Content)
+				return qualityErr
+			}
 			for _, childContent := range childParts {
-				children = append(children, documentchunk.ChildChunk{Position: len(children), ParentPosition: parentPosition, Content: childContent, HeadingPath: parentContent.HeadingPath})
+				children = append(children, documentchunk.ChildChunk{Position: len(children), ParentPosition: parentPosition, Content: childContent.Content, HeadingPath: parentContent.HeadingPath})
 			}
 		}
 		if len(children) == 0 {
@@ -188,6 +204,23 @@ func splitDocument(splitter TextSplitter, task Task, text string) []documentchun
 		result = append(result, documentchunk.StructuredPart{Content: part})
 	}
 	return result
+}
+
+func splitDocumentWithQuality(splitter TextSplitter, task Task, text string) ([]documentchunk.StructuredPart, error) {
+	if structured, ok := splitter.(*documentchunk.AdaptiveSplitter); ok {
+		parts, diagnostics := structured.SplitDocumentPartsWithDiagnostics(documentTitle(task), text)
+		if !diagnostics.QualityPassed {
+			reason := "unknown quality issue"
+			if len(diagnostics.QualityIssues) > 0 && strings.TrimSpace(diagnostics.QualityIssues[0]) != "" {
+				reason = diagnostics.QualityIssues[0]
+			} else if len(diagnostics.StrategyRejections) > 0 {
+				reason = diagnostics.StrategyRejections[len(diagnostics.StrategyRejections)-1].Reason
+			}
+			return nil, Permanent(fmt.Errorf("chunk quality check failed: %s", reason))
+		}
+		return parts, nil
+	}
+	return splitDocument(splitter, task, text), nil
 }
 
 func documentTitle(task Task) string {
