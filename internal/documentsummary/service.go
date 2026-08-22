@@ -293,6 +293,9 @@ func (s *Service) indexSummary(ctx context.Context, knowledgeBaseID, documentID 
 }
 
 func (s *Service) indexSaved(ctx context.Context, knowledgeBaseID, documentID int64) error {
+	if s.indexer == nil {
+		return errors.New("document summary indexer unavailable")
+	}
 	summary, err := s.store.GetSummary(ctx, knowledgeBaseID, documentID)
 	if err != nil {
 		return err
@@ -300,7 +303,10 @@ func (s *Service) indexSaved(ctx context.Context, knowledgeBaseID, documentID in
 	if summary.Status != "succeeded" || strings.TrimSpace(summary.Content) == "" {
 		return ErrSummaryNotFound
 	}
-	return s.indexSummary(ctx, knowledgeBaseID, documentID, summary.Content)
+	if err := s.indexer(ctx, knowledgeBaseID, documentID, summary.Content); err != nil {
+		return err
+	}
+	return s.store.SaveSummaryIndexSuccess(ctx, knowledgeBaseID, documentID)
 }
 
 func (s *Service) generate(ctx context.Context, document Document) (string, error) {

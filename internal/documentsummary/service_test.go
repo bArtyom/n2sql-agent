@@ -162,3 +162,33 @@ func TestAsyncServiceBackfillSkipsUnreadyAndCompletedDocuments(t *testing.T) {
 		t.Fatalf("backfilled summary status = %q, want succeeded", store.status)
 	}
 }
+
+func TestAsyncServiceReindexesCachedSummaryWithoutCallingChat(t *testing.T) {
+	store := &storeStub{summary: documentsummary.Summary{Content: "缓存摘要", Status: "succeeded", IndexStatus: "failed"}}
+	chat := &chatStub{}
+	service := documentsummary.NewService(sourceStub{}, store, chat, 1000)
+	indexed := 0
+	service.SetSummaryIndexer(func(_ context.Context, _, _ int64, content string) error {
+		indexed++
+		if content != "缓存摘要" {
+			t.Fatalf("indexed content = %q", content)
+		}
+		return nil
+	})
+	async := documentsummary.NewAsyncService(service, 1)
+	workerContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	async.Run(workerContext)
+
+	result, err := async.Start(context.Background(), 7, 9)
+	if err != nil || result.Content != "缓存摘要" || !result.Cached {
+		t.Fatalf("cached result = %#v, error = %v", result, err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && store.summary.IndexStatus != "succeeded" {
+		time.Sleep(time.Millisecond)
+	}
+	if indexed != 1 || chat.calls != 0 || store.summary.IndexStatus != "succeeded" {
+		t.Fatalf("indexed=%d chat_calls=%d index_status=%q", indexed, chat.calls, store.summary.IndexStatus)
+	}
+}
