@@ -248,7 +248,7 @@ func TestEmbeddingHierarchicalProcessorReplacesIndexOnReprocess(t *testing.T) {
 		fixedSplitter{chunks: []string{"parent"}},
 		fixedSplitter{chunks: []string{"child"}},
 		store,
-		embedderStub{},
+		matchingEmbedderStub{},
 	)
 
 	for attempt := 0; attempt < 2; attempt++ {
