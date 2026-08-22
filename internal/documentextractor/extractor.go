@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"unicode/utf16"
 
@@ -244,11 +245,11 @@ func headingPrefix(style string) string {
 	if !strings.HasPrefix(style, "Heading") {
 		return ""
 	}
-	level := strings.TrimPrefix(style, "Heading")
-	if level < "1" || level > "6" {
+	level, err := strconv.Atoi(strings.TrimPrefix(style, "Heading"))
+	if err != nil || level < 1 || level > 6 {
 		return ""
 	}
-	return strings.Repeat("#", int(level[0]-'0')) + " "
+	return strings.Repeat("#", level) + " "
 }
 
 func extractPDFText(ctx context.Context, content []byte) (string, error) {

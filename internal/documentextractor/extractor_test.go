@@ -96,6 +96,33 @@ func TestExtractorReadsHTMLStructureWithoutScriptOrStyle(t *testing.T) {
 	}
 }
 
+func TestExtractorRejectsDOCXWithoutDocumentXML(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "documents")
+	if err := os.Mkdir(directory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "broken.docx")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := zip.NewWriter(file)
+	if _, err := archive.Create("word/styles.xml"); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, err = documentextractor.New(root).Extract(context.Background(), "documents/broken.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+	if err == nil || !strings.Contains(err.Error(), "document.xml is missing") {
+		t.Fatalf("broken DOCX error = %v", err)
+	}
+}
+
 func TestExtractorReadsPDFText(t *testing.T) {
 	root := t.TempDir()
 	directory := filepath.Join(root, "documents")
