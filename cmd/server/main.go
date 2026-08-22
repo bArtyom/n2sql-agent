@@ -122,6 +122,34 @@ func main() {
 	})
 	documentSummaryAsync := documentsummary.NewAsyncService(documentSummaryService, 1)
 	documentSummaryAsync.Run(context.Background())
+	go func() {
+		backfillContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		knowledgeBases, err := knowledgeBaseService.List(backfillContext)
+		if err != nil {
+			slog.WarnContext(backfillContext, "document_summary_backfill_list_knowledge_bases_failed", "error", err)
+			return
+		}
+		candidates := make([]documentsummary.BackfillCandidate, 0)
+		for _, knowledgeBase := range knowledgeBases {
+			documents, listErr := documentService.List(backfillContext, knowledgeBase.ID)
+			if listErr != nil {
+				slog.WarnContext(backfillContext, "document_summary_backfill_list_documents_failed", "knowledge_base_id", knowledgeBase.ID, "error", listErr)
+				continue
+			}
+			for _, document := range documents {
+				candidates = append(candidates, documentsummary.BackfillCandidate{
+					KnowledgeBaseID:  document.KnowledgeBaseID,
+					DocumentID:       document.ID,
+					ProcessingStatus: document.ProcessingStatus,
+					SummaryStatus:    document.SummaryStatus,
+				})
+			}
+		}
+		if scheduled := documentSummaryAsync.Backfill(backfillContext, candidates); scheduled > 0 {
+			slog.InfoContext(backfillContext, "document_summary_backfill_scheduled", "count", scheduled)
+		}
+	}()
 	runner := worker.NewRunnerWithMetricsAndInvalidator(worker.NewPostgresStore(db), processor, metricsRegistry, searchService)
 	runner.SetSuccessHook(func(ctx context.Context, task worker.Task) {
 		if err := documentSummaryAsync.PreGenerate(ctx, task.KnowledgeBaseID, task.DocumentID); err != nil {

@@ -36,6 +36,7 @@ type Document struct {
 	ContentType         string                         `json:"contentType"`
 	SizeBytes           int64                          `json:"sizeBytes"`
 	ProcessingStatus    string                         `json:"processingStatus"`
+	SummaryStatus       string                         `json:"summaryStatus,omitempty"`
 	ChunkingDiagnostics documentchunk.SplitDiagnostics `json:"chunkingDiagnostics"`
 }
 
@@ -270,7 +271,7 @@ func (s *PostgresStore) EnsureKnowledgeBase(ctx context.Context, id int64) error
 func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Document, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT d.id, d.knowledge_base_id, d.original_filename, d.content_type, d.size_bytes,
-		       d.chunking_diagnostics,
+		       d.chunking_diagnostics, d.summary_status,
 		       COALESCE(task.status, 'pending') AS processing_status
 		FROM documents AS d
 		LEFT JOIN LATERAL (
@@ -302,6 +303,7 @@ func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Docu
 			&document.ContentType,
 			&document.SizeBytes,
 			&diagnostics,
+			&document.SummaryStatus,
 			&document.ProcessingStatus,
 		); err != nil {
 			return nil, fmt.Errorf("scan document: %w", err)

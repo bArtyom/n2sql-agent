@@ -121,3 +121,29 @@ func TestAsyncServiceQueuesSummaryWithoutWaitingForModel(t *testing.T) {
 		t.Fatalf("summary status = %q, want succeeded", store.status)
 	}
 }
+
+func TestAsyncServiceBackfillSkipsUnreadyAndCompletedDocuments(t *testing.T) {
+	store := &storeStub{}
+	service := documentsummary.NewService(sourceStub{document: documentsummary.Document{Chunks: []string{"正文"}}}, store, &chatStub{}, 1000)
+	async := documentsummary.NewAsyncService(service, 1)
+	workerContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	async.Run(workerContext)
+
+	scheduled := async.Backfill(context.Background(), []documentsummary.BackfillCandidate{
+		{KnowledgeBaseID: 7, DocumentID: 1, ProcessingStatus: "processing", SummaryStatus: "none"},
+		{KnowledgeBaseID: 7, DocumentID: 2, ProcessingStatus: "succeeded", SummaryStatus: "processing"},
+		{KnowledgeBaseID: 7, DocumentID: 3, ProcessingStatus: "succeeded", SummaryStatus: "succeeded"},
+		{KnowledgeBaseID: 7, DocumentID: 4, ProcessingStatus: "succeeded", SummaryStatus: "none"},
+	})
+	if scheduled != 1 {
+		t.Fatalf("scheduled = %d, want one pending summary", scheduled)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && store.status != "succeeded" {
+		time.Sleep(time.Millisecond)
+	}
+	if store.status != "succeeded" {
+		t.Fatalf("backfilled summary status = %q, want succeeded", store.status)
+	}
+}

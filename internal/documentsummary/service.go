@@ -47,6 +47,16 @@ type asyncRequest struct {
 	taskID                      string
 }
 
+// BackfillCandidate describes an already indexed document that may need its
+// summary generated. Keeping this small avoids coupling the summary package
+// to the document package.
+type BackfillCandidate struct {
+	KnowledgeBaseID  int64
+	DocumentID       int64
+	ProcessingStatus string
+	SummaryStatus    string
+}
+
 // AsyncService keeps long document summaries out of the interactive Agent
 // request. Summary status and content remain durable in the document table.
 type AsyncService struct {
@@ -96,6 +106,28 @@ func (s *AsyncService) PreGenerate(ctx context.Context, knowledgeBaseID, documen
 	}
 	_, err := s.Start(ctx, knowledgeBaseID, documentID)
 	return err
+}
+
+// Backfill queues summaries for documents indexed before pre-generation was
+// enabled. It skips documents that are not ready, already processing, or
+// already summarized. One bad document does not prevent the remaining
+// candidates from being scheduled.
+func (s *AsyncService) Backfill(ctx context.Context, candidates []BackfillCandidate) int {
+	if s == nil || s.service == nil {
+		return 0
+	}
+	scheduled := 0
+	for _, candidate := range candidates {
+		if candidate.ProcessingStatus != "succeeded" || candidate.SummaryStatus == "processing" || candidate.SummaryStatus == "succeeded" {
+			continue
+		}
+		if err := s.PreGenerate(ctx, candidate.KnowledgeBaseID, candidate.DocumentID); err != nil {
+			slog.WarnContext(ctx, "document_summary_backfill_failed", "knowledge_base_id", candidate.KnowledgeBaseID, "document_id", candidate.DocumentID, "error", err)
+			continue
+		}
+		scheduled++
+	}
+	return scheduled
 }
 
 func (s *AsyncService) Run(ctx context.Context) {
