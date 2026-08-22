@@ -1,10 +1,12 @@
 package documentextractor
 
 import (
+	"archive/zip"
 	"bytes"
 	"compress/zlib"
 	"context"
 	"encoding/binary"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode/utf16"
+
+	"golang.org/x/net/html"
 )
 
 const maxExtractedTextBytes int64 = 10 << 20
@@ -42,7 +46,7 @@ func (e *Extractor) Extract(ctx context.Context, storagePath, contentType string
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if contentType != "text/plain" && contentType != "text/markdown" && contentType != "application/pdf" {
+	if contentType != "text/plain" && contentType != "text/markdown" && contentType != "text/html" && contentType != "application/pdf" && contentType != "application/vnd.openxmlformats-officedocument.wordprocessingml.document" {
 		return "", ErrUnsupportedType
 	}
 	normalizedPath := filepath.FromSlash(storagePath)
@@ -76,11 +80,175 @@ func (e *Extractor) Extract(ctx context.Context, storagePath, contentType string
 		if err != nil {
 			return "", err
 		}
+	} else if contentType == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" {
+		text, err = extractDOCXText(ctx, content)
+		if err != nil {
+			return "", err
+		}
+	} else if contentType == "text/html" {
+		text, err = extractHTMLText(ctx, content)
+		if err != nil {
+			return "", err
+		}
 	}
 	if strings.TrimSpace(text) == "" {
 		return "", ErrEmptyText
 	}
 	return text, nil
+}
+
+func extractHTMLText(ctx context.Context, content []byte) (string, error) {
+	root, err := html.Parse(bytes.NewReader(content))
+	if err != nil {
+		return "", fmt.Errorf("parse HTML: %w", err)
+	}
+	var lines []string
+	var visit func(*html.Node)
+	visit = func(node *html.Node) {
+		if node == nil || ctx.Err() != nil {
+			return
+		}
+		if node.Type == html.ElementNode && (node.Data == "script" || node.Data == "style" || node.Data == "head") {
+			return
+		}
+		if node.Type == html.ElementNode {
+			switch node.Data {
+			case "h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "blockquote":
+				value := strings.TrimSpace(strings.Join(strings.Fields(htmlText(node)), " "))
+				if value != "" {
+					if node.Data[0] == 'h' {
+						value = strings.Repeat("#", int(node.Data[1]-'0')) + " " + value
+					}
+					lines = append(lines, value)
+				}
+				return
+			}
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			visit(child)
+		}
+	}
+	visit(root)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	text := strings.TrimSpace(strings.Join(lines, "\n"))
+	if text == "" {
+		return "", ErrEmptyText
+	}
+	if int64(len(text)) > maxExtractedTextBytes {
+		return "", errors.New("HTML text is too large")
+	}
+	return text, nil
+}
+
+func htmlText(node *html.Node) string {
+	if node == nil {
+		return ""
+	}
+	if node.Type == html.TextNode {
+		return node.Data
+	}
+	if node.Type == html.ElementNode && (node.Data == "script" || node.Data == "style" || node.Data == "head") {
+		return ""
+	}
+	var builder strings.Builder
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		builder.WriteString(htmlText(child))
+	}
+	return builder.String()
+}
+
+func extractDOCXText(ctx context.Context, content []byte) (string, error) {
+	archive, err := zip.NewReader(bytes.NewReader(content), int64(len(content)))
+	if err != nil {
+		return "", fmt.Errorf("invalid DOCX archive: %w", err)
+	}
+	var document *zip.File
+	for _, file := range archive.File {
+		if file.Name == "word/document.xml" {
+			document = file
+			break
+		}
+	}
+	if document == nil {
+		return "", errors.New("DOCX document.xml is missing")
+	}
+	if document.UncompressedSize64 > uint64(maxExtractedTextBytes) {
+		return "", errors.New("DOCX document is too large")
+	}
+	reader, err := document.Open()
+	if err != nil {
+		return "", fmt.Errorf("open DOCX document.xml: %w", err)
+	}
+	defer reader.Close()
+	decoder := xml.NewDecoder(io.LimitReader(reader, maxExtractedTextBytes+1))
+	var paragraphs []string
+	var current strings.Builder
+	paragraphDepth := 0
+	heading := ""
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		token, tokenErr := decoder.Token()
+		if errors.Is(tokenErr, io.EOF) {
+			break
+		}
+		if tokenErr != nil {
+			return "", fmt.Errorf("parse DOCX document.xml: %w", tokenErr)
+		}
+		switch element := token.(type) {
+		case xml.StartElement:
+			switch element.Name.Local {
+			case "p":
+				paragraphDepth++
+				if paragraphDepth == 1 {
+					current.Reset()
+					heading = ""
+				}
+			case "pStyle":
+				if paragraphDepth == 1 {
+					for _, attr := range element.Attr {
+						if attr.Name.Local == "val" {
+							heading = headingPrefix(attr.Value)
+							break
+						}
+					}
+				}
+			case "t":
+				var text string
+				if err := decoder.DecodeElement(&text, &element); err != nil {
+					return "", fmt.Errorf("read DOCX text: %w", err)
+				}
+				current.WriteString(text)
+			}
+		case xml.EndElement:
+			if element.Name.Local == "p" && paragraphDepth == 1 {
+				paragraph := strings.TrimSpace(current.String())
+				if paragraph != "" {
+					paragraphs = append(paragraphs, heading+paragraph)
+				}
+				paragraphDepth = 0
+			}
+		}
+	}
+	text := strings.TrimSpace(strings.Join(paragraphs, "\n"))
+	if text == "" {
+		return "", ErrEmptyText
+	}
+	return text, nil
+}
+
+func headingPrefix(style string) string {
+	if !strings.HasPrefix(style, "Heading") {
+		return ""
+	}
+	level := strings.TrimPrefix(style, "Heading")
+	if level < "1" || level > "6" {
+		return ""
+	}
+	return strings.Repeat("#", int(level[0]-'0')) + " "
 }
 
 func extractPDFText(ctx context.Context, content []byte) (string, error) {

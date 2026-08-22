@@ -8,7 +8,7 @@ require (
 	github.com/lib/pq v1.10.9
 	github.com/parquet-go/parquet-go v0.29.0
 	github.com/redis/go-redis/v9 v9.6.1
-	golang.org/x/crypto v0.20.0
+	golang.org/x/crypto v0.31.0
 )
 
 require (
@@ -27,8 +27,9 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.21 // indirect
 	github.com/twpayne/go-geom v1.6.1 // indirect
 	go.uber.org/atomic v1.7.0 // indirect
-	golang.org/x/sync v0.5.0 // indirect
+	golang.org/x/net v0.33.0 // indirect
+	golang.org/x/sync v0.10.0 // indirect
 	golang.org/x/sys v0.38.0 // indirect
-	golang.org/x/text v0.14.0 // indirect
+	golang.org/x/text v0.21.0 // indirect
 	google.golang.org/protobuf v1.34.2 // indirect
 )

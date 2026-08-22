@@ -1,6 +1,7 @@
 package documentextractor_test
 
 import (
+	"archive/zip"
 	"bytes"
 	"compress/zlib"
 	"context"
@@ -38,6 +39,60 @@ func TestExtractorReadsTextAndMarkdown(t *testing.T) {
 		if err != nil || text != testCase.want {
 			t.Fatalf("Extract(%s) = %q, %v", testCase.path, text, err)
 		}
+	}
+}
+
+func TestExtractorReadsDOCXHeadingsAndParagraphs(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "documents")
+	if err := os.Mkdir(directory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "guide.docx")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := zip.NewWriter(file)
+	entry, err := archive.Create("word/document.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = entry.Write([]byte(`<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Install</w:t></w:r></w:p><w:p><w:r><w:t>Run the service.</w:t></w:r></w:p></w:body></w:document>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	text, err := documentextractor.New(root).Extract(context.Background(), "documents/guide.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+	if err != nil {
+		t.Fatalf("Extract DOCX = %v", err)
+	}
+	if text != "# Install\nRun the service." {
+		t.Fatalf("Extract DOCX = %q", text)
+	}
+}
+
+func TestExtractorReadsHTMLStructureWithoutScriptOrStyle(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "documents")
+	if err := os.Mkdir(directory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "guide.html"), []byte(`<html><head><style>.x{}</style><script>alert(1)</script></head><body><h1>Install</h1><p>Run <b>the service</b>.</p><ul><li>Check logs</li></ul></body></html>`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	text, err := documentextractor.New(root).Extract(context.Background(), "documents/guide.html", "text/html")
+	if err != nil {
+		t.Fatalf("Extract HTML = %v", err)
+	}
+	if text != "# Install\nRun the service.\nCheck logs" {
+		t.Fatalf("Extract HTML = %q", text)
 	}
 }
 
