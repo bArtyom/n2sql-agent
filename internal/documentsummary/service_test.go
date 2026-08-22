@@ -33,12 +33,27 @@ func (s *storeStub) MarkSummaryProcessing(context.Context, int64, int64) error {
 	s.status = "processing"
 	return nil
 }
+func (s *storeStub) MarkSummaryIndexProcessing(context.Context, int64, int64) (bool, error) {
+	if s.summary.IndexStatus == "processing" || s.summary.IndexStatus == "succeeded" {
+		return false, nil
+	}
+	s.summary.IndexStatus = "processing"
+	return true, nil
+}
 func (s *storeStub) SaveSummary(_ context.Context, _, _ int64, summary string) error {
-	s.status, s.summary = "succeeded", documentsummary.Summary{Content: summary, Status: "succeeded"}
+	s.status, s.summary = "succeeded", documentsummary.Summary{Content: summary, Status: "succeeded", IndexStatus: "none"}
 	return nil
 }
 func (s *storeStub) SaveSummaryError(context.Context, int64, int64, string) error {
 	s.status = "failed"
+	return nil
+}
+func (s *storeStub) SaveSummaryIndexSuccess(context.Context, int64, int64) error {
+	s.summary.IndexStatus = "succeeded"
+	return nil
+}
+func (s *storeStub) SaveSummaryIndexError(_ context.Context, _, _ int64, message string) error {
+	s.summary.IndexStatus, s.summary.IndexError = "failed", message
 	return nil
 }
 
@@ -133,7 +148,7 @@ func TestAsyncServiceBackfillSkipsUnreadyAndCompletedDocuments(t *testing.T) {
 	scheduled := async.Backfill(context.Background(), []documentsummary.BackfillCandidate{
 		{KnowledgeBaseID: 7, DocumentID: 1, ProcessingStatus: "processing", SummaryStatus: "none"},
 		{KnowledgeBaseID: 7, DocumentID: 2, ProcessingStatus: "succeeded", SummaryStatus: "processing"},
-		{KnowledgeBaseID: 7, DocumentID: 3, ProcessingStatus: "succeeded", SummaryStatus: "succeeded"},
+		{KnowledgeBaseID: 7, DocumentID: 3, ProcessingStatus: "succeeded", SummaryStatus: "succeeded", SummaryIndexStatus: "succeeded"},
 		{KnowledgeBaseID: 7, DocumentID: 4, ProcessingStatus: "succeeded", SummaryStatus: "none"},
 	})
 	if scheduled != 1 {

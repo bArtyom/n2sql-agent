@@ -139,10 +139,11 @@ func main() {
 			}
 			for _, document := range documents {
 				candidates = append(candidates, documentsummary.BackfillCandidate{
-					KnowledgeBaseID:  document.KnowledgeBaseID,
-					DocumentID:       document.ID,
-					ProcessingStatus: document.ProcessingStatus,
-					SummaryStatus:    document.SummaryStatus,
+					KnowledgeBaseID:    document.KnowledgeBaseID,
+					DocumentID:         document.ID,
+					ProcessingStatus:   document.ProcessingStatus,
+					SummaryStatus:      document.SummaryStatus,
+					SummaryIndexStatus: document.SummaryIndexStatus,
 				})
 			}
 		}

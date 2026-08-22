@@ -37,6 +37,7 @@ type Document struct {
 	SizeBytes           int64                          `json:"sizeBytes"`
 	ProcessingStatus    string                         `json:"processingStatus"`
 	SummaryStatus       string                         `json:"summaryStatus,omitempty"`
+	SummaryIndexStatus  string                         `json:"summaryIndexStatus,omitempty"`
 	ChunkingDiagnostics documentchunk.SplitDiagnostics `json:"chunkingDiagnostics"`
 }
 
@@ -271,7 +272,7 @@ func (s *PostgresStore) EnsureKnowledgeBase(ctx context.Context, id int64) error
 func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Document, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT d.id, d.knowledge_base_id, d.original_filename, d.content_type, d.size_bytes,
-		       d.chunking_diagnostics, d.summary_status,
+		       d.chunking_diagnostics, d.summary_status, d.summary_index_status,
 		       COALESCE(task.status, 'pending') AS processing_status
 		FROM documents AS d
 		LEFT JOIN LATERAL (
@@ -304,6 +305,7 @@ func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Docu
 			&document.SizeBytes,
 			&diagnostics,
 			&document.SummaryStatus,
+			&document.SummaryIndexStatus,
 			&document.ProcessingStatus,
 		); err != nil {
 			return nil, fmt.Errorf("scan document: %w", err)
@@ -354,12 +356,13 @@ func (s *PostgresStore) Reprocess(ctx context.Context, knowledgeBaseID, document
 func (s *PostgresStore) GetSummary(ctx context.Context, knowledgeBaseID, documentID int64) (Summary, error) {
 	var summary Summary
 	err := s.db.QueryRowContext(ctx, `
-		SELECT d.summary, d.summary_status, COALESCE(d.summary_error, ''), d.summary_updated_at
+		SELECT d.summary, d.summary_status, COALESCE(d.summary_error, ''), d.summary_updated_at,
+		       d.summary_index_status, COALESCE(d.summary_index_error, ''), d.summary_index_updated_at
 		FROM documents AS d
 		JOIN knowledge_bases AS kb ON kb.id = d.knowledge_base_id
 		WHERE d.id = $1 AND d.knowledge_base_id = $2
 		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, documentID, knowledgeBaseID).
-		Scan(&summary.Content, &summary.Status, &summary.Error, &summary.UpdatedAt)
+		Scan(&summary.Content, &summary.Status, &summary.Error, &summary.UpdatedAt, &summary.IndexStatus, &summary.IndexError, &summary.IndexUpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Summary{}, ErrDocumentNotFound
 	}
@@ -386,7 +389,8 @@ func (s *PostgresStore) MarkSummaryProcessing(ctx context.Context, knowledgeBase
 
 func (s *PostgresStore) SaveSummary(ctx context.Context, knowledgeBaseID, documentID int64, content string) error {
 	result, err := s.db.ExecContext(ctx, `
-		UPDATE documents AS d SET summary = $3, summary_status = 'succeeded', summary_error = NULL, summary_updated_at = CURRENT_TIMESTAMP
+		UPDATE documents AS d SET summary = $3, summary_status = 'succeeded', summary_error = NULL, summary_updated_at = CURRENT_TIMESTAMP,
+			summary_index_status = 'none', summary_index_error = NULL, summary_index_updated_at = NULL
 		FROM knowledge_bases AS kb
 		WHERE d.knowledge_base_id = kb.id AND d.id = $1 AND d.knowledge_base_id = $2
 		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, documentID, knowledgeBaseID, content)
@@ -407,6 +411,45 @@ func (s *PostgresStore) SaveSummaryError(ctx context.Context, knowledgeBaseID, d
 		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, documentID, knowledgeBaseID, message)
 	if err != nil {
 		return fmt.Errorf("save document summary error: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) MarkSummaryIndexProcessing(ctx context.Context, knowledgeBaseID, documentID int64) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE documents AS d SET summary_index_status = 'processing', summary_index_error = NULL
+		FROM knowledge_bases AS kb
+		WHERE d.knowledge_base_id = kb.id AND d.id = $1 AND d.knowledge_base_id = $2
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
+		  AND d.summary_status = 'succeeded'
+		  AND d.summary_index_status NOT IN ('processing', 'succeeded')`, documentID, knowledgeBaseID)
+	if err != nil {
+		return false, fmt.Errorf("mark document summary index processing: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	return affected == 1, err
+}
+
+func (s *PostgresStore) SaveSummaryIndexSuccess(ctx context.Context, knowledgeBaseID, documentID int64) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE documents AS d SET summary_index_status = 'succeeded', summary_index_error = NULL, summary_index_updated_at = CURRENT_TIMESTAMP
+		FROM knowledge_bases AS kb
+		WHERE d.knowledge_base_id = kb.id AND d.id = $1 AND d.knowledge_base_id = $2
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, documentID, knowledgeBaseID)
+	if err != nil {
+		return fmt.Errorf("save document summary index success: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) SaveSummaryIndexError(ctx context.Context, knowledgeBaseID, documentID int64, message string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE documents AS d SET summary_index_status = 'failed', summary_index_error = $3, summary_index_updated_at = CURRENT_TIMESTAMP
+		FROM knowledge_bases AS kb
+		WHERE d.knowledge_base_id = kb.id AND d.id = $1 AND d.knowledge_base_id = $2
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, documentID, knowledgeBaseID, message)
+	if err != nil {
+		return fmt.Errorf("save document summary index error: %w", err)
 	}
 	return nil
 }

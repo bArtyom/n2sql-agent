@@ -25,10 +25,13 @@ type Document struct {
 }
 
 type Summary struct {
-	Content   string       `json:"content"`
-	Status    string       `json:"status"`
-	Error     string       `json:"error,omitempty"`
-	UpdatedAt sql.NullTime `json:"-"`
+	Content        string       `json:"content"`
+	Status         string       `json:"status"`
+	Error          string       `json:"error,omitempty"`
+	UpdatedAt      sql.NullTime `json:"-"`
+	IndexStatus    string       `json:"indexStatus,omitempty"`
+	IndexError     string       `json:"indexError,omitempty"`
+	IndexUpdatedAt sql.NullTime `json:"-"`
 }
 
 type Result struct {
@@ -45,16 +48,18 @@ type AsyncResult struct {
 type asyncRequest struct {
 	knowledgeBaseID, documentID int64
 	taskID                      string
+	indexOnly                   bool
 }
 
 // BackfillCandidate describes an already indexed document that may need its
 // summary generated. Keeping this small avoids coupling the summary package
 // to the document package.
 type BackfillCandidate struct {
-	KnowledgeBaseID  int64
-	DocumentID       int64
-	ProcessingStatus string
-	SummaryStatus    string
+	KnowledgeBaseID    int64
+	DocumentID         int64
+	ProcessingStatus   string
+	SummaryStatus      string
+	SummaryIndexStatus string
 }
 
 // AsyncService keeps long document summaries out of the interactive Agent
@@ -78,6 +83,14 @@ func (s *AsyncService) Start(ctx context.Context, knowledgeBaseID, documentID in
 	}
 	if cached, err := s.service.store.GetSummary(ctx, knowledgeBaseID, documentID); err == nil {
 		if cached.Status == "succeeded" && strings.TrimSpace(cached.Content) != "" {
+			if cached.IndexStatus != "succeeded" {
+				if claimed, claimErr := s.service.store.MarkSummaryIndexProcessing(ctx, knowledgeBaseID, documentID); claimErr == nil && claimed {
+					request := asyncRequest{knowledgeBaseID: knowledgeBaseID, documentID: documentID, indexOnly: true}
+					if enqueueErr := s.enqueue(ctx, request); enqueueErr != nil {
+						_ = s.service.store.SaveSummaryIndexError(context.WithoutCancel(ctx), knowledgeBaseID, documentID, enqueueErr.Error())
+					}
+				}
+			}
 			return AsyncResult{Result: Result{Content: cached.Content, Cached: true}}, nil
 		}
 		if cached.Status == "processing" {
@@ -89,11 +102,18 @@ func (s *AsyncService) Start(ctx context.Context, knowledgeBaseID, documentID in
 	}
 	taskID := fmt.Sprintf("summary-%d-%d-%d", knowledgeBaseID, documentID, time.Now().UnixNano())
 	request := asyncRequest{knowledgeBaseID: knowledgeBaseID, documentID: documentID, taskID: taskID}
+	if err := s.enqueue(ctx, request); err != nil {
+		return AsyncResult{}, err
+	}
+	return AsyncResult{Pending: true, TaskID: taskID}, nil
+}
+
+func (s *AsyncService) enqueue(ctx context.Context, request asyncRequest) error {
 	select {
 	case s.queue <- request:
-		return AsyncResult{Pending: true, TaskID: taskID}, nil
+		return nil
 	case <-ctx.Done():
-		return AsyncResult{}, ctx.Err()
+		return ctx.Err()
 	}
 }
 
@@ -118,7 +138,10 @@ func (s *AsyncService) Backfill(ctx context.Context, candidates []BackfillCandid
 	}
 	scheduled := 0
 	for _, candidate := range candidates {
-		if candidate.ProcessingStatus != "succeeded" || candidate.SummaryStatus == "processing" || candidate.SummaryStatus == "succeeded" {
+		if candidate.ProcessingStatus != "succeeded" || candidate.SummaryStatus == "processing" {
+			continue
+		}
+		if candidate.SummaryStatus == "succeeded" && candidate.SummaryIndexStatus == "succeeded" {
 			continue
 		}
 		if err := s.PreGenerate(ctx, candidate.KnowledgeBaseID, candidate.DocumentID); err != nil {
@@ -142,7 +165,13 @@ func (s *AsyncService) Run(ctx context.Context) {
 					return
 				case request := <-s.queue:
 					taskContext, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-					if _, err := s.service.generateAndSave(taskContext, request.knowledgeBaseID, request.documentID); err != nil {
+					var err error
+					if request.indexOnly {
+						err = s.service.indexSaved(taskContext, request.knowledgeBaseID, request.documentID)
+						if err != nil {
+							_ = s.service.store.SaveSummaryIndexError(context.Background(), request.knowledgeBaseID, request.documentID, err.Error())
+						}
+					} else if _, err = s.service.generateAndSave(taskContext, request.knowledgeBaseID, request.documentID); err != nil {
 						_ = s.service.store.SaveSummaryError(context.Background(), request.knowledgeBaseID, request.documentID, err.Error())
 					}
 					cancel()
@@ -159,8 +188,11 @@ type Source interface {
 type Store interface {
 	GetSummary(context.Context, int64, int64) (Summary, error)
 	MarkSummaryProcessing(context.Context, int64, int64) error
+	MarkSummaryIndexProcessing(context.Context, int64, int64) (bool, error)
 	SaveSummary(context.Context, int64, int64, string) error
 	SaveSummaryError(context.Context, int64, int64, string) error
+	SaveSummaryIndexSuccess(context.Context, int64, int64) error
+	SaveSummaryIndexError(context.Context, int64, int64, string) error
 }
 
 type Chat interface {
@@ -230,13 +262,45 @@ func (s *Service) generateAndSave(ctx context.Context, knowledgeBaseID, document
 		return Result{}, fmt.Errorf("save document summary: %w", err)
 	}
 	if s.indexer != nil {
-		if err := s.indexer(ctx, knowledgeBaseID, documentID, content); err != nil {
+		if err := s.indexSummary(ctx, knowledgeBaseID, documentID, content); err != nil {
 			// The durable summary remains usable by document_summary even if
 			// embedding/indexing is temporarily unavailable.
 			slog.WarnContext(ctx, "document_summary_index_failed", "knowledge_base_id", knowledgeBaseID, "document_id", documentID, "error", err)
 		}
 	}
 	return Result{Content: content}, nil
+}
+
+func (s *Service) indexSummary(ctx context.Context, knowledgeBaseID, documentID int64, content string) error {
+	if s.indexer == nil {
+		return errors.New("document summary indexer unavailable")
+	}
+	claimed, err := s.store.MarkSummaryIndexProcessing(ctx, knowledgeBaseID, documentID)
+	if err != nil {
+		return fmt.Errorf("mark summary index processing: %w", err)
+	}
+	if !claimed {
+		return nil
+	}
+	if err := s.indexer(ctx, knowledgeBaseID, documentID, content); err != nil {
+		_ = s.store.SaveSummaryIndexError(context.WithoutCancel(ctx), knowledgeBaseID, documentID, err.Error())
+		return err
+	}
+	if err := s.store.SaveSummaryIndexSuccess(ctx, knowledgeBaseID, documentID); err != nil {
+		return fmt.Errorf("save summary index status: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) indexSaved(ctx context.Context, knowledgeBaseID, documentID int64) error {
+	summary, err := s.store.GetSummary(ctx, knowledgeBaseID, documentID)
+	if err != nil {
+		return err
+	}
+	if summary.Status != "succeeded" || strings.TrimSpace(summary.Content) == "" {
+		return ErrSummaryNotFound
+	}
+	return s.indexSummary(ctx, knowledgeBaseID, documentID, summary.Content)
 }
 
 func (s *Service) generate(ctx context.Context, document Document) (string, error) {
