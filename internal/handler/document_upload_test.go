@@ -53,6 +53,54 @@ func TestDocumentUploadAcceptsTextFile(t *testing.T) {
 	}
 }
 
+func TestDocumentUploadAcceptsHTMLFile(t *testing.T) {
+	uploader := &documentUploaderStub{}
+	endpoint := handler.NewDocumentUpload(uploader)
+	body, contentType := multipartBody(t, "guide.html", []byte("<h1>Guide</h1>"))
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/4/documents", body)
+	request.Header.Set("Content-Type", contentType)
+	request.SetPathValue("id", "4")
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusCreated || uploader.input.ContentType != "text/html" {
+		t.Fatalf("status=%d upload input=%#v", response.Code, uploader.input)
+	}
+}
+
+func TestDocumentUploadAcceptsDOCXFile(t *testing.T) {
+	uploader := &documentUploaderStub{}
+	endpoint := handler.NewDocumentUpload(uploader)
+	body, contentType := multipartBody(t, "guide.docx", []byte("PK\x03\x04minimal zip header"))
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/4/documents", body)
+	request.Header.Set("Content-Type", contentType)
+	request.SetPathValue("id", "4")
+
+	endpoint.ServeHTTP(response, request)
+
+	want := "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	if response.Code != http.StatusCreated || uploader.input.ContentType != want {
+		t.Fatalf("status=%d upload input=%#v", response.Code, uploader.input)
+	}
+}
+
+func TestDocumentUploadRejectsInvalidDOCXSignature(t *testing.T) {
+	endpoint := handler.NewDocumentUpload(&documentUploaderStub{})
+	body, contentType := multipartBody(t, "guide.docx", []byte("not a zip"))
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/4/documents", body)
+	request.Header.Set("Content-Type", contentType)
+	request.SetPathValue("id", "4")
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("status code = %d, want %d", response.Code, http.StatusUnsupportedMediaType)
+	}
+}
+
 func TestDocumentUploadRejectsUnsupportedFile(t *testing.T) {
 	endpoint := handler.NewDocumentUpload(&documentUploaderStub{})
 	body, contentType := multipartBody(t, "malware.exe", []byte("not a document"))

@@ -75,6 +75,16 @@ func uploadContentType(filename string, content *bufio.Reader) (string, error) {
 	if extension == ".txt" {
 		return "text/plain", nil
 	}
+	if extension == ".html" || extension == ".htm" {
+		return "text/html", nil
+	}
+	if extension == ".docx" {
+		magic, err := content.Peek(4)
+		if err != nil || len(magic) != 4 || string(magic) != "PK\x03\x04" {
+			return "", document.ErrUnsupportedFile
+		}
+		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document", nil
+	}
 	if extension != ".pdf" {
 		return "", document.ErrUnsupportedFile
 	}
