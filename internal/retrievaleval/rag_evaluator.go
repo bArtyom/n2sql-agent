@@ -26,11 +26,12 @@ type MetricResult struct {
 }
 
 type RAGCaseResult struct {
-	ID      string       `json:"id"`
-	Answer  string       `json:"answer,omitempty"`
-	Sources int          `json:"sources"`
-	Metrics MetricResult `json:"metrics"`
-	Error   string       `json:"error,omitempty"`
+	ID           string       `json:"id"`
+	Answer       string       `json:"answer,omitempty"`
+	RetrievedIDs []string     `json:"retrieved_ids,omitempty"`
+	Sources      int          `json:"sources"`
+	Metrics      MetricResult `json:"metrics"`
+	Error        string       `json:"error,omitempty"`
 }
 
 type RAGReport struct {
@@ -57,27 +58,15 @@ func EvaluateRAG(ctx context.Context, answerer rag.Answerer, cases []Case, topK 
 	var generationSum GenerationMetrics
 	var retrievalCount, generationCount int
 	for _, evaluationCase := range cases {
-		response, err := answerer.Answer(ctx, evaluationCase.KnowledgeBaseID, evaluationCase.Question, topK)
+		caseResult, err := EvaluateRAGCase(ctx, answerer, evaluationCase, topK)
 		if err != nil {
 			return RAGReport{}, err
 		}
-		caseResult := RAGCaseResult{ID: evaluationCase.ID, Answer: response.Answer, Sources: len(response.Sources)}
 		if len(evaluationCase.ExpectedChunkIDs) > 0 {
-			metrics := chunkMetrics(response.Sources, evaluationCase.ExpectedChunkIDs)
-			precision := precisionAll(uniqueResultKeys(response.Sources), expectedChunkSet(evaluationCase.ExpectedChunkIDs))
-			caseResult.Metrics.RetrievalMetrics = RetrievalMetrics{
-				Precision: precision,
-				Recall:    metrics.Recall,
-				NDCG3:     metrics.NDCG3,
-				NDCG10:    metrics.NDCG10,
-				MRR:       metrics.MRR,
-				MAP:       metrics.MAP,
-			}
 			retrievalSum = addRetrievalMetrics(retrievalSum, caseResult.Metrics.RetrievalMetrics)
 			retrievalCount++
 		}
 		if strings.TrimSpace(evaluationCase.ReferenceAnswer) != "" {
-			caseResult.Metrics.GenerationMetrics = ScoreGeneration(response.Answer, evaluationCase.ReferenceAnswer)
 			generationSum = addGenerationMetrics(generationSum, caseResult.Metrics.GenerationMetrics)
 			generationCount++
 		}
@@ -90,6 +79,31 @@ func EvaluateRAG(ctx context.Context, answerer rag.Answerer, cases []Case, topK 
 		report.Metric.GenerationMetrics = divideGenerationMetrics(generationSum, float64(generationCount))
 	}
 	return report, nil
+}
+
+// EvaluateRAGCase evaluates one question. Keeping this operation separate
+// lets a durable worker persist each case before moving to the next one.
+func EvaluateRAGCase(ctx context.Context, answerer rag.Answerer, evaluationCase Case, topK int) (RAGCaseResult, error) {
+	if ctx == nil || answerer == nil || topK <= 0 {
+		return RAGCaseResult{}, ErrInvalidRAGEvaluator
+	}
+	if err := validateRAGCase(evaluationCase); err != nil {
+		return RAGCaseResult{}, err
+	}
+	response, err := answerer.Answer(ctx, evaluationCase.KnowledgeBaseID, evaluationCase.Question, topK)
+	if err != nil {
+		return RAGCaseResult{}, err
+	}
+	caseResult := RAGCaseResult{ID: evaluationCase.ID, Answer: response.Answer, Sources: len(response.Sources), RetrievedIDs: uniqueResultKeys(response.Sources)}
+	if len(evaluationCase.ExpectedChunkIDs) > 0 {
+		metrics := chunkMetrics(response.Sources, evaluationCase.ExpectedChunkIDs)
+		precision := precisionAll(uniqueResultKeys(response.Sources), expectedChunkSet(evaluationCase.ExpectedChunkIDs))
+		caseResult.Metrics.RetrievalMetrics = RetrievalMetrics{Precision: precision, Recall: metrics.Recall, NDCG3: metrics.NDCG3, NDCG10: metrics.NDCG10, MRR: metrics.MRR, MAP: metrics.MAP}
+	}
+	if strings.TrimSpace(evaluationCase.ReferenceAnswer) != "" {
+		caseResult.Metrics.GenerationMetrics = ScoreGeneration(response.Answer, evaluationCase.ReferenceAnswer)
+	}
+	return caseResult, nil
 }
 
 func validateRAGCase(evaluationCase Case) error {
