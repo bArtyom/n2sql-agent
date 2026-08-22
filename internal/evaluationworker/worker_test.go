@@ -19,6 +19,11 @@ type storeStub struct {
 	failed    bool
 }
 
+func (s *storeStub) Get(context.Context, int64, int64) (evaluationrun.Run, error) { return s.run, nil }
+func (s *storeStub) ListResults(context.Context, int64) ([]evaluationrun.CaseResult, error) {
+	return s.results, nil
+}
+
 func (s *storeStub) Create(context.Context, evaluationrun.CreateInput) (evaluationrun.Run, error) {
 	return s.run, nil
 }
@@ -68,5 +73,32 @@ func TestRunOncePersistsEachCaseBeforeCompletingRun(t *testing.T) {
 	}
 	if !json.Valid(store.results[0].RetrievedIDs) {
 		t.Fatalf("retrieved ids are not JSON: %s", store.results[0].RetrievedIDs)
+	}
+}
+
+type countingAnswerer struct{ calls int }
+
+func (a *countingAnswerer) Answer(context.Context, int64, string, int) (rag.Response, error) {
+	a.calls++
+	return rag.Response{Answer: "生成答案", Sources: []retrieval.Result{{DocumentID: 1, Position: 0}}}, nil
+}
+
+func TestRunOnceSkipsCasesAlreadyPersistedAfterLeaseRecovery(t *testing.T) {
+	store := &storeStub{
+		run:     evaluationrun.Run{ID: 10, KnowledgeBaseID: 3, LeaseToken: "lease"},
+		results: []evaluationrun.CaseResult{{RunID: 10, CaseID: 1}},
+	}
+	answerer := &countingAnswerer{}
+	worker := evaluationworker.Worker{
+		Store: store, Cases: providerStub{cases: []retrievaleval.Case{
+			{ID: "1", KnowledgeBaseID: 3, Question: "已完成", ExpectedChunkIDs: []string{"1:0"}},
+			{ID: "2", KnowledgeBaseID: 3, Question: "待完成", ExpectedChunkIDs: []string{"1:0"}},
+		}}, Answerer: answerer, TopK: 5,
+	}
+	if err := worker.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+	if answerer.calls != 1 || len(store.results) != 2 {
+		t.Fatalf("recovery replayed completed case: calls=%d results=%d", answerer.calls, len(store.results))
 	}
 }
