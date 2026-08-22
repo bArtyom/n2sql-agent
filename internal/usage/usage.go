@@ -45,6 +45,7 @@ type RetrievalObservation struct {
 	KeywordCandidates      int  `json:"keyword_candidates"`
 	KeywordAfterThreshold  int  `json:"keyword_after_threshold"`
 	KeywordRejected        int  `json:"keyword_rejected"`
+	SummaryCandidates      int  `json:"summary_candidates"`
 	DeduplicatedCandidates int  `json:"deduplicated_candidates"`
 	RerankBefore           int  `json:"rerank_before"`
 	RerankAfter            int  `json:"rerank_after"`
@@ -55,7 +56,7 @@ type RetrievalObservation struct {
 
 func (o RetrievalObservation) HasData() bool {
 	return o.VectorCandidates > 0 || o.KeywordCandidates > 0 || o.KeywordAfterThreshold > 0 || o.KeywordRejected > 0 ||
-		o.DeduplicatedCandidates > 0 || o.RerankBefore > 0 || o.RerankAfter > 0 ||
+		o.SummaryCandidates > 0 || o.DeduplicatedCandidates > 0 || o.RerankBefore > 0 || o.RerankAfter > 0 ||
 		o.FinalResults > 0 || o.FinalFiltered > 0 || o.RerankFallback
 }
 
@@ -87,6 +88,7 @@ func (t *RetrievalTracker) ObserveRetrieval(observation RetrievalObservation) {
 	t.observation.KeywordCandidates += nonNegative(observation.KeywordCandidates)
 	t.observation.KeywordAfterThreshold += nonNegative(observation.KeywordAfterThreshold)
 	t.observation.KeywordRejected += nonNegative(observation.KeywordRejected)
+	t.observation.SummaryCandidates += nonNegative(observation.SummaryCandidates)
 	t.observation.DeduplicatedCandidates += nonNegative(observation.DeduplicatedCandidates)
 	t.observation.RerankBefore += nonNegative(observation.RerankBefore)
 	t.observation.RerankAfter += nonNegative(observation.RerankAfter)
@@ -252,6 +254,7 @@ func mergeRetrievalObservation(current, next RetrievalObservation) RetrievalObse
 	current.KeywordCandidates += nonNegative(next.KeywordCandidates)
 	current.KeywordAfterThreshold += nonNegative(next.KeywordAfterThreshold)
 	current.KeywordRejected += nonNegative(next.KeywordRejected)
+	current.SummaryCandidates += nonNegative(next.SummaryCandidates)
 	current.DeduplicatedCandidates += nonNegative(next.DeduplicatedCandidates)
 	current.RerankBefore += nonNegative(next.RerankBefore)
 	current.RerankAfter += nonNegative(next.RerankAfter)

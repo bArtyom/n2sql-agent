@@ -43,6 +43,7 @@ type CaseResult struct {
 	FirstRelevantMatchType    string   `json:"first_relevant_match_type,omitempty"`
 	FirstRelevantHeadingScore float64  `json:"first_relevant_heading_score,omitempty"`
 	HeadingPathHits           int      `json:"heading_path_hits,omitempty"`
+	SummaryHits               int      `json:"summary_hits,omitempty"`
 }
 
 type ThresholdResult struct {
@@ -62,6 +63,7 @@ type ThresholdResult struct {
 	DocumentRecall       float64      `json:"document_recall,omitempty"`
 	MRR                  float64      `json:"mrr,omitempty"`
 	HeadingPathHits      int          `json:"heading_path_hits,omitempty"`
+	SummaryHits          int          `json:"summary_hits,omitempty"`
 	Cases                []CaseResult `json:"cases"`
 }
 
@@ -153,6 +155,9 @@ func Evaluate(ctx context.Context, searcher retrieval.Searcher, cases []Case, th
 			if item.HeadingScore > 0 {
 				result.HeadingPathHits++
 			}
+			if item.ChunkKind == "summary" {
+				result.SummaryHits++
+			}
 		}
 		if len(evaluationCase.ExpectedDocumentIDs) > 0 {
 			expected := make(map[int64]struct{}, len(evaluationCase.ExpectedDocumentIDs))
@@ -202,6 +207,7 @@ func Evaluate(ctx context.Context, searcher retrieval.Searcher, cases []Case, th
 			}
 			caseResult := caseResults[index]
 			thresholdReport.HeadingPathHits += caseResult.HeadingPathHits
+			thresholdReport.SummaryHits += caseResult.SummaryHits
 			if len(evaluationCase.ExpectedDocumentIDs) > 0 {
 				thresholdReport.LabeledDocumentCases++
 				if caseResult.RelevantRetrieved {

@@ -527,6 +527,7 @@ func (s *Service) searchUncached(ctx context.Context, knowledgeBaseID int64, que
 		observation.KeywordCandidates += queryResult.observation.KeywordCandidates
 		observation.KeywordAfterThreshold += queryResult.observation.KeywordAfterThreshold
 		observation.KeywordRejected += queryResult.observation.KeywordRejected
+		observation.SummaryCandidates += queryResult.observation.SummaryCandidates
 		merged = mergeCandidateResults(merged, queryResult.results, MaxResults)
 	}
 	observation.DeduplicatedCandidates = len(merged)
@@ -614,6 +615,11 @@ func (s *Service) searchOneQuery(ctx context.Context, knowledgeBaseID int64, sea
 		observation.KeywordAfterThreshold = len(filteredKeywordResults)
 		observation.KeywordRejected = len(keywordResults) - len(filteredKeywordResults)
 		queryResults = mergeResults(vectorResults, filteredKeywordResults, candidateLimit)
+	}
+	for _, result := range queryResults {
+		if result.ChunkKind == "summary" {
+			observation.SummaryCandidates++
+		}
 	}
 	return querySearchResult{results: queryResults, usage: response.Usage, observation: observation}, nil
 }

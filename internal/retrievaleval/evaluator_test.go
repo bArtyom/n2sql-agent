@@ -18,7 +18,7 @@ type explainableSearcherStub struct{}
 func (explainableSearcherStub) Search(context.Context, int64, string, int) ([]retrieval.Result, error) {
 	return []retrieval.Result{
 		{DocumentID: 9, Position: 2, Distance: 0.2, MatchType: "hybrid", HeadingScore: 0.8},
-		{DocumentID: 4, Position: 1, Distance: 0.3, MatchType: "keyword"},
+		{DocumentID: 4, Position: 1, Distance: 0.3, MatchType: "keyword", ChunkKind: "summary"},
 	}, nil
 }
 
@@ -83,8 +83,8 @@ func TestEvaluateReportsHeadingPathEvidence(t *testing.T) {
 		t.Fatalf("Evaluate() error = %v", err)
 	}
 	result := report.Thresholds[0]
-	if result.HeadingPathHits != 1 || result.Cases[0].FirstRelevantMatchType != "hybrid" || result.Cases[0].FirstRelevantHeadingScore != 0.8 {
-		t.Fatalf("heading evidence = %#v, want one heading hit and hybrid first result", result)
+	if result.HeadingPathHits != 1 || result.SummaryHits != 1 || result.Cases[0].FirstRelevantMatchType != "hybrid" || result.Cases[0].FirstRelevantHeadingScore != 0.8 {
+		t.Fatalf("retrieval evidence = %#v, want heading and summary hits", result)
 	}
 }
 

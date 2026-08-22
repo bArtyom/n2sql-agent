@@ -302,6 +302,17 @@ func TestHybridServiceKeepsSummaryAndTextAtSamePositionDistinct(t *testing.T) {
 	}
 }
 
+func TestHybridServiceReportsSummaryCandidates(t *testing.T) {
+	tracker := usage.NewRetrievalTracker()
+	service := retrieval.NewHybridService(&embeddingStub{}, summaryCollisionStore{}, summaryCollisionStore{})
+	if _, err := service.Search(usage.WithRetrievalObserver(context.Background(), tracker), 7, "问题", 5); err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if got := tracker.RetrievalSnapshot().SummaryCandidates; got != 1 {
+		t.Fatalf("summary candidates = %d, want one", got)
+	}
+}
+
 func TestContextContentLabelsSummaryHits(t *testing.T) {
 	content := retrieval.ContextContent(retrieval.Result{ChunkKind: "summary", Content: "文档摘要内容"})
 	if content != "[文档摘要]\n文档摘要内容" {
