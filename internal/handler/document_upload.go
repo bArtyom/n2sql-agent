@@ -85,6 +85,20 @@ func uploadContentType(filename string, content *bufio.Reader) (string, error) {
 		}
 		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document", nil
 	}
+	if extension == ".pptx" {
+		magic, err := content.Peek(4)
+		if err != nil || len(magic) != 4 || string(magic) != "PK\x03\x04" {
+			return "", document.ErrUnsupportedFile
+		}
+		return "application/vnd.openxmlformats-officedocument.presentationml.presentation", nil
+	}
+	if extension == ".xlsx" {
+		magic, err := content.Peek(4)
+		if err != nil || len(magic) != 4 || string(magic) != "PK\x03\x04" {
+			return "", document.ErrUnsupportedFile
+		}
+		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", nil
+	}
 	if extension != ".pdf" {
 		return "", document.ErrUnsupportedFile
 	}

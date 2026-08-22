@@ -86,6 +86,28 @@ func TestDocumentUploadAcceptsDOCXFile(t *testing.T) {
 	}
 }
 
+func TestDocumentUploadAcceptsPPTXAndXLSXFiles(t *testing.T) {
+	for _, testCase := range []struct {
+		filename, contentType string
+	}{
+		{"deck.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
+		{"table.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+	} {
+		uploader := &documentUploaderStub{}
+		endpoint := handler.NewDocumentUpload(uploader)
+		body, requestType := multipartBody(t, testCase.filename, []byte("PK\x03\x04minimal zip header"))
+		request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/4/documents", body)
+		request.Header.Set("Content-Type", requestType)
+		request.SetPathValue("id", "4")
+
+		response := httptest.NewRecorder()
+		endpoint.ServeHTTP(response, request)
+		if response.Code != http.StatusCreated || uploader.input.ContentType != testCase.contentType {
+			t.Fatalf("%s status=%d upload input=%#v", testCase.filename, response.Code, uploader.input)
+		}
+	}
+}
+
 func TestDocumentUploadRejectsInvalidDOCXSignature(t *testing.T) {
 	endpoint := handler.NewDocumentUpload(&documentUploaderStub{})
 	body, contentType := multipartBody(t, "guide.docx", []byte("not a zip"))
