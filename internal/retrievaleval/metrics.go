@@ -98,6 +98,27 @@ func precisionAt(results []string, expected map[string]struct{}, k int) float64 
 	return float64(hits) / float64(k)
 }
 
+func precisionAll(results []string, expected map[string]struct{}) float64 {
+	if len(results) == 0 {
+		return 0
+	}
+	hits := 0
+	for _, result := range results {
+		if _, ok := expected[result]; ok {
+			hits++
+		}
+	}
+	return float64(hits) / float64(len(results))
+}
+
+func expectedChunkSet(chunkIDs []string) map[string]struct{} {
+	result := make(map[string]struct{}, len(chunkIDs))
+	for _, chunkID := range chunkIDs {
+		result[chunkID] = struct{}{}
+	}
+	return result
+}
+
 func recallAt(results []string, expected map[string]struct{}) float64 {
 	if len(expected) == 0 {
 		return 0

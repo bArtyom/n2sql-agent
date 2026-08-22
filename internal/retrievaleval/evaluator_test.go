@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bArtyom/n2sql-agent/internal/rag"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 	"github.com/bArtyom/n2sql-agent/internal/retrievaleval"
 )
@@ -16,6 +17,8 @@ type searcherStub struct {
 type explainableSearcherStub struct{}
 
 type passageSearcherStub struct{}
+
+type ragAnswererStub struct{}
 
 func (explainableSearcherStub) Search(context.Context, int64, string, int) ([]retrieval.Result, error) {
 	return []retrieval.Result{
@@ -30,6 +33,13 @@ func (passageSearcherStub) Search(context.Context, int64, string, int) ([]retrie
 		{DocumentID: 2, Position: 0, Distance: 0.20},
 		{DocumentID: 1, Position: 1, Distance: 0.30},
 		{DocumentID: 3, Position: 0, Distance: 0.40},
+	}, nil
+}
+
+func (ragAnswererStub) Answer(context.Context, int64, string, int) (rag.Response, error) {
+	return rag.Response{
+		Answer:  "PostgreSQL supports vector search.",
+		Sources: []retrieval.Result{{DocumentID: 1, Position: 0, Distance: 0.1}},
 	}, nil
 }
 
@@ -162,6 +172,26 @@ func TestScoreGenerationMatchesMetricShape(t *testing.T) {
 	empty := retrievaleval.ScoreGeneration("", "参考答案")
 	if empty.BLEU1 != 0 || empty.ROUGE1 != 0 {
 		t.Fatalf("empty generation metrics = %#v", empty)
+	}
+}
+
+func TestEvaluateRAGReturnsWeKnoraMetricGroups(t *testing.T) {
+	report, err := retrievaleval.EvaluateRAG(context.Background(), ragAnswererStub{}, []retrievaleval.Case{{
+		ID:               "rag-1",
+		KnowledgeBaseID:  1,
+		Question:         "向量检索使用什么数据库？",
+		ExpectedRelevant: true,
+		ExpectedChunkIDs: []string{"1:0"},
+		ReferenceAnswer:  "PostgreSQL supports vector search.",
+	}}, 5)
+	if err != nil {
+		t.Fatalf("EvaluateRAG() error = %v", err)
+	}
+	if report.Total != 1 || report.Metric.RetrievalMetrics.Recall != 1 || report.Metric.GenerationMetrics.ROUGEL != 1 {
+		t.Fatalf("RAG report = %#v", report)
+	}
+	if report.Cases[0].Metrics.GenerationMetrics.BLEU4 != 1 {
+		t.Fatalf("case generation metrics = %#v", report.Cases[0].Metrics.GenerationMetrics)
 	}
 }
 
