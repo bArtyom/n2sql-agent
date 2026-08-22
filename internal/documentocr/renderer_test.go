@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/bArtyom/n2sql-agent/internal/documentocr"
@@ -13,6 +14,10 @@ func TestPDFToImageRendererReadsPagesFromCommand(t *testing.T) {
 	root := t.TempDir()
 	command := filepath.Join(root, "fake-pdftoppm")
 	script := "#!/bin/sh\nfor last do :; done\nprefix=\"$last\"\nprintf one > \"$prefix-1.jpg\"\nprintf two > \"$prefix-2.jpg\"\n"
+	if runtime.GOOS == "windows" {
+		command += ".cmd"
+		script = "@echo off\r\nset \"prefix=%~9\"\r\necho|set /p \"=one\">\"%prefix%-1.jpg\"\r\necho|set /p \"=two\">\"%prefix%-2.jpg\"\r\nexit /b 0\r\n"
+	}
 	if err := os.WriteFile(command, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
