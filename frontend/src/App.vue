@@ -545,8 +545,8 @@ async function openSource(source: Source) {
   const requestedSourceKey = sourceKey(source);
   sourceLoading.value = true;
   try {
-      const detail = await requestJSON<Pick<Source, "documentId" | "originalFilename" | "position" | "content" | "headingPath" | "parentContent" | "parentPosition">>(
-      `/api/knowledge-bases/${requestedKnowledgeBaseID}/documents/${source.documentId}/chunks/${source.position}`,
+      const detail = await requestJSON<Pick<Source, "documentId" | "originalFilename" | "position" | "chunkKind" | "content" | "headingPath" | "parentContent" | "parentPosition">>(
+      `/api/knowledge-bases/${requestedKnowledgeBaseID}/documents/${source.documentId}/chunks/${source.position}${source.chunkKind === "summary" ? "?kind=summary" : ""}`,
     );
     const fullSource: Source = { ...source, ...detail, contentTruncated: false };
     if (selectedKnowledgeBaseId.value === requestedKnowledgeBaseID

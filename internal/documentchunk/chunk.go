@@ -116,6 +116,12 @@ type Reader interface {
 	Read(context.Context, int64, int64, int) (SearchResult, error)
 }
 
+// KindReader optionally reads a citation while preserving whether it is a
+// 正文 chunk or a generated document summary.
+type KindReader interface {
+	ReadKind(context.Context, int64, int64, int, string) (SearchResult, error)
+}
+
 // RangeReader loads a bounded sequence of chunks for document preview or a
 // document-reading tool. Implementations must enforce the same knowledge-base
 // and administrator boundary as Reader.
@@ -226,16 +232,24 @@ func (s *PostgresStore) ChunkingDiagnostics(ctx context.Context, knowledgeBaseID
 // current-administrator predicates are part of the SQL query so a caller
 // cannot use a document/position pair to cross the retrieval boundary.
 func (s *PostgresStore) Read(ctx context.Context, knowledgeBaseID, documentID int64, position int) (SearchResult, error) {
+	return s.ReadKind(ctx, knowledgeBaseID, documentID, position, "text")
+}
+
+func (s *PostgresStore) ReadKind(ctx context.Context, knowledgeBaseID, documentID int64, position int, kind string) (SearchResult, error) {
 	if knowledgeBaseID <= 0 || documentID <= 0 || position < 0 {
 		return SearchResult{}, ErrChunkNotFound
 	}
+	if kind != "text" && kind != "summary" {
+		return SearchResult{}, ErrChunkNotFound
+	}
 	var result SearchResult
+	var chunkKind string
 	var headingPath string
 	var parentContent sql.NullString
 	var parentPosition sql.NullInt64
 	err := s.db.QueryRowContext(ctx, `
 		SELECT chunks.document_id, documents.original_filename, chunks.position,
-		       chunks.content, chunks.heading_path, parents.content, parents.position
+		       chunks.content, chunks.chunk_kind, chunks.heading_path, parents.content, parents.position
 		FROM document_chunks AS chunks
 		JOIN documents ON documents.id = chunks.document_id
 		JOIN knowledge_bases AS kb ON kb.id = documents.knowledge_base_id
@@ -243,14 +257,15 @@ func (s *PostgresStore) Read(ctx context.Context, knowledgeBaseID, documentID in
 		WHERE documents.knowledge_base_id = $1
 		  AND documents.id = $2
 		  AND chunks.position = $3
-		  AND chunks.chunk_kind = 'text'
+		  AND chunks.chunk_kind = $4
 		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`,
-		knowledgeBaseID, documentID, position,
+		knowledgeBaseID, documentID, position, kind,
 	).Scan(
 		&result.DocumentID,
 		&result.OriginalFilename,
 		&result.Position,
 		&result.Content,
+		&chunkKind,
 		&headingPath,
 		&parentContent,
 		&parentPosition,
@@ -268,6 +283,9 @@ func (s *PostgresStore) Read(ctx context.Context, knowledgeBaseID, documentID in
 		result.ParentPosition = int(parentPosition.Int64)
 	}
 	result.HeadingPath = headingPath
+	if chunkKind != "text" {
+		result.ChunkKind = chunkKind
+	}
 	return result, nil
 }
 

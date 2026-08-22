@@ -12,6 +12,7 @@ type documentChunkResponse struct {
 	DocumentID       int64  `json:"documentId"`
 	OriginalFilename string `json:"originalFilename,omitempty"`
 	Position         int    `json:"position"`
+	ChunkKind        string `json:"chunkKind,omitempty"`
 	Content          string `json:"content"`
 	HeadingPath      string `json:"headingPath,omitempty"`
 	ParentContent    string `json:"parentContent,omitempty"`
@@ -42,7 +43,19 @@ func NewDocumentChunk(reader documentchunk.Reader) http.Handler {
 			return
 		}
 
-		chunk, err := reader.Read(r.Context(), knowledgeBaseID, documentID, position)
+		kind := r.URL.Query().Get("kind")
+		if kind == "" {
+			kind = "text"
+		}
+		var chunk documentchunk.SearchResult
+		if kindReader, ok := reader.(documentchunk.KindReader); ok {
+			chunk, err = kindReader.ReadKind(r.Context(), knowledgeBaseID, documentID, position, kind)
+		} else if kind == "text" {
+			chunk, err = reader.Read(r.Context(), knowledgeBaseID, documentID, position)
+		} else {
+			http.Error(w, `{"error":"unsupported chunk kind"}`, http.StatusBadRequest)
+			return
+		}
 		if errors.Is(err, documentchunk.ErrChunkNotFound) {
 			http.Error(w, `{"error":"document chunk not found"}`, http.StatusNotFound)
 			return
@@ -55,6 +68,7 @@ func NewDocumentChunk(reader documentchunk.Reader) http.Handler {
 			DocumentID:       chunk.DocumentID,
 			OriginalFilename: chunk.OriginalFilename,
 			Position:         chunk.Position,
+			ChunkKind:        chunk.ChunkKind,
 			Content:          chunk.Content,
 			HeadingPath:      chunk.HeadingPath,
 			ParentContent:    chunk.ParentContent,

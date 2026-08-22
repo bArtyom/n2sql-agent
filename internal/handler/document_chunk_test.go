@@ -18,6 +18,20 @@ type chunkReaderStub struct {
 	calls int
 }
 
+type kindChunkReaderStub struct {
+	chunk documentchunk.SearchResult
+	kind  string
+}
+
+func (s *kindChunkReaderStub) Read(_ context.Context, _, _ int64, _ int) (documentchunk.SearchResult, error) {
+	return documentchunk.SearchResult{}, documentchunk.ErrChunkNotFound
+}
+
+func (s *kindChunkReaderStub) ReadKind(_ context.Context, _, _ int64, _ int, kind string) (documentchunk.SearchResult, error) {
+	s.kind = kind
+	return s.chunk, nil
+}
+
 func (s *chunkReaderStub) Read(_ context.Context, _, _ int64, _ int) (documentchunk.SearchResult, error) {
 	s.calls++
 	return s.chunk, s.err
@@ -41,6 +55,23 @@ func TestDocumentChunkReturnsDetail(t *testing.T) {
 	}
 	if reader.calls != 1 {
 		t.Fatalf("reader calls = %d, want 1", reader.calls)
+	}
+}
+
+func TestDocumentChunkReadsSummaryCitation(t *testing.T) {
+	reader := &kindChunkReaderStub{chunk: documentchunk.SearchResult{
+		DocumentID: 7, OriginalFilename: "guide.md", Position: 0, ChunkKind: "summary", Content: "文档摘要",
+	}}
+	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/3/documents/7/chunks/0?kind=summary", nil)
+	request.SetPathValue("id", "3")
+	request.SetPathValue("documentID", "7")
+	request.SetPathValue("position", "0")
+	response := httptest.NewRecorder()
+
+	handler.NewDocumentChunk(reader).ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || reader.kind != "summary" || !strings.Contains(response.Body.String(), "文档摘要") {
+		t.Fatalf("response = %d %s, kind=%q", response.Code, response.Body.String(), reader.kind)
 	}
 }
 
