@@ -77,6 +77,11 @@ type Store interface {
 	MarkFailed(context.Context, int64, string, string) error
 }
 
+type Reader interface {
+	Get(context.Context, int64, int64) (Run, error)
+	ListResults(context.Context, int64) ([]CaseResult, error)
+}
+
 type PostgresStore struct{ db *sql.DB }
 
 func NewPostgresStore(db *sql.DB) (*PostgresStore, error) {
@@ -140,6 +145,57 @@ func (s *PostgresStore) ClaimNext(ctx context.Context) (Run, error) {
 		return Run{}, fmt.Errorf("claim evaluation run: %w", err)
 	}
 	return run, nil
+}
+
+func (s *PostgresStore) Get(ctx context.Context, id, knowledgeBaseID int64) (Run, error) {
+	if id <= 0 || knowledgeBaseID <= 0 {
+		return Run{}, ErrInvalidRun
+	}
+	var run Run
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, knowledge_base_id, dataset_snapshot, config, status, total_cases,
+			finished_cases, attempt_count, COALESCE(error_message,''), created_at,
+			started_at, finished_at, updated_at
+		FROM evaluation_runs WHERE id = $1 AND knowledge_base_id = $2`, id, knowledgeBaseID).Scan(
+		&run.ID, &run.KnowledgeBaseID, &run.DatasetSnapshot, &run.Config, &run.Status,
+		&run.TotalCases, &run.FinishedCases, &run.AttemptCount, &run.ErrorMessage,
+		&run.CreatedAt, &run.StartedAt, &run.FinishedAt, &run.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Run{}, ErrRunNotFound
+	}
+	if err != nil {
+		return Run{}, fmt.Errorf("get evaluation run: %w", err)
+	}
+	return run, nil
+}
+
+func (s *PostgresStore) ListResults(ctx context.Context, runID int64) ([]CaseResult, error) {
+	if runID <= 0 {
+		return nil, ErrInvalidRun
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT evaluation_run_id, case_id, question, COALESCE(reference_answer,''),
+			COALESCE(generated_answer,''), retrieved_ids, retrieval_metrics,
+			generation_metrics, COALESCE(error_message,'')
+		FROM evaluation_case_results WHERE evaluation_run_id = $1 ORDER BY case_id`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("list evaluation results: %w", err)
+	}
+	defer rows.Close()
+	results := make([]CaseResult, 0)
+	for rows.Next() {
+		var result CaseResult
+		if err := rows.Scan(&result.RunID, &result.CaseID, &result.Question, &result.ReferenceAnswer,
+			&result.GeneratedAnswer, &result.RetrievedIDs, &result.RetrievalMetrics,
+			&result.GenerationMetrics, &result.ErrorMessage); err != nil {
+			return nil, fmt.Errorf("scan evaluation result: %w", err)
+		}
+		results = append(results, result)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate evaluation results: %w", err)
+	}
+	return results, nil
 }
 
 func (s *PostgresStore) RequeueExpired(ctx context.Context) error {

@@ -41,6 +41,22 @@ type Dataset struct {
 	QAs     []QARow
 }
 
+// Snapshot is the HTTP/persistence representation of a dataset. The five
+// arrays keep WeKnora's table semantics; PassageChunkIDs bridges external
+// corpus passage IDs to this application's stable chunk citation IDs.
+type Snapshot struct {
+	Queries         []TextRow         `json:"queries"`
+	Corpus          []TextRow         `json:"corpus"`
+	Answers         []TextRow         `json:"answers"`
+	Qrels           []QrelRow         `json:"qrels"`
+	QAs             []QARow           `json:"qas"`
+	PassageChunkIDs map[string]string `json:"passage_chunk_ids"`
+}
+
+func (s Snapshot) Dataset() Dataset {
+	return Dataset{Queries: s.Queries, Corpus: s.Corpus, Answers: s.Answers, Qrels: s.Qrels, QAs: s.QAs}
+}
+
 type QAPair struct {
 	QID      int64
 	Question string

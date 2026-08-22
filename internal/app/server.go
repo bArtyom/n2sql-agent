@@ -12,6 +12,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
+	"github.com/bArtyom/n2sql-agent/internal/evaluationrun"
 	"github.com/bArtyom/n2sql-agent/internal/followup"
 	"github.com/bArtyom/n2sql-agent/internal/handler"
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
@@ -52,6 +53,8 @@ type Dependencies struct {
 	AgentMaxHistoryBytes    int
 	FollowUpSuggestions     followup.Suggester
 	DocumentSummary         *documentsummary.Service
+	EvaluationRuns          evaluationrun.Store
+	EvaluationReader        evaluationrun.Reader
 	Memories                memory.Store
 	MemoryProfile           memory.ProfileStore
 	APIKeyEnvVar            string
@@ -125,6 +128,11 @@ func New(dependencies Dependencies) http.Handler {
 		summaryHandler := handler.NewDocumentSummary(dependencies.DocumentSummary)
 		mux.Handle("POST /api/knowledge-bases/{id}/documents/{documentID}/summary", summaryHandler)
 		mux.Handle("GET /api/knowledge-bases/{id}/documents/{documentID}/summary", summaryHandler)
+	}
+	if dependencies.EvaluationRuns != nil || dependencies.EvaluationReader != nil {
+		evaluationHandler := handler.NewEvaluation(dependencies.EvaluationRuns, dependencies.EvaluationReader)
+		mux.Handle("POST /api/knowledge-bases/{id}/evaluations", evaluationHandler)
+		mux.Handle("GET /api/knowledge-bases/{id}/evaluations/{runID}", evaluationHandler)
 	}
 	if dependencies.Embeddings != nil {
 		mux.Handle("POST /api/model-provider/embedding-test", handler.NewModelProviderEmbeddingTest(dependencies.Embeddings))

@@ -27,6 +27,8 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 	"github.com/bArtyom/n2sql-agent/internal/documentocr"
 	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
+	"github.com/bArtyom/n2sql-agent/internal/evaluationrun"
+	"github.com/bArtyom/n2sql-agent/internal/evaluationworker"
 	"github.com/bArtyom/n2sql-agent/internal/followup"
 	"github.com/bArtyom/n2sql-agent/internal/handler"
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
@@ -109,6 +111,10 @@ func main() {
 	documentService := document.NewServiceWithInvalidator(documentStore, fileStore, searchService)
 	knowledgeBaseService := knowledgebase.NewServiceWithInvalidator(knowledgeBaseStore, fileStore, searchService)
 	answerService := rag.NewService(searchService, chatService)
+	evaluationStore, err := evaluationrun.NewPostgresStore(db)
+	if err != nil {
+		log.Fatal(err)
+	}
 	documentSummaryService := documentsummary.NewService(chunkStore, documentStore, chatService, cfg.DocumentSummaryInputChars)
 	documentSummaryService.SetSummaryIndexer(func(ctx context.Context, knowledgeBaseID, documentID int64, content string) error {
 		embeddings, err := embeddingService.Embed(ctx, []string{content})
@@ -234,6 +240,8 @@ func main() {
 			AgentMaxHistoryBytes:    cfg.AgentMaxHistoryBytes,
 			FollowUpSuggestions:     followUpService,
 			DocumentSummary:         documentSummaryService,
+			EvaluationRuns:          evaluationStore,
+			EvaluationReader:        evaluationStore,
 			APIKeyEnvVar:            cfg.ModelProviderAPIKeyEnvVar,
 			Metrics:                 metricsRegistry,
 		}),
@@ -252,6 +260,7 @@ func main() {
 		}()
 	}
 	workerDone := make(chan struct{})
+	evaluationDone := make(chan struct{})
 	agentRunDone := make(chan struct{})
 	checkpointCleanupDone := make(chan struct{})
 	go func() {
@@ -292,11 +301,28 @@ func main() {
 			slog.ErrorContext(runContext, "document_worker_loop_error", "error", err)
 		})
 	}()
+	go func() {
+		defer close(evaluationDone)
+		evaluationWorker := evaluationworker.Worker{Store: evaluationStore, Cases: evaluationworker.SnapshotCaseProvider{}, Answerer: answerService, TopK: retrieval.DefaultResults}
+		ticker := time.NewTicker(cfg.WorkerPollInterval)
+		defer ticker.Stop()
+		for {
+			if err := evaluationWorker.RunOnce(runContext); err != nil {
+				slog.ErrorContext(runContext, "evaluation_worker_run_error", "error", err)
+			}
+			select {
+			case <-runContext.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 
 	log.Printf("server listening on %s", cfg.Address)
 	serveErr := app.RunServer(runContext, server, 0)
 	stop()
 	<-workerDone
+	<-evaluationDone
 	<-agentRunDone
 	<-checkpointCleanupDone
 	if pprofDone != nil {

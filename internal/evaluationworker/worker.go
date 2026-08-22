@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 
+	"github.com/bArtyom/n2sql-agent/internal/evaluationdataset"
 	"github.com/bArtyom/n2sql-agent/internal/evaluationrun"
 	"github.com/bArtyom/n2sql-agent/internal/rag"
 	"github.com/bArtyom/n2sql-agent/internal/retrievaleval"
@@ -17,6 +19,33 @@ var ErrInvalidWorker = errors.New("invalid evaluation worker")
 
 type CaseProvider interface {
 	Cases(context.Context, evaluationrun.Run) ([]retrievaleval.Case, error)
+}
+
+type SnapshotCaseProvider struct{}
+
+func (SnapshotCaseProvider) Cases(_ context.Context, run evaluationrun.Run) ([]retrievaleval.Case, error) {
+	var snapshot evaluationdataset.Snapshot
+	if err := json.Unmarshal(run.DatasetSnapshot, &snapshot); err != nil {
+		return nil, fmt.Errorf("decode evaluation dataset snapshot: %w", err)
+	}
+	dataset := snapshot.Dataset()
+	pairs, err := dataset.Pairs()
+	if err != nil {
+		return nil, err
+	}
+	cases := make([]retrievaleval.Case, 0, len(pairs))
+	for _, pair := range pairs {
+		ids := make([]string, 0, len(pair.PIDs))
+		for _, pid := range pair.PIDs {
+			chunkID, ok := snapshot.PassageChunkIDs[strconv.FormatInt(pid, 10)]
+			if !ok || chunkID == "" {
+				return nil, fmt.Errorf("passage %d has no chunk mapping", pid)
+			}
+			ids = append(ids, chunkID)
+		}
+		cases = append(cases, retrievaleval.Case{ID: strconv.FormatInt(pair.QID, 10), KnowledgeBaseID: run.KnowledgeBaseID, Question: pair.Question, ExpectedChunkIDs: ids, ReferenceAnswer: pair.Answer})
+	}
+	return cases, nil
 }
 
 type Worker struct {
@@ -44,13 +73,27 @@ func (w Worker) RunOnce(ctx context.Context) error {
 	if err != nil {
 		return w.fail(ctx, run, err)
 	}
+	completed := make(map[int64]struct{})
+	if reader, ok := w.Store.(evaluationrun.Reader); ok {
+		results, readErr := reader.ListResults(ctx, run.ID)
+		if readErr != nil {
+			return w.fail(ctx, run, readErr)
+		}
+		for _, result := range results {
+			completed[result.CaseID] = struct{}{}
+		}
+	}
 	for _, evaluationCase := range cases {
+		caseID := parseCaseID(evaluationCase.ID)
+		if _, ok := completed[caseID]; ok {
+			continue
+		}
 		result, err := retrievaleval.EvaluateRAGCase(ctx, w.Answerer, evaluationCase, w.TopK)
 		if err != nil {
 			return w.fail(ctx, run, err)
 		}
 		if err := w.Store.SaveCaseResult(ctx, evaluationrun.CaseResult{
-			RunID: run.ID, CaseID: parseCaseID(evaluationCase.ID), Question: evaluationCase.Question,
+			RunID: run.ID, CaseID: caseID, Question: evaluationCase.Question,
 			ReferenceAnswer: evaluationCase.ReferenceAnswer, GeneratedAnswer: result.Answer,
 			RetrievedIDs: mustJSON(result.RetrievedIDs), RetrievalMetrics: mustJSON(result.Metrics.RetrievalMetrics),
 			GenerationMetrics: mustJSON(result.Metrics.GenerationMetrics),
