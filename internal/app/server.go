@@ -134,6 +134,9 @@ func New(dependencies Dependencies) http.Handler {
 		if reprocessor, ok := dependencies.Documents.(document.Reprocessor); ok {
 			mux.Handle("POST /api/knowledge-bases/{id}/documents/{documentID}/reprocess", handler.NewDocumentReprocess(reprocessor))
 		}
+		if batchReprocessor, ok := dependencies.Documents.(document.BatchReprocessor); ok {
+			mux.Handle("POST /api/knowledge-bases/{id}/documents/reprocess", handler.NewDocumentBatchReprocess(batchReprocessor))
+		}
 		if assetReader, ok := dependencies.Documents.(document.AssetReader); ok {
 			mux.Handle("GET /api/knowledge-bases/{id}/documents/{documentID}/asset", handler.NewDocumentAsset(assetReader))
 		}

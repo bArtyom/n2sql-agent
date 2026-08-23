@@ -22,6 +22,7 @@ type documentStoreStub struct {
 	deletedKB         int64
 	deletedID         int64
 	reprocessedConfig *documentextractor.ProcessConfig
+	reprocessedIDs    []int64
 }
 
 func (s *documentStoreStub) EnsureKnowledgeBase(context.Context, int64) error { return s.ensureErr }
@@ -45,6 +46,10 @@ func (s *documentStoreStub) Delete(_ context.Context, knowledgeBaseID, documentI
 func (s *documentStoreStub) Reprocess(_ context.Context, _, _ int64, config *documentextractor.ProcessConfig) error {
 	s.reprocessedConfig = config
 	return nil
+}
+func (s *documentStoreStub) ReprocessMany(_ context.Context, _ int64, documentIDs []int64, config *documentextractor.ProcessConfig) (int, error) {
+	s.reprocessedIDs, s.reprocessedConfig = documentIDs, config
+	return len(documentIDs), nil
 }
 
 type cacheInvalidatorStub struct{ knowledgeBaseIDs []int64 }
@@ -146,6 +151,23 @@ func TestServiceReprocessPassesProcessConfig(t *testing.T) {
 	config := &documentextractor.ProcessConfig{ParserEngineOverrides: map[string]string{"pdf_force_scanned": "true"}}
 	if err := service.Reprocess(context.Background(), 4, 8, config); err != nil {
 		t.Fatalf("Reprocess() error = %v", err)
+	}
+	if store.reprocessedConfig == nil || store.reprocessedConfig.ParserEngineOverrides["pdf_force_scanned"] != "true" {
+		t.Fatalf("reprocess config = %#v", store.reprocessedConfig)
+	}
+}
+
+func TestServiceReprocessManyNormalizesSelectedDocuments(t *testing.T) {
+	store := &documentStoreStub{}
+	service := document.NewService(store, document.NewLocalFileStore(t.TempDir()))
+	config := &documentextractor.ProcessConfig{ParserEngineOverrides: map[string]string{"pdf_force_scanned": "true"}}
+
+	count, err := service.ReprocessMany(context.Background(), 4, []int64{9, 3, 9}, config)
+	if err != nil {
+		t.Fatalf("ReprocessMany() error = %v", err)
+	}
+	if count != 2 || len(store.reprocessedIDs) != 2 || store.reprocessedIDs[0] != 3 || store.reprocessedIDs[1] != 9 {
+		t.Fatalf("reprocessed IDs = %v, count = %d", store.reprocessedIDs, count)
 	}
 	if store.reprocessedConfig == nil || store.reprocessedConfig.ParserEngineOverrides["pdf_force_scanned"] != "true" {
 		t.Fatalf("reprocess config = %#v", store.reprocessedConfig)

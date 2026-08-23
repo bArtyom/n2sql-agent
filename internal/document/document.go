@@ -21,6 +21,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/lib/pq"
 )
 
 const MaxFileBytes int64 = 10 << 20
@@ -84,6 +85,10 @@ type Deleter interface {
 
 type Reprocessor interface {
 	Reprocess(context.Context, int64, int64, *documentextractor.ProcessConfig) error
+}
+
+type BatchReprocessor interface {
+	ReprocessMany(context.Context, int64, []int64, *documentextractor.ProcessConfig) (int, error)
 }
 
 type CreateInput struct {
@@ -555,6 +560,47 @@ func (s *Service) Reprocess(ctx context.Context, knowledgeBaseID, documentID int
 		return ErrDeleteUnavailable
 	}
 	return reprocessor.Reprocess(ctx, knowledgeBaseID, documentID, config)
+}
+
+func (s *Service) ReprocessMany(ctx context.Context, knowledgeBaseID int64, documentIDs []int64, config *documentextractor.ProcessConfig) (int, error) {
+	if knowledgeBaseID <= 0 {
+		return 0, ErrKnowledgeBaseNotFound
+	}
+	normalized, err := normalizeDocumentIDs(documentIDs)
+	if err != nil {
+		return 0, err
+	}
+	if err := documentextractor.ValidateProcessConfig(config); err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrInvalidProcessConfig, err)
+	}
+	if err := s.store.EnsureKnowledgeBase(ctx, knowledgeBaseID); err != nil {
+		return 0, err
+	}
+	reprocessor, ok := s.store.(BatchReprocessor)
+	if !ok {
+		return 0, ErrDeleteUnavailable
+	}
+	return reprocessor.ReprocessMany(ctx, knowledgeBaseID, normalized, config)
+}
+
+func normalizeDocumentIDs(documentIDs []int64) ([]int64, error) {
+	if len(documentIDs) == 0 {
+		return nil, ErrNoDocumentsSelected
+	}
+	ids := append([]int64(nil), documentIDs...)
+	for _, documentID := range ids {
+		if documentID <= 0 {
+			return nil, ErrDocumentNotFound
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	unique := ids[:0]
+	for _, documentID := range ids {
+		if len(unique) == 0 || unique[len(unique)-1] != documentID {
+			unique = append(unique, documentID)
+		}
+	}
+	return unique, nil
 }
 
 // Delete removes the database record first so PostgreSQL can cascade chunks,
@@ -1103,6 +1149,80 @@ func (s *PostgresStore) Reprocess(ctx context.Context, knowledgeBaseID, document
 		return fmt.Errorf("create document reprocess task: %w", err)
 	}
 	return nil
+}
+
+func (s *PostgresStore) ReprocessMany(ctx context.Context, knowledgeBaseID int64, documentIDs []int64, config *documentextractor.ProcessConfig) (int, error) {
+	if err := documentextractor.ValidateProcessConfig(config); err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrInvalidProcessConfig, err)
+	}
+	normalized, err := normalizeDocumentIDs(documentIDs)
+	if err != nil {
+		return 0, err
+	}
+	processConfig := []byte("{}")
+	if config != nil {
+		processConfig, err = json.Marshal(config)
+		if err != nil {
+			return 0, fmt.Errorf("encode batch reprocess config: %w", err)
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin batch reprocess: %w", err)
+	}
+	defer tx.Rollback()
+	var selected int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM documents AS d
+		JOIN knowledge_bases AS kb ON kb.id = d.knowledge_base_id
+		WHERE d.knowledge_base_id = $1 AND d.id = ANY($2::bigint[])
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, knowledgeBaseID, pq.Array(normalized)).Scan(&selected); err != nil {
+		return 0, fmt.Errorf("check batch reprocess documents: %w", err)
+	}
+	if selected != len(normalized) {
+		return 0, ErrDocumentNotFound
+	}
+	var active int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT task.document_id)
+		FROM document_processing_tasks AS task
+		JOIN documents AS d ON d.id = task.document_id
+		JOIN knowledge_bases AS kb ON kb.id = d.knowledge_base_id
+		WHERE d.knowledge_base_id = $1 AND task.document_id = ANY($2::bigint[])
+		  AND task.status IN ('pending', 'processing')
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, knowledgeBaseID, pq.Array(normalized)).Scan(&active); err != nil {
+		return 0, fmt.Errorf("check active batch reprocess tasks: %w", err)
+	}
+	if active > 0 {
+		return 0, ErrDocumentProcessing
+	}
+	result, err := tx.ExecContext(ctx, `
+		INSERT INTO document_processing_tasks (document_id, process_config)
+		SELECT d.id, CASE WHEN $3::boolean THEN $4::jsonb ELSE COALESCE(
+			(SELECT previous.process_config FROM document_processing_tasks AS previous
+			 WHERE previous.document_id = d.id ORDER BY previous.created_at DESC, previous.id DESC LIMIT 1),
+			'{}'::jsonb
+		) END
+		FROM documents AS d
+		JOIN knowledge_bases AS kb ON kb.id = d.knowledge_base_id
+		WHERE d.knowledge_base_id = $1 AND d.id = ANY($2::bigint[])
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, knowledgeBaseID, pq.Array(normalized), config != nil, processConfig)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.ConstraintName == "document_processing_tasks_active_document_idx" {
+			return 0, ErrDocumentProcessing
+		}
+		return 0, fmt.Errorf("create batch document processing tasks: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count batch reprocess tasks: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit batch reprocess: %w", err)
+	}
+	return int(count), nil
 }
 
 func (s *PostgresStore) GetSummary(ctx context.Context, knowledgeBaseID, documentID int64) (Summary, error) {

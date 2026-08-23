@@ -80,8 +80,5 @@ func parseReprocessProcessConfig(body []byte) (*documentextractor.ProcessConfig,
 		}
 		return nil, err
 	}
-	if len(request.ProcessConfig) == 0 || strings.TrimSpace(string(request.ProcessConfig)) == "null" {
-		return nil, nil
-	}
-	return parseProcessConfig(string(request.ProcessConfig))
+	return parseRawProcessConfig(request.ProcessConfig)
 }
