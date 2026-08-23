@@ -101,6 +101,7 @@ type SourceReference struct {
 	AssetURLs        []string `json:"assetUrls,omitempty"`
 	Position         int      `json:"position"`
 	ChunkKind        string   `json:"chunkKind,omitempty"`
+	ImageInfo        any      `json:"imageInfo,omitempty"`
 	Content          string   `json:"content"`
 	HeadingPath      string   `json:"headingPath,omitempty"`
 	ContentTruncated bool     `json:"contentTruncated,omitempty"`

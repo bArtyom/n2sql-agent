@@ -137,6 +137,10 @@ type AssetURLSearcher interface {
 	AssetURLs(context.Context, int64, int64) ([]string, error)
 }
 
+type AssetURLByIDSearcher interface {
+	AssetURLByID(context.Context, int64, int64, int64) (string, error)
+}
+
 type ParentSearcher interface {
 	ParentForChunk(context.Context, int64, int64, int) (documentchunk.ParentChunk, bool, error)
 }
@@ -321,6 +325,7 @@ func (s *Service) attachAssetURLs(ctx context.Context, knowledgeBaseID int64, re
 		return results
 	}
 	assetURLs := make(map[int64][]string)
+	imageURLs := make(map[string]string)
 	if assetSearcher, ok := s.chunks.(AssetURLSearcher); ok {
 		seenDocuments := make(map[int64]struct{})
 		for _, result := range results {
@@ -333,6 +338,20 @@ func (s *Service) attachAssetURLs(ctx context.Context, knowledgeBaseID int64, re
 			}
 		}
 	}
+	if assetSearcher, ok := s.chunks.(AssetURLByIDSearcher); ok {
+		for _, result := range results {
+			if result.ImageInfo == nil || result.ImageInfo.AssetID <= 0 {
+				continue
+			}
+			key := fmt.Sprintf("%d:%d:%d", result.DocumentID, result.ImageInfo.AssetID, knowledgeBaseID)
+			if _, seen := imageURLs[key]; seen {
+				continue
+			}
+			if url, err := assetSearcher.AssetURLByID(ctx, knowledgeBaseID, result.DocumentID, result.ImageInfo.AssetID); err == nil {
+				imageURLs[key] = url
+			}
+		}
+	}
 	for index := range results {
 		if urls := assetURLs[results[index].DocumentID]; len(urls) > 0 {
 			results[index].AssetURLs = append([]string(nil), urls...)
@@ -340,6 +359,16 @@ func (s *Service) attachAssetURLs(ctx context.Context, knowledgeBaseID int64, re
 		} else if isImageFilename(results[index].OriginalFilename) {
 			results[index].AssetURL = fmt.Sprintf("/api/knowledge-bases/%d/documents/%d/asset", knowledgeBaseID, results[index].DocumentID)
 			results[index].AssetURLs = []string{results[index].AssetURL}
+		}
+		if results[index].ImageInfo != nil && results[index].ImageInfo.AssetID > 0 {
+			key := fmt.Sprintf("%d:%d:%d", results[index].DocumentID, results[index].ImageInfo.AssetID, knowledgeBaseID)
+			if url := imageURLs[key]; url != "" {
+				info := *results[index].ImageInfo
+				info.AssetURL = url
+				results[index].ImageInfo = &info
+				results[index].AssetURL = url
+				results[index].AssetURLs = []string{url}
+			}
 		}
 	}
 	return results
@@ -851,8 +880,8 @@ func mergeCandidateResults(existing, incoming []Result, limit int) []Result {
 }
 
 func resultKey(result Result) string {
-	if result.ChunkKind == "summary" {
-		return fmt.Sprintf("%d:%d:summary", result.DocumentID, result.Position)
+	if result.ChunkKind != "" {
+		return fmt.Sprintf("%d:%d:%s", result.DocumentID, result.Position, result.ChunkKind)
 	}
 	return fmt.Sprintf("%d:%d", result.DocumentID, result.Position)
 }
