@@ -21,6 +21,19 @@ func (scannedPDFProcessorStub) Extract(context.Context, []byte) (string, error) 
 	return "OCR scanned page", nil
 }
 
+type pageAwareScannedPDFProcessor struct {
+	pageCalls int
+}
+
+func (s *pageAwareScannedPDFProcessor) Extract(context.Context, []byte) (string, error) {
+	return "OCR scanned page", nil
+}
+
+func (s *pageAwareScannedPDFProcessor) ExtractPages(context.Context, []byte) ([]documentextractor.PDFPage, error) {
+	s.pageCalls++
+	return []documentextractor.PDFPage{{Number: 1, Text: "OCR page text", OCR: true}}, nil
+}
+
 type forcedScannedPDFProcessor struct {
 	calls int
 }
@@ -109,6 +122,49 @@ func TestExtractorReturnsUnifiedParseResult(t *testing.T) {
 	}
 	if result.Markdown != "# Guide\ncontent" || result.Metadata["parser"] != "simple" || len(result.Images) != 0 {
 		t.Fatalf("parse result = %#v", result)
+	}
+}
+
+func TestPDFParserUsesNativeTextBeforeOCR(t *testing.T) {
+	processor := &pageAwareScannedPDFProcessor{}
+	registry := documentextractor.NewDefaultParserRegistry(processor, nil)
+	result, err := registry.Parse(context.Background(), documentextractor.ParseRequest{
+		Content:     []byte(minimalPDF("Native PDF text")),
+		ContentType: "application/pdf",
+		Filename:    "guide.pdf",
+	})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if result.Markdown != "Native PDF text" {
+		t.Fatalf("native PDF text = %q", result.Markdown)
+	}
+	if result.Metadata["parser_mode"] != "native_pdf" || result.Metadata["text_source"] != "embedded_text" {
+		t.Fatalf("native PDF metadata = %#v", result.Metadata)
+	}
+	if processor.pageCalls != 0 {
+		t.Fatalf("native PDF invoked scanned-page processing %d times", processor.pageCalls)
+	}
+}
+
+func TestDOCXParserMarksNativeTextSource(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "documents"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeZipFile(t, filepath.Join(root, "documents", "guide.docx"), map[string]string{
+		"word/document.xml": `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Native DOCX text</w:t></w:r></w:p></w:body></w:document>`,
+	})
+
+	result, err := documentextractor.New(root).ExtractResult(context.Background(), "documents/guide.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+	if err != nil {
+		t.Fatalf("ExtractResult() error = %v", err)
+	}
+	if result.Markdown != "Native DOCX text" {
+		t.Fatalf("native DOCX text = %q", result.Markdown)
+	}
+	if result.Metadata["parser_mode"] != "native_docx" || result.Metadata["text_source"] != "embedded_text" {
+		t.Fatalf("native DOCX metadata = %#v", result.Metadata)
 	}
 }
 

@@ -392,7 +392,12 @@ func (*officeParserEngine) Parse(ctx context.Context, request ParseRequest) (Par
 	if imageErr != nil {
 		return ParseResult{}, imageErr
 	}
-	return ParseResult{Markdown: text, Images: images}, nil
+	metadata := map[string]string{}
+	if request.ContentType == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" {
+		metadata["parser_mode"] = "native_docx"
+		metadata["text_source"] = "embedded_text"
+	}
+	return ParseResult{Markdown: text, Images: images, Metadata: metadata}, nil
 }
 
 func extractArchiveImages(ctx context.Context, content []byte, prefix string) ([]ImageAsset, error) {
@@ -481,25 +486,6 @@ func (e *pdfParserEngine) Parse(ctx context.Context, request ParseRequest) (Pars
 			"ocr_forced":        "true",
 		}}, nil
 	}
-	if pageProcessor, ok := e.scannedPDF.(PageAwareScannedPDFProcessor); ok {
-		pages, pageErr := pageProcessor.ExtractPages(ctx, request.Content)
-		if pageErr != nil {
-			return ParseResult{}, pageErr
-		}
-		blocks := make([]string, 0, len(pages))
-		images := make([]ImageAsset, 0)
-		for _, page := range pages {
-			if strings.TrimSpace(page.Text) != "" {
-				blocks = append(blocks, fmt.Sprintf("[Page %d]\n%s", page.Number, strings.TrimSpace(page.Text)))
-			}
-			if page.OCR && len(page.Image) > 0 {
-				images = append(images, ImageAsset{Filename: fmt.Sprintf("page-%d.jpg", page.Number), MIMEType: "image/jpeg", Data: append([]byte(nil), page.Image...), Page: page.Number, Source: "scanned_pdf", OCRText: strings.TrimSpace(page.Text)})
-			}
-		}
-		if len(blocks) > 0 {
-			return ParseResult{Markdown: strings.Join(blocks, "\n\n"), Images: images, Metadata: map[string]string{"parser_mode": "mixed_pdf", "image_source_type": "scanned_pdf"}}, nil
-		}
-	}
 	text, err := extractPDFText(ctx, request.Content)
 	if err == nil && strings.TrimSpace(text) == "" {
 		err = ErrEmptyText
@@ -517,7 +503,10 @@ func (e *pdfParserEngine) Parse(ctx context.Context, request ParseRequest) (Pars
 	if err != nil {
 		return ParseResult{}, err
 	}
-	return ParseResult{Markdown: text, Metadata: map[string]string{"parser_mode": "text"}}, nil
+	return ParseResult{Markdown: text, Metadata: map[string]string{
+		"parser_mode": "native_pdf",
+		"text_source": "embedded_text",
+	}}, nil
 }
 
 func forceScanned(options map[string]string) bool {
