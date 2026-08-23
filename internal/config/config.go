@@ -65,6 +65,9 @@ type Config struct {
 	DocumentParserRemoteTimeout time.Duration
 	DocumentParserMinerUURL     string
 	DocumentParserPaddleURL     string
+	WeKnoraCloudParserURL       string
+	WeKnoraCloudAppID           string
+	WeKnoraCloudAPIKey          string
 	AgentMaxSteps               int
 	AgentTimeout                time.Duration
 	AgentChildTimeout           time.Duration
@@ -126,6 +129,9 @@ func Load() Config {
 		DocumentParserRemoteTimeout: durationEnv("DOCUMENT_PARSER_REMOTE_TIMEOUT", defaultDocumentParserRemoteTimeout),
 		DocumentParserMinerUURL:     strings.TrimSpace(os.Getenv("DOCUMENT_PARSER_MINERU_URL")),
 		DocumentParserPaddleURL:     strings.TrimSpace(os.Getenv("DOCUMENT_PARSER_PADDLEOCR_VL_URL")),
+		WeKnoraCloudParserURL:       strings.TrimSpace(os.Getenv("WEKNORA_CLOUD_PARSER_URL")),
+		WeKnoraCloudAppID:           strings.TrimSpace(os.Getenv("WEKNORA_CLOUD_APP_ID")),
+		WeKnoraCloudAPIKey:          strings.TrimSpace(os.Getenv("WEKNORA_CLOUD_API_KEY")),
 		AgentMaxSteps:               positiveIntEnv("AGENT_MAX_STEPS", defaultAgentMaxSteps),
 		AgentTimeout:                time.Duration(positiveIntEnv("AGENT_TIMEOUT_MS", int(defaultAgentTimeout/time.Millisecond))) * time.Millisecond,
 		AgentChildTimeout:           durationEnv("AGENT_CHILD_TIMEOUT", defaultAgentChildTimeout),

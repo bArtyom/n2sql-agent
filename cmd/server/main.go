@@ -97,6 +97,14 @@ func main() {
 		parserExtras = append(parserExtras, paddleParser)
 		log.Printf("PaddleOCR-VL parser enabled: endpoint=%s", cfg.DocumentParserPaddleURL)
 	}
+	if cfg.WeKnoraCloudAppID != "" || cfg.WeKnoraCloudAPIKey != "" {
+		cloudParser, parserErr := documentextractor.NewWeKnoraCloudParserEngine(cfg.WeKnoraCloudParserURL, cfg.WeKnoraCloudAppID, cfg.WeKnoraCloudAPIKey, append(cfg.DocumentParserAllowedHosts, "weknora.weixin.qq.com"), &http.Client{Timeout: cfg.DocumentParserRemoteTimeout})
+		if parserErr != nil {
+			log.Fatalf("configure WeKnora Cloud parser: %v", parserErr)
+		}
+		parserExtras = append(parserExtras, cloudParser)
+		log.Printf("WeKnora Cloud parser enabled: endpoint=%s", cfg.WeKnoraCloudParserURL)
+	}
 	extractor := documentextractor.NewWithOCRAndImagesAndParser(cfg.UploadDir, nil, nil, cfg.DocumentParserEngine, parserExtras...)
 	if cfg.OCRModel != "" {
 		ocrService := modelruntime.NewOCRService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv, cfg.OCRModel, cfg.OCRPrompt)
