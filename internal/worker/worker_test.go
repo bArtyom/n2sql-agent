@@ -82,6 +82,19 @@ func (richExtractorStub) ExtractResult(context.Context, string, string) (documen
 	}, nil
 }
 
+type engineRecordingExtractor struct {
+	engine string
+}
+
+func (s *engineRecordingExtractor) Extract(context.Context, string, string) (string, error) {
+	return "source text", nil
+}
+
+func (s *engineRecordingExtractor) ExtractResultWithEngine(_ context.Context, _, _, engine string) (documentextractor.ParseResult, error) {
+	s.engine = engine
+	return documentextractor.ParseResult{Markdown: "source text"}, nil
+}
+
 type parseResultStoreStub struct {
 	documentID int64
 	result     documentextractor.ParseResult
@@ -178,6 +191,23 @@ func TestEmbeddingChunkingProcessorStoresMatchingVectors(t *testing.T) {
 	}
 	if len(store.chunks) != 2 || store.chunks[1] != "second" || store.embeddings[1][0] != 2 {
 		t.Fatalf("chunks=%#v embeddings=%#v", store.chunks, store.embeddings)
+	}
+}
+
+func TestEmbeddingChunkingProcessorUsesTaskParserEngineSnapshot(t *testing.T) {
+	extractor := &engineRecordingExtractor{}
+	processor := worker.NewEmbeddingChunkingProcessor(
+		extractor,
+		fixedSplitter{chunks: []string{"chunk"}},
+		&chunkStoreStub{},
+		matchingEmbedderStub{},
+	)
+
+	if err := processor(context.Background(), worker.Task{DocumentID: 4, ParserEngine: "mineru"}); err != nil {
+		t.Fatalf("processor error = %v", err)
+	}
+	if extractor.engine != "mineru" {
+		t.Fatalf("parser engine = %q, want snapshot engine mineru", extractor.engine)
 	}
 }
 
