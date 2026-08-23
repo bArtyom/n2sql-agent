@@ -29,8 +29,9 @@ type ParseRequest struct {
 // order, so the first matching rule wins, matching WeKnora's per-file-type
 // parser configuration.
 type ParserEngineRule struct {
-	FileTypes []string `json:"file_types"`
-	Engine    string   `json:"engine"`
+	FileTypes            []string `json:"file_types"`
+	Engine               string   `json:"engine"`
+	XLSXFirstRowAsHeader *bool    `json:"xlsx_first_row_as_header,omitempty"`
 }
 
 // ProcessConfig contains per-upload parser overrides. It is intentionally
@@ -154,6 +155,14 @@ func validChunkTarget(value int) bool {
 }
 
 func ResolveParserEngine(rules []ParserEngineRule, contentType, filename string) string {
+	rule := ResolveParserEngineRule(rules, contentType, filename)
+	if rule == nil {
+		return ""
+	}
+	return rule.Engine
+}
+
+func ResolveParserEngineRule(rules []ParserEngineRule, contentType, filename string) *ParserEngineRule {
 	contentType = strings.ToLower(strings.TrimSpace(contentType))
 	extension := strings.ToLower(strings.TrimPrefix(filepath.Ext(filename), "."))
 	for _, rule := range rules {
@@ -163,11 +172,13 @@ func ResolveParserEngine(rules []ParserEngineRule, contentType, filename string)
 				continue
 			}
 			if fileType == contentType || fileType == extension {
-				return strings.TrimSpace(rule.Engine)
+				matched := rule
+				matched.Engine = strings.TrimSpace(matched.Engine)
+				return &matched
 			}
 		}
 	}
-	return ""
+	return nil
 }
 
 // ImageAsset describes an image discovered during parsing. Data is kept in
@@ -353,7 +364,7 @@ func (*officeParserEngine) Parse(ctx context.Context, request ParseRequest) (Par
 	case "application/vnd.openxmlformats-officedocument.presentationml.presentation":
 		text, err = extractPPTXText(ctx, request.Content)
 	case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
-		text, err = extractXLSXText(ctx, request.Content)
+		text, err = extractXLSXText(ctx, request.Content, optionEnabled(request.EngineOptions, "xlsx_first_row_as_header"))
 	default:
 		return ParseResult{}, ErrUnsupportedType
 	}
@@ -497,10 +508,14 @@ func (e *pdfParserEngine) Parse(ctx context.Context, request ParseRequest) (Pars
 }
 
 func forceScanned(options map[string]string) bool {
+	return optionEnabled(options, "pdf_force_scanned")
+}
+
+func optionEnabled(options map[string]string, key string) bool {
 	if options == nil {
 		return false
 	}
-	value, err := strconv.ParseBool(strings.TrimSpace(options["pdf_force_scanned"]))
+	value, err := strconv.ParseBool(strings.TrimSpace(options[key]))
 	return err == nil && value
 }
 

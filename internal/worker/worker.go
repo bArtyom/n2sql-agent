@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -610,7 +611,17 @@ func (s *PostgresStore) ClaimNext(ctx context.Context) (Task, error) {
 			return Task{}, fmt.Errorf("decode document process config: %w", err)
 		}
 	}
-	task.ParserEngine = documentextractor.ResolveParserEngine(task.ProcessConfig.ParserEngineRules, task.ContentType, task.OriginalFilename)
+	if rule := documentextractor.ResolveParserEngineRule(task.ProcessConfig.ParserEngineRules, task.ContentType, task.OriginalFilename); rule != nil {
+		task.ParserEngine = rule.Engine
+		if rule.XLSXFirstRowAsHeader != nil {
+			if task.ProcessConfig.ParserEngineOverrides == nil {
+				task.ProcessConfig.ParserEngineOverrides = make(map[string]string)
+			}
+			if _, overridden := task.ProcessConfig.ParserEngineOverrides["xlsx_first_row_as_header"]; !overridden {
+				task.ProcessConfig.ParserEngineOverrides["xlsx_first_row_as_header"] = strconv.FormatBool(*rule.XLSXFirstRowAsHeader)
+			}
+		}
+	}
 	return task, nil
 }
 

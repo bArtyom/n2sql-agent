@@ -233,7 +233,7 @@ func parsePPTXSlide(ctx context.Context, source io.Reader) (string, error) {
 	return strings.Join(paragraphs, "\n"), nil
 }
 
-func extractXLSXText(ctx context.Context, content []byte) (string, error) {
+func extractXLSXText(ctx context.Context, content []byte, firstRowAsHeader bool) (string, error) {
 	archive, err := zip.NewReader(bytes.NewReader(content), int64(len(content)))
 	if err != nil {
 		return "", fmt.Errorf("invalid XLSX archive: %w", err)
@@ -277,6 +277,9 @@ func extractXLSXText(ctx context.Context, content []byte) (string, error) {
 		if parseErr != nil {
 			return "", fmt.Errorf("parse XLSX worksheet %d: %w", index+1, parseErr)
 		}
+		if firstRowAsHeader {
+			rows = renderXLSXRowsAsMarkdown(rows)
+		}
 		if len(rows) > 0 {
 			sections = append(sections, fmt.Sprintf("# Sheet %d\n%s", index+1, strings.Join(rows, "\n")))
 		}
@@ -285,6 +288,39 @@ func extractXLSXText(ctx context.Context, content []byte) (string, error) {
 		return "", ErrEmptyText
 	}
 	return joinExtractedText(sections, "XLSX")
+}
+
+func renderXLSXRowsAsMarkdown(rows []string) []string {
+	if len(rows) == 0 {
+		return rows
+	}
+	columns := func(row string) []string {
+		values := strings.Split(row, "\t")
+		for index := range values {
+			values[index] = strings.ReplaceAll(strings.TrimSpace(values[index]), "|", "\\|")
+		}
+		return values
+	}
+	header := columns(rows[0])
+	if len(header) == 0 {
+		return rows
+	}
+	separator := make([]string, len(header))
+	for index := range separator {
+		separator[index] = "---"
+	}
+	result := []string{"| " + strings.Join(header, " | ") + " |", "| " + strings.Join(separator, " | ") + " |"}
+	for _, row := range rows[1:] {
+		values := columns(row)
+		for len(values) < len(header) {
+			values = append(values, "")
+		}
+		if len(values) > len(header) {
+			values = values[:len(header)]
+		}
+		result = append(result, "| "+strings.Join(values, " | ")+" |")
+	}
+	return result
 }
 
 func parseXLSXSharedStrings(ctx context.Context, source io.Reader) ([]string, error) {

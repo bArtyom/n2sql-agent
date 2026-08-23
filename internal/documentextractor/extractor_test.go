@@ -248,6 +248,33 @@ func TestExtractorReadsXLSXRowsAndSharedStrings(t *testing.T) {
 	}
 }
 
+func TestExtractorRendersXLSXHeaderAsMarkdownTableWhenEnabled(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "documents")
+	if err := os.Mkdir(directory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeZipFile(t, filepath.Join(directory, "table.xlsx"), map[string]string{
+		"xl/sharedStrings.xml":     `<sst xmlns="s"><si><t>Name</t></si><si><t>Value</t></si><si><t>Deep</t></si></sst>`,
+		"xl/worksheets/sheet1.xml": `<worksheet xmlns="s"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row><row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2"><v>42</v></c></row></sheetData></worksheet>`,
+	})
+
+	result, err := documentextractor.New(root).ExtractResultWithEngineOptions(
+		context.Background(),
+		"documents/table.xlsx",
+		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		"office",
+		map[string]string{"xlsx_first_row_as_header": "true"},
+	)
+	if err != nil {
+		t.Fatalf("ExtractResultWithEngineOptions() error = %v", err)
+	}
+	want := "# Sheet 1\n| Name | Value |\n| --- | --- |\n| Deep | 42 |"
+	if result.Markdown != want {
+		t.Fatalf("XLSX markdown = %q, want %q", result.Markdown, want)
+	}
+}
+
 func writeZipFile(t *testing.T, path string, files map[string]string) {
 	t.Helper()
 	file, err := os.Create(path)
