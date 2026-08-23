@@ -152,6 +152,33 @@ type ChildChunk struct {
 	HeadingPath    string
 }
 
+const (
+	ChunkKindText         = "text"
+	ChunkKindSummary      = "summary"
+	ChunkKindImageOCR     = "image_ocr"
+	ChunkKindImageCaption = "image_caption"
+)
+
+// ImageInfo links an image-derived chunk to the original asset without
+// copying binary data into the chunk table.
+type ImageInfo struct {
+	AssetIndex int    `json:"assetIndex"`
+	AssetID    int64  `json:"assetId,omitempty"`
+	Filename   string `json:"filename,omitempty"`
+	Page       int    `json:"page,omitempty"`
+	Source     string `json:"source,omitempty"`
+	AssetURL   string `json:"assetUrl,omitempty"`
+}
+
+// ImageChunk is an OCR or caption child of a normal parent chunk.
+type ImageChunk struct {
+	Kind           string
+	ParentPosition int
+	Content        string
+	HeadingPath    string
+	ImageInfo      ImageInfo
+}
+
 // ChunkReference identifies one child chunk in a document. It is used by
 // retrieval when loading several parent chunks in one database query.
 type ChunkReference struct {
@@ -167,6 +194,7 @@ type SearchResult struct {
 	Position          int            `json:"position"`
 	Content           string         `json:"content"`
 	ChunkKind         string         `json:"chunkKind,omitempty"`
+	ImageInfo         *ImageInfo     `json:"imageInfo,omitempty"`
 	HeadingPath       string         `json:"headingPath,omitempty"`
 	ParentContent     string         `json:"parentContent,omitempty"`
 	ParentPosition    int            `json:"parentPosition,omitempty"`
@@ -219,6 +247,24 @@ func (s *PostgresStore) AssetURLs(ctx context.Context, knowledgeBaseID, document
 	return urls, nil
 }
 
+func (s *PostgresStore) AssetURLByID(ctx context.Context, knowledgeBaseID, documentID, assetID int64) (string, error) {
+	var foundID int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT a.id
+		FROM document_assets AS a
+		JOIN documents AS d ON d.id = a.document_id
+		JOIN knowledge_bases AS kb ON kb.id = d.knowledge_base_id
+		WHERE a.id = $1 AND a.document_id = $2 AND d.knowledge_base_id = $3
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, assetID, documentID, knowledgeBaseID).Scan(&foundID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrChunkNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("read document asset URL: %w", err)
+	}
+	return fmt.Sprintf("/api/knowledge-bases/%d/documents/%d/assets/%d", knowledgeBaseID, documentID, foundID), nil
+}
+
 func (s *PostgresStore) SaveChunkingDiagnostics(ctx context.Context, documentID int64, diagnostics SplitDiagnostics) error {
 	payload, err := json.Marshal(diagnostics)
 	if err != nil {
@@ -268,7 +314,7 @@ func (s *PostgresStore) ReadKind(ctx context.Context, knowledgeBaseID, documentI
 	if knowledgeBaseID <= 0 || documentID <= 0 || position < 0 {
 		return SearchResult{}, ErrChunkNotFound
 	}
-	if kind != "text" && kind != "summary" {
+	if !validChunkKind(kind) {
 		return SearchResult{}, ErrChunkNotFound
 	}
 	var result SearchResult
@@ -276,9 +322,10 @@ func (s *PostgresStore) ReadKind(ctx context.Context, knowledgeBaseID, documentI
 	var headingPath string
 	var parentContent sql.NullString
 	var parentPosition sql.NullInt64
+	var imageInfo []byte
 	err := s.db.QueryRowContext(ctx, `
 		SELECT chunks.document_id, documents.original_filename, chunks.position,
-		       chunks.content, chunks.chunk_kind, chunks.heading_path, parents.content, parents.position
+		       chunks.content, chunks.chunk_kind, chunks.heading_path, chunks.image_info, parents.content, parents.position
 		FROM document_chunks AS chunks
 		JOIN documents ON documents.id = chunks.document_id
 		JOIN knowledge_bases AS kb ON kb.id = documents.knowledge_base_id
@@ -296,6 +343,7 @@ func (s *PostgresStore) ReadKind(ctx context.Context, knowledgeBaseID, documentI
 		&result.Content,
 		&chunkKind,
 		&headingPath,
+		&imageInfo,
 		&parentContent,
 		&parentPosition,
 	)
@@ -315,7 +363,28 @@ func (s *PostgresStore) ReadKind(ctx context.Context, knowledgeBaseID, documentI
 	if chunkKind != "text" {
 		result.ChunkKind = chunkKind
 	}
+	result.ImageInfo = decodeImageInfo(imageInfo)
 	return result, nil
+}
+
+func validChunkKind(kind string) bool {
+	switch kind {
+	case ChunkKindText, ChunkKindSummary, ChunkKindImageOCR, ChunkKindImageCaption:
+		return true
+	default:
+		return false
+	}
+}
+
+func decodeImageInfo(raw []byte) *ImageInfo {
+	if len(raw) == 0 || string(raw) == "{}" {
+		return nil
+	}
+	var info ImageInfo
+	if err := json.Unmarshal(raw, &info); err != nil {
+		return nil
+	}
+	return &info
 }
 
 // ReadRange returns a small, ordered window of chunks without loading an
@@ -465,6 +534,58 @@ func (s *PostgresStore) ReplaceHierarchical(ctx context.Context, documentID int6
 	return nil
 }
 
+// ReplaceImageChunks replaces only image-derived chunks. The normal text
+// hierarchy is committed first, so a failed optional image enrichment never
+// removes usable text retrieval data.
+func (s *PostgresStore) ReplaceImageChunks(ctx context.Context, documentID int64, chunks []ImageChunk, embeddings [][]float32) error {
+	if documentID <= 0 || len(chunks) == 0 || len(chunks) != len(embeddings) {
+		return errors.New("invalid image chunk data")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin image chunk transaction: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM document_chunks WHERE document_id = $1 AND chunk_kind IN ('image_ocr', 'image_caption')`, documentID); err != nil {
+		return fmt.Errorf("delete image chunks: %w", err)
+	}
+	var nextPosition int
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(position), -1) + 1 FROM document_chunks WHERE document_id = $1`, documentID).Scan(&nextPosition); err != nil {
+		return fmt.Errorf("allocate image chunk positions: %w", err)
+	}
+	for index, chunk := range chunks {
+		if chunk.Kind != ChunkKindImageOCR && chunk.Kind != ChunkKindImageCaption {
+			return fmt.Errorf("invalid image chunk kind %q", chunk.Kind)
+		}
+		if strings.TrimSpace(chunk.Content) == "" || chunk.ParentPosition < 0 {
+			return errors.New("invalid image chunk content or parent")
+		}
+		var parentID int64
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM document_parent_chunks WHERE document_id = $1 AND position = $2`, documentID, chunk.ParentPosition).Scan(&parentID); err != nil {
+			return fmt.Errorf("find image chunk parent %d: %w", chunk.ParentPosition, err)
+		}
+		var assetID int64
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM document_assets WHERE document_id = $1 AND asset_index = $2`, documentID, chunk.ImageInfo.AssetIndex).Scan(&assetID); err != nil {
+			return fmt.Errorf("find image asset %d: %w", chunk.ImageInfo.AssetIndex, err)
+		}
+		chunk.ImageInfo.AssetID = assetID
+		imageInfo, err := json.Marshal(chunk.ImageInfo)
+		if err != nil {
+			return fmt.Errorf("encode image chunk asset metadata: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO document_chunks (document_id, position, chunk_kind, parent_chunk_id, content, heading_path, image_info, embedding)
+			VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::vector)`,
+			documentID, nextPosition+index, chunk.Kind, parentID, chunk.Content, chunk.HeadingPath, imageInfo, vectorLiteral(embeddings[index])); err != nil {
+			return fmt.Errorf("create image chunk: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit image chunks: %w", err)
+	}
+	return nil
+}
+
 // ReplaceSummary stores one generated document summary as a separate
 // searchable chunk. Position zero is safe because chunk_kind participates in
 // the uniqueness constraint and document readers filter to text chunks.
@@ -497,7 +618,7 @@ func (s *PostgresStore) ParentForChunk(ctx context.Context, knowledgeBaseID, doc
 		FROM document_chunks AS chunks
 		JOIN document_parent_chunks AS parents ON parents.id = chunks.parent_chunk_id
 		JOIN documents AS documents ON documents.id = chunks.document_id
-		WHERE documents.knowledge_base_id = $1 AND chunks.document_id = $2 AND chunks.position = $3 AND chunks.chunk_kind = 'text'`, knowledgeBaseID, documentID, position).Scan(&parent.Position, &parent.Content, &parent.HeadingPath)
+		WHERE documents.knowledge_base_id = $1 AND chunks.document_id = $2 AND chunks.position = $3 AND chunks.chunk_kind IN ('text', 'image_ocr', 'image_caption')`, knowledgeBaseID, documentID, position).Scan(&parent.Position, &parent.Content, &parent.HeadingPath)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ParentChunk{}, false, nil
 	}
@@ -529,7 +650,7 @@ func (s *PostgresStore) ParentsForChunks(ctx context.Context, knowledgeBaseID in
 		JOIN document_chunks AS chunks
 		  ON chunks.document_id = requested.document_id
 		 AND chunks.position = requested.child_position::integer
-		 AND chunks.chunk_kind = 'text'
+		 AND chunks.chunk_kind IN ('text', 'image_ocr', 'image_caption')
 		JOIN document_parent_chunks AS parents ON parents.id = chunks.parent_chunk_id
 		JOIN documents ON documents.id = chunks.document_id
 		WHERE documents.knowledge_base_id = $1`, knowledgeBaseID, documentIDs, positions)
@@ -573,7 +694,7 @@ func (s *PostgresStore) SearchWithTags(ctx context.Context, knowledgeBaseID int6
 
 func (s *PostgresStore) searchVectorWithScope(ctx context.Context, knowledgeBaseID int64, embedding []float32, limit int, documentIDs []int64, folderPath any, recursive bool, tagIDs []int64) ([]SearchResult, error) {
 	queryVector := vectorLiteral(embedding)
-	query := "SELECT chunks.document_id, documents.original_filename, chunks.position, chunks.content, chunks.chunk_kind, chunks.heading_path, " +
+	query := "SELECT chunks.document_id, documents.original_filename, chunks.position, chunks.content, chunks.chunk_kind, chunks.heading_path, chunks.image_info, " +
 		"chunks.embedding <=> $2::vector AS distance " +
 		"FROM document_chunks AS chunks JOIN documents AS documents ON documents.id = chunks.document_id " +
 		"WHERE documents.knowledge_base_id = $1 AND chunks.embedding IS NOT NULL " +
@@ -591,12 +712,14 @@ func (s *PostgresStore) searchVectorWithScope(ctx context.Context, knowledgeBase
 	for rows.Next() {
 		var result SearchResult
 		var chunkKind string
-		if err := rows.Scan(&result.DocumentID, &result.OriginalFilename, &result.Position, &result.Content, &chunkKind, &result.HeadingPath, &result.Distance); err != nil {
+		var imageInfo []byte
+		if err := rows.Scan(&result.DocumentID, &result.OriginalFilename, &result.Position, &result.Content, &chunkKind, &result.HeadingPath, &imageInfo, &result.Distance); err != nil {
 			return nil, fmt.Errorf("scan filtered document chunk: %w", err)
 		}
 		if chunkKind != "text" {
 			result.ChunkKind = chunkKind
 		}
+		result.ImageInfo = decodeImageInfo(imageInfo)
 		result.MatchType = "vector"
 		results = append(results, result)
 	}
@@ -637,7 +760,7 @@ func (s *PostgresStore) searchKeywordWithTagScope(ctx context.Context, knowledge
 	sqlQuery := "WITH search_query AS (" +
 		"SELECT plainto_tsquery('simple', $2) AS terms" +
 		"), scored AS (" +
-		"SELECT chunks.document_id, documents.original_filename, chunks.position, chunks.content, chunks.chunk_kind, chunks.heading_path, " +
+		"SELECT chunks.document_id, documents.original_filename, chunks.position, chunks.content, chunks.chunk_kind, chunks.heading_path, chunks.image_info, " +
 		"ts_rank_cd(chunks.content_search, search_query.terms) + 0.35 * ts_rank_cd(chunks.heading_search, search_query.terms) AS keyword_score, " +
 		"ts_rank_cd(chunks.heading_search, search_query.terms) AS heading_score, " +
 		"CASE WHEN lower(chunks.content) LIKE $3 ESCAPE E'\\\\' OR lower(chunks.heading_path) LIKE $3 ESCAPE E'\\\\' OR lower(documents.original_filename) LIKE $3 ESCAPE E'\\\\' THEN 1.0 ELSE 0.0 END AS exact_score " +
@@ -647,7 +770,7 @@ func (s *PostgresStore) searchKeywordWithTagScope(ctx context.Context, knowledge
 		"AND ($4::bigint[] IS NULL OR chunks.document_id = ANY($4::bigint[])) " +
 		"AND ($5::text IS NULL OR documents.folder_path = $5 OR ($6::boolean AND LEFT(documents.folder_path, LENGTH($5) + 1) = $5 || '/')) " +
 		"AND ($7::bigint[] IS NULL OR EXISTS (SELECT 1 FROM document_tags AS link JOIN knowledge_base_tags AS tag ON tag.id = link.tag_id WHERE link.document_id = chunks.document_id AND tag.knowledge_base_id = documents.knowledge_base_id AND tag.id = ANY($7::bigint[])))" +
-		") SELECT document_id, original_filename, position, content, chunk_kind, heading_path, 0::float8 AS distance, GREATEST(keyword_score, exact_score) AS keyword_score, heading_score " +
+		") SELECT document_id, original_filename, position, content, chunk_kind, heading_path, image_info, 0::float8 AS distance, GREATEST(keyword_score, exact_score) AS keyword_score, heading_score " +
 		"FROM scored ORDER BY exact_score DESC, keyword_score DESC, position, document_id LIMIT $8"
 	rows, err := s.db.QueryContext(ctx, sqlQuery, knowledgeBaseID, query, exactPattern, documentIDsArgument(documentIDs), folderPath, recursive, documentIDsArgument(tagIDs), limit)
 	if err != nil {
@@ -659,12 +782,14 @@ func (s *PostgresStore) searchKeywordWithTagScope(ctx context.Context, knowledge
 	for rows.Next() {
 		var result SearchResult
 		var chunkKind string
-		if err := rows.Scan(&result.DocumentID, &result.OriginalFilename, &result.Position, &result.Content, &chunkKind, &result.HeadingPath, &result.Distance, &result.KeywordScore, &result.HeadingScore); err != nil {
+		var imageInfo []byte
+		if err := rows.Scan(&result.DocumentID, &result.OriginalFilename, &result.Position, &result.Content, &chunkKind, &result.HeadingPath, &imageInfo, &result.Distance, &result.KeywordScore, &result.HeadingScore); err != nil {
 			return nil, fmt.Errorf("scan filtered keyword document chunk: %w", err)
 		}
 		if chunkKind != "text" {
 			result.ChunkKind = chunkKind
 		}
+		result.ImageInfo = decodeImageInfo(imageInfo)
 		result.MatchType = "keyword"
 		result.KeywordScoreKnown = true
 		results = append(results, result)

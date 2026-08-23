@@ -191,6 +191,19 @@ type ImageAsset struct {
 	Page     int
 	Source   string
 	Original bool
+	// OCRText and Caption are derived, bounded semantic representations. The
+	// original image bytes remain owned by the asset store and are never put in
+	// a chunk row.
+	OCRText string
+	Caption string
+}
+
+// ImageEnrichment contains optional VLM-derived representations for one
+// image. OCRText is usually produced by the parser; Caption is optional and
+// can be supplied by a separate image-description model.
+type ImageEnrichment struct {
+	OCRText string
+	Caption string
 }
 
 // ParseResult is the unified boundary between document parsing and indexing.
@@ -480,7 +493,7 @@ func (e *pdfParserEngine) Parse(ctx context.Context, request ParseRequest) (Pars
 				blocks = append(blocks, fmt.Sprintf("[Page %d]\n%s", page.Number, strings.TrimSpace(page.Text)))
 			}
 			if page.OCR && len(page.Image) > 0 {
-				images = append(images, ImageAsset{Filename: fmt.Sprintf("page-%d.jpg", page.Number), MIMEType: "image/jpeg", Data: append([]byte(nil), page.Image...), Page: page.Number, Source: "scanned_pdf"})
+				images = append(images, ImageAsset{Filename: fmt.Sprintf("page-%d.jpg", page.Number), MIMEType: "image/jpeg", Data: append([]byte(nil), page.Image...), Page: page.Number, Source: "scanned_pdf", OCRText: strings.TrimSpace(page.Text)})
 			}
 		}
 		if len(blocks) > 0 {
@@ -552,6 +565,7 @@ func (e *imageParserEngine) Parse(ctx context.Context, request ParseRequest) (Pa
 			Data:     append([]byte(nil), request.Content...),
 			Source:   "original",
 			Original: true,
+			OCRText:  text,
 		}},
 		Metadata: map[string]string{"parser_mode": "ocr"},
 	}, nil
