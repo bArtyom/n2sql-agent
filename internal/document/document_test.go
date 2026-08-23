@@ -68,6 +68,7 @@ func TestServiceUploadsDocumentAndCreatesPendingTask(t *testing.T) {
 	uploaded, err := service.Upload(context.Background(), document.UploadInput{
 		KnowledgeBaseID:  4,
 		OriginalFilename: "notes.txt",
+		FolderPath:       `docs\\Go//agent`,
 		ContentType:      "text/plain",
 		Content:          strings.NewReader("hello knowledge base"),
 	})
@@ -80,6 +81,9 @@ func TestServiceUploadsDocumentAndCreatesPendingTask(t *testing.T) {
 	if store.input.StoragePath == "" || store.input.SizeBytes != int64(len("hello knowledge base")) {
 		t.Fatalf("create input = %#v", store.input)
 	}
+	if store.input.FolderPath != "docs/Go/agent" {
+		t.Fatalf("folder path = %q, want %q", store.input.FolderPath, "docs/Go/agent")
+	}
 	if store.input.ContentSHA256 != "2b7199f223d19ebf4ef20d51b3ad6cab5482f54709f96460db1337ed2471ef15" {
 		t.Fatalf("content sha256 = %q", store.input.ContentSHA256)
 	}
@@ -89,6 +93,37 @@ func TestServiceUploadsDocumentAndCreatesPendingTask(t *testing.T) {
 	}
 	if string(content) != "hello knowledge base" {
 		t.Fatalf("stored content = %q", content)
+	}
+}
+
+func TestNormalizeFolderPathCanonicalizesRelativeDirectory(t *testing.T) {
+	got, err := document.NormalizeFolderPath(`  docs\\Go// agent/  `)
+	if err != nil {
+		t.Fatalf("NormalizeFolderPath() error = %v", err)
+	}
+	if got != "docs/Go/agent" {
+		t.Fatalf("NormalizeFolderPath() = %q, want %q", got, "docs/Go/agent")
+	}
+}
+
+func TestNormalizeFolderPathRejectsTraversalAndOversizedSegment(t *testing.T) {
+	for _, input := range []string{"docs/../secrets", "docs/\x00/private", strings.Repeat("x", document.MaxFolderSegmentBytes+1)} {
+		if _, err := document.NormalizeFolderPath(input); !errors.Is(err, document.ErrInvalidFolderPath) {
+			t.Fatalf("NormalizeFolderPath(%q) error = %v, want ErrInvalidFolderPath", input, err)
+		}
+	}
+}
+
+func TestBuildFolderTreeMaterializesParentsAndRollsUpCounts(t *testing.T) {
+	tree := document.BuildFolderTree(map[string]int64{"": 2, "docs/api": 3, "docs/web": 4})
+	if tree.RootDocumentCount != 2 || tree.TotalDocumentCount != 9 {
+		t.Fatalf("tree totals = %#v, want root=2 total=9", tree)
+	}
+	if len(tree.Folders) != 1 || tree.Folders[0].Path != "docs" || tree.Folders[0].TotalCount != 7 {
+		t.Fatalf("tree folders = %#v, want docs total=7", tree.Folders)
+	}
+	if len(tree.Folders[0].Children) != 2 {
+		t.Fatalf("tree children = %#v, want 2", tree.Folders[0].Children)
 	}
 }
 

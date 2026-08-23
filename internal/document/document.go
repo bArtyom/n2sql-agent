@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
@@ -33,12 +34,22 @@ var (
 	ErrFileTooLarge          = errors.New("file is too large")
 	ErrDuplicateDocument     = errors.New("document already exists")
 	ErrInvalidStoragePath    = errors.New("invalid document storage path")
+	ErrInvalidFolderPath     = errors.New("invalid document folder path")
+	ErrNoDocumentsSelected   = errors.New("no documents selected")
+	ErrFolderMoveConflict    = errors.New("folder destination is inside the source folder")
+)
+
+const (
+	MaxFolderDepth        = 16
+	MaxFolderPathBytes    = 1024
+	MaxFolderSegmentBytes = 128
 )
 
 type Document struct {
 	ID                  int64                          `json:"id"`
 	KnowledgeBaseID     int64                          `json:"knowledgeBaseId"`
 	OriginalFilename    string                         `json:"originalFilename"`
+	FolderPath          string                         `json:"folderPath"`
 	ContentType         string                         `json:"contentType"`
 	SizeBytes           int64                          `json:"sizeBytes"`
 	ContentSHA256       string                         `json:"contentSha256,omitempty"`
@@ -55,6 +66,7 @@ type Summary = documentsummary.Summary
 type UploadInput struct {
 	KnowledgeBaseID  int64
 	OriginalFilename string
+	FolderPath       string
 	ContentType      string
 	Content          io.Reader
 }
@@ -75,6 +87,7 @@ type Reprocessor interface {
 type CreateInput struct {
 	KnowledgeBaseID  int64
 	OriginalFilename string
+	FolderPath       string
 	StoragePath      string
 	ContentType      string
 	SizeBytes        int64
@@ -101,6 +114,39 @@ type CacheInvalidator interface {
 
 type Reader interface {
 	List(context.Context, int64) ([]Document, error)
+}
+
+// FolderReader supports both exact-folder and recursive-subtree listings.
+// A nil folder path is represented by List and means an unfiltered listing;
+// an empty string passed to ListInFolder means the knowledge-base root.
+type FolderReader interface {
+	ListInFolder(context.Context, int64, string, bool) ([]Document, error)
+}
+
+type FolderNode struct {
+	Path          string        `json:"path"`
+	Name          string        `json:"name"`
+	DocumentCount int64         `json:"documentCount"`
+	TotalCount    int64         `json:"totalCount"`
+	Children      []*FolderNode `json:"children,omitempty"`
+}
+
+type FolderTree struct {
+	RootDocumentCount  int64         `json:"rootDocumentCount"`
+	TotalDocumentCount int64         `json:"totalDocumentCount"`
+	Folders            []*FolderNode `json:"folders"`
+}
+
+type FolderTreeReader interface {
+	ListFolderTree(context.Context, int64) (FolderTree, error)
+}
+
+type FolderMover interface {
+	MoveToFolder(context.Context, int64, []int64, string) (int64, error)
+}
+
+type FolderRenamer interface {
+	RenameFolder(context.Context, int64, string, string) (int64, error)
 }
 
 type FileStore interface {
@@ -144,6 +190,118 @@ type ParseResultStore interface {
 	SaveParseResult(context.Context, int64, documentextractor.ParseResult) error
 }
 
+// NormalizeFolderPath canonicalizes a client-supplied relative folder path.
+// The empty path is the knowledge-base root. Unlike a filesystem path this is
+// only metadata: it is never used to open a local file.
+func NormalizeFolderPath(raw string) (string, error) {
+	raw = strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	if raw == "" {
+		return "", nil
+	}
+	segments := make([]string, 0, 8)
+	for _, part := range strings.Split(raw, "/") {
+		part = strings.TrimSpace(part)
+		if part == "." || part == ".." || strings.ContainsAny(part, "\x00\r\n") {
+			return "", ErrInvalidFolderPath
+		}
+		part = strings.TrimRight(part, ". ")
+		if part == "" {
+			continue
+		}
+		if part == "." || part == ".." {
+			return "", ErrInvalidFolderPath
+		}
+		if len([]byte(part)) > MaxFolderSegmentBytes {
+			return "", ErrInvalidFolderPath
+		}
+		segments = append(segments, part)
+		if len(segments) > MaxFolderDepth {
+			return "", ErrInvalidFolderPath
+		}
+	}
+	path := strings.Join(segments, "/")
+	if len([]byte(path)) > MaxFolderPathBytes {
+		return "", ErrInvalidFolderPath
+	}
+	return path, nil
+}
+
+func folderName(path string) string {
+	if index := strings.LastIndex(path, "/"); index >= 0 {
+		return path[index+1:]
+	}
+	return path
+}
+
+func folderParent(path string) string {
+	if index := strings.LastIndex(path, "/"); index >= 0 {
+		return path[:index]
+	}
+	return ""
+}
+
+// BuildFolderTree converts the flat SQL aggregation into the tree consumed by
+// the API. Intermediate folders are materialized even when they contain only
+// descendants, matching the file-manager behavior of WeKnora.
+func BuildFolderTree(counts map[string]int64) FolderTree {
+	tree := FolderTree{Folders: make([]*FolderNode, 0)}
+	nodes := make(map[string]*FolderNode)
+	var ensureNode func(string) *FolderNode
+	ensureNode = func(path string) *FolderNode {
+		if node, ok := nodes[path]; ok {
+			return node
+		}
+		node := &FolderNode{Path: path, Name: folderName(path)}
+		nodes[path] = node
+		parent := folderParent(path)
+		if parent == "" {
+			tree.Folders = append(tree.Folders, node)
+		} else {
+			parentNode := ensureNode(parent)
+			parentNode.Children = append(parentNode.Children, node)
+		}
+		return node
+	}
+	for path, count := range counts {
+		if path == "" {
+			tree.RootDocumentCount += count
+			tree.TotalDocumentCount += count
+			continue
+		}
+		node := ensureNode(path)
+		node.DocumentCount += count
+		tree.TotalDocumentCount += count
+	}
+	paths := make([]string, 0, len(nodes))
+	for path := range nodes {
+		paths = append(paths, path)
+	}
+	sort.Slice(paths, func(i, j int) bool {
+		depthI := strings.Count(paths[i], "/")
+		depthJ := strings.Count(paths[j], "/")
+		if depthI != depthJ {
+			return depthI > depthJ
+		}
+		return paths[i] < paths[j]
+	})
+	for _, path := range paths {
+		node := nodes[path]
+		node.TotalCount += node.DocumentCount
+		if parent := folderParent(path); parent != "" {
+			nodes[parent].TotalCount += node.TotalCount
+		}
+	}
+	var sortNodes func([]*FolderNode)
+	sortNodes = func(list []*FolderNode) {
+		sort.Slice(list, func(i, j int) bool { return strings.ToLower(list[i].Name) < strings.ToLower(list[j].Name) })
+		for _, node := range list {
+			sortNodes(node.Children)
+		}
+	}
+	sortNodes(tree.Folders)
+	return tree
+}
+
 type assetMetadataStore interface {
 	AssetMetadata(context.Context, int64, int64) (string, string, string, int64, error)
 }
@@ -176,6 +334,10 @@ func (s *Service) Upload(ctx context.Context, input UploadInput) (Document, erro
 	if !ok || input.Content == nil || input.OriginalFilename == "" {
 		return Document{}, ErrUnsupportedFile
 	}
+	folderPath, err := NormalizeFolderPath(input.FolderPath)
+	if err != nil {
+		return Document{}, err
+	}
 	if err := s.store.EnsureKnowledgeBase(ctx, input.KnowledgeBaseID); err != nil {
 		return Document{}, err
 	}
@@ -190,6 +352,7 @@ func (s *Service) Upload(ctx context.Context, input UploadInput) (Document, erro
 	document, err := s.store.Create(ctx, CreateInput{
 		KnowledgeBaseID:  input.KnowledgeBaseID,
 		OriginalFilename: input.OriginalFilename,
+		FolderPath:       folderPath,
 		StoragePath:      storagePath,
 		ContentType:      input.ContentType,
 		SizeBytes:        sizeBytes,
@@ -270,6 +433,97 @@ func (s *Service) List(ctx context.Context, knowledgeBaseID int64) ([]Document, 
 		return nil, err
 	}
 	return documents, nil
+}
+
+func (s *Service) ListInFolder(ctx context.Context, knowledgeBaseID int64, folderPath string, recursive bool) ([]Document, error) {
+	if knowledgeBaseID <= 0 {
+		return nil, ErrKnowledgeBaseNotFound
+	}
+	normalized, err := NormalizeFolderPath(folderPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.store.EnsureKnowledgeBase(ctx, knowledgeBaseID); err != nil {
+		return nil, err
+	}
+	reader, ok := s.store.(FolderReader)
+	if !ok {
+		return nil, ErrUnsupportedFile
+	}
+	return reader.ListInFolder(ctx, knowledgeBaseID, normalized, recursive)
+}
+
+func (s *Service) ListFolderTree(ctx context.Context, knowledgeBaseID int64) (FolderTree, error) {
+	if knowledgeBaseID <= 0 {
+		return FolderTree{}, ErrKnowledgeBaseNotFound
+	}
+	if err := s.store.EnsureKnowledgeBase(ctx, knowledgeBaseID); err != nil {
+		return FolderTree{}, err
+	}
+	reader, ok := s.store.(FolderTreeReader)
+	if !ok {
+		return FolderTree{}, ErrUnsupportedFile
+	}
+	return reader.ListFolderTree(ctx, knowledgeBaseID)
+}
+
+func (s *Service) MoveToFolder(ctx context.Context, knowledgeBaseID int64, documentIDs []int64, folderPath string) (int64, error) {
+	if knowledgeBaseID <= 0 {
+		return 0, ErrKnowledgeBaseNotFound
+	}
+	if len(documentIDs) == 0 {
+		return 0, ErrNoDocumentsSelected
+	}
+	for _, documentID := range documentIDs {
+		if documentID <= 0 {
+			return 0, ErrDocumentNotFound
+		}
+	}
+	normalized, err := NormalizeFolderPath(folderPath)
+	if err != nil {
+		return 0, err
+	}
+	if err := s.store.EnsureKnowledgeBase(ctx, knowledgeBaseID); err != nil {
+		return 0, err
+	}
+	mover, ok := s.store.(FolderMover)
+	if !ok {
+		return 0, ErrUnsupportedFile
+	}
+	moved, err := mover.MoveToFolder(ctx, knowledgeBaseID, documentIDs, normalized)
+	if err == nil && moved > 0 && s.invalidator != nil {
+		s.invalidator.ClearCache(knowledgeBaseID)
+	}
+	return moved, err
+}
+
+func (s *Service) RenameFolder(ctx context.Context, knowledgeBaseID int64, from, to string) (int64, error) {
+	if knowledgeBaseID <= 0 {
+		return 0, ErrKnowledgeBaseNotFound
+	}
+	from, err := NormalizeFolderPath(from)
+	if err != nil || from == "" {
+		return 0, ErrInvalidFolderPath
+	}
+	to, err = NormalizeFolderPath(to)
+	if err != nil || to == "" {
+		return 0, ErrInvalidFolderPath
+	}
+	if from == to || strings.HasPrefix(to, from+"/") {
+		return 0, ErrFolderMoveConflict
+	}
+	if err := s.store.EnsureKnowledgeBase(ctx, knowledgeBaseID); err != nil {
+		return 0, err
+	}
+	renamer, ok := s.store.(FolderRenamer)
+	if !ok {
+		return 0, ErrUnsupportedFile
+	}
+	moved, err := renamer.RenameFolder(ctx, knowledgeBaseID, from, to)
+	if err == nil && moved > 0 && s.invalidator != nil {
+		s.invalidator.ClearCache(knowledgeBaseID)
+	}
+	return moved, err
 }
 
 func (s *Service) Reprocess(ctx context.Context, knowledgeBaseID, documentID int64) error {
@@ -604,7 +858,7 @@ func (s *PostgresStore) SaveParseResult(ctx context.Context, documentID int64, r
 
 func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Document, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT d.id, d.knowledge_base_id, d.original_filename, d.content_type, d.size_bytes, d.content_sha256,
+		SELECT d.id, d.knowledge_base_id, d.original_filename, d.folder_path, d.content_type, d.size_bytes, d.content_sha256,
 		       d.chunking_diagnostics, d.parser_metadata, d.summary_status, d.summary_index_status,
 		       COALESCE(task.status, 'pending') AS processing_status
 		FROM documents AS d
@@ -634,6 +888,7 @@ func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Docu
 			&document.ID,
 			&document.KnowledgeBaseID,
 			&document.OriginalFilename,
+			&document.FolderPath,
 			&document.ContentType,
 			&document.SizeBytes,
 			&document.ContentSHA256,
@@ -661,6 +916,126 @@ func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Docu
 		return nil, fmt.Errorf("iterate documents: %w", err)
 	}
 	return documents, nil
+}
+
+func (s *PostgresStore) ListInFolder(ctx context.Context, knowledgeBaseID int64, folderPath string, recursive bool) ([]Document, error) {
+	condition := "d.folder_path = $2"
+	if recursive && folderPath != "" {
+		condition = "(d.folder_path = $2 OR LEFT(d.folder_path, LENGTH($2) + 1) = $2 || '/')"
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT d.id, d.knowledge_base_id, d.original_filename, d.folder_path, d.content_type, d.size_bytes, d.content_sha256,
+		       d.chunking_diagnostics, d.parser_metadata, d.summary_status, d.summary_index_status,
+		       COALESCE(task.status, 'pending') AS processing_status
+		FROM documents AS d
+		LEFT JOIN LATERAL (
+			SELECT status FROM document_processing_tasks
+			WHERE document_id = d.id
+			ORDER BY created_at DESC, id DESC LIMIT 1
+		) AS task ON TRUE
+		WHERE d.knowledge_base_id = $1
+		  AND `+condition+`
+		  AND d.knowledge_base_id IN (
+			SELECT id FROM knowledge_bases
+			WHERE administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
+		  )
+		ORDER BY d.created_at DESC, d.id DESC`, knowledgeBaseID, folderPath)
+	if err != nil {
+		return nil, fmt.Errorf("list documents in folder: %w", err)
+	}
+	defer rows.Close()
+	return scanDocuments(rows)
+}
+
+func scanDocuments(rows *sql.Rows) ([]Document, error) {
+	documents := make([]Document, 0)
+	for rows.Next() {
+		var document Document
+		var diagnostics, parserMetadata []byte
+		if err := rows.Scan(
+			&document.ID, &document.KnowledgeBaseID, &document.OriginalFilename,
+			&document.FolderPath, &document.ContentType, &document.SizeBytes,
+			&document.ContentSHA256, &diagnostics, &parserMetadata,
+			&document.SummaryStatus, &document.SummaryIndexStatus, &document.ProcessingStatus,
+		); err != nil {
+			return nil, fmt.Errorf("scan document: %w", err)
+		}
+		if len(diagnostics) > 0 {
+			if err := json.Unmarshal(diagnostics, &document.ChunkingDiagnostics); err != nil {
+				return nil, fmt.Errorf("decode chunking diagnostics: %w", err)
+			}
+		}
+		if len(parserMetadata) > 0 {
+			if err := json.Unmarshal(parserMetadata, &document.ParserMetadata); err != nil {
+				return nil, fmt.Errorf("decode parser metadata: %w", err)
+			}
+		}
+		documents = append(documents, document)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate documents: %w", err)
+	}
+	return documents, nil
+}
+
+func (s *PostgresStore) ListFolderTree(ctx context.Context, knowledgeBaseID int64) (FolderTree, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT d.folder_path, COUNT(*)
+		FROM documents AS d
+		JOIN knowledge_bases AS kb ON kb.id = d.knowledge_base_id
+		WHERE d.knowledge_base_id = $1
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
+		GROUP BY d.folder_path`, knowledgeBaseID)
+	if err != nil {
+		return FolderTree{}, fmt.Errorf("list document folders: %w", err)
+	}
+	defer rows.Close()
+	counts := make(map[string]int64)
+	for rows.Next() {
+		var path string
+		var count int64
+		if err := rows.Scan(&path, &count); err != nil {
+			return FolderTree{}, fmt.Errorf("scan document folder: %w", err)
+		}
+		counts[path] = count
+	}
+	if err := rows.Err(); err != nil {
+		return FolderTree{}, fmt.Errorf("iterate document folders: %w", err)
+	}
+	return BuildFolderTree(counts), nil
+}
+
+func (s *PostgresStore) MoveToFolder(ctx context.Context, knowledgeBaseID int64, documentIDs []int64, folderPath string) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE documents AS d SET folder_path = $3
+		FROM knowledge_bases AS kb
+		WHERE d.knowledge_base_id = kb.id
+		  AND d.knowledge_base_id = $1
+		  AND d.id = ANY($2::bigint[])
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, knowledgeBaseID, documentIDs, folderPath)
+	if err != nil {
+		return 0, fmt.Errorf("move documents to folder: %w", err)
+	}
+	count, err := result.RowsAffected()
+	return count, err
+}
+
+func (s *PostgresStore) RenameFolder(ctx context.Context, knowledgeBaseID int64, from, to string) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE documents AS d SET folder_path = $3 || CASE
+			WHEN d.folder_path = $2 THEN ''
+			ELSE SUBSTRING(d.folder_path FROM LENGTH($2) + 1)
+		END
+		FROM knowledge_bases AS kb
+		WHERE d.knowledge_base_id = kb.id
+		  AND d.knowledge_base_id = $1
+		  AND (d.folder_path = $2 OR LEFT(d.folder_path, LENGTH($2) + 1) = $2 || '/')
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, knowledgeBaseID, from, to)
+	if err != nil {
+		return 0, fmt.Errorf("rename document folder: %w", err)
+	}
+	count, err := result.RowsAffected()
+	return count, err
 }
 
 func (s *PostgresStore) Reprocess(ctx context.Context, knowledgeBaseID, documentID int64) error {
@@ -802,11 +1177,11 @@ func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Document
 	defer tx.Rollback()
 	var document Document
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO documents (knowledge_base_id, original_filename, storage_path, content_type, size_bytes, content_sha256)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		RETURNING id, knowledge_base_id, original_filename, content_type, size_bytes, content_sha256`,
-		input.KnowledgeBaseID, input.OriginalFilename, input.StoragePath, input.ContentType, input.SizeBytes, input.ContentSHA256,
-	).Scan(&document.ID, &document.KnowledgeBaseID, &document.OriginalFilename, &document.ContentType, &document.SizeBytes, &document.ContentSHA256)
+		INSERT INTO documents (knowledge_base_id, original_filename, folder_path, storage_path, content_type, size_bytes, content_sha256)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		RETURNING id, knowledge_base_id, original_filename, folder_path, content_type, size_bytes, content_sha256`,
+		input.KnowledgeBaseID, input.OriginalFilename, input.FolderPath, input.StoragePath, input.ContentType, input.SizeBytes, input.ContentSHA256,
+	).Scan(&document.ID, &document.KnowledgeBaseID, &document.OriginalFilename, &document.FolderPath, &document.ContentType, &document.SizeBytes, &document.ContentSHA256)
 	if err != nil {
 		var pgError *pgconn.PgError
 		if errors.As(err, &pgError) && pgError.Code == "23503" {

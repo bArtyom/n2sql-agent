@@ -119,6 +119,15 @@ func New(dependencies Dependencies) http.Handler {
 		if reader, ok := dependencies.Documents.(document.Reader); ok {
 			mux.Handle("GET /api/knowledge-bases/{id}/documents", handler.NewDocumentList(reader))
 		}
+		if folderReader, ok := dependencies.Documents.(document.FolderTreeReader); ok {
+			mux.Handle("GET /api/knowledge-bases/{id}/document-folders", handler.NewDocumentFolderTree(folderReader))
+		}
+		if folderMover, ok := dependencies.Documents.(document.FolderMover); ok {
+			mux.Handle("POST /api/knowledge-bases/{id}/documents/folder", handler.NewDocumentMoveToFolder(folderMover))
+		}
+		if folderRenamer, ok := dependencies.Documents.(document.FolderRenamer); ok {
+			mux.Handle("PUT /api/knowledge-bases/{id}/document-folders", handler.NewDocumentFolderRename(folderRenamer))
+		}
 		if deleter, ok := dependencies.Documents.(document.Deleter); ok {
 			mux.Handle("DELETE /api/knowledge-bases/{id}/documents/{documentID}", handler.NewDocumentDelete(deleter))
 		}

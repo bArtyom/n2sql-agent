@@ -47,6 +47,7 @@ func NewDocumentUpload(uploader document.Uploader) http.Handler {
 		document, err := uploader.Upload(r.Context(), document.UploadInput{
 			KnowledgeBaseID:  knowledgeBaseID,
 			OriginalFilename: filename,
+			FolderPath:       r.FormValue("folder_path"),
 			ContentType:      contentType,
 			Content:          content,
 		})
