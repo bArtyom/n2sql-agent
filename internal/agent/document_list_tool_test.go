@@ -10,6 +10,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
+	"github.com/bArtyom/n2sql-agent/internal/documenttag"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 )
 
@@ -33,7 +34,7 @@ func (s *documentReaderStub) ListInFolder(_ context.Context, _ int64, folderPath
 
 func TestDocumentListToolReturnsScopedMetadata(t *testing.T) {
 	reader := &documentReaderStub{documents: []document.Document{
-		{ID: 8, OriginalFilename: "guide.md", ContentType: "text/markdown", SizeBytes: 128, ProcessingStatus: "succeeded"},
+		{ID: 8, OriginalFilename: "guide.md", ContentType: "text/markdown", SizeBytes: 128, ProcessingStatus: "succeeded", Tags: []documenttag.Tag{{ID: 3, Name: "Go", Color: "#aabbcc"}}},
 	}}
 	tool, err := agent.NewDocumentListToolForKnowledgeBase(reader, 7, 4096, 20)
 	if err != nil {
@@ -56,7 +57,7 @@ func TestDocumentListToolReturnsScopedMetadata(t *testing.T) {
 	if err := json.Unmarshal([]byte(result.Content), &payload); err != nil {
 		t.Fatalf("result JSON = %q: %v", result.Content, err)
 	}
-	if len(payload.Documents) != 1 || payload.Documents[0].Filename != "guide.md" || payload.Documents[0].Status != "succeeded" {
+	if len(payload.Documents) != 1 || payload.Documents[0].Filename != "guide.md" || payload.Documents[0].Status != "succeeded" || !strings.Contains(result.Content, `"name":"Go"`) {
 		t.Fatalf("documents = %#v", payload.Documents)
 	}
 }

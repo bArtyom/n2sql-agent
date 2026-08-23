@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/bArtyom/n2sql-agent/internal/document"
+	"github.com/bArtyom/n2sql-agent/internal/documenttag"
 )
 
 var ErrInvalidDocumentInfoInput = errors.New("invalid document info input")
@@ -109,6 +110,7 @@ func (t *DocumentInfoTool) Call(ctx context.Context, raw json.RawMessage) (ToolR
 			ContentType:      item.ContentType,
 			SizeBytes:        item.SizeBytes,
 			ProcessingStatus: item.ProcessingStatus,
+			Tags:             append([]documenttag.Tag(nil), item.Tags...),
 		}
 		payload, err := json.Marshal(struct {
 			Document documentListItem `json:"document"`

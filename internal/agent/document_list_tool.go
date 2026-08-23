@@ -8,6 +8,7 @@ import (
 
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
+	"github.com/bArtyom/n2sql-agent/internal/documenttag"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 )
 
@@ -37,12 +38,13 @@ type documentListInput struct {
 }
 
 type documentListItem struct {
-	ID               int64  `json:"id"`
-	OriginalFilename string `json:"original_filename"`
-	FolderPath       string `json:"folder_path,omitempty"`
-	ContentType      string `json:"content_type"`
-	SizeBytes        int64  `json:"size_bytes"`
-	ProcessingStatus string `json:"processing_status"`
+	ID               int64             `json:"id"`
+	OriginalFilename string            `json:"original_filename"`
+	FolderPath       string            `json:"folder_path,omitempty"`
+	ContentType      string            `json:"content_type"`
+	SizeBytes        int64             `json:"size_bytes"`
+	ProcessingStatus string            `json:"processing_status"`
+	Tags             []documenttag.Tag `json:"tags,omitempty"`
 }
 
 type documentListResponse struct {
@@ -160,6 +162,7 @@ func marshalDocumentList(documents []document.Document, limit, maxBytes int) (st
 			ContentType:      item.ContentType,
 			SizeBytes:        item.SizeBytes,
 			ProcessingStatus: item.ProcessingStatus,
+			Tags:             append([]documenttag.Tag(nil), item.Tags...),
 		})
 		payload, err := json.Marshal(documentListResponse{
 			Documents: candidate,

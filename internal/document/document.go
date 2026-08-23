@@ -61,6 +61,7 @@ type Document struct {
 	SummaryIndexStatus  string                         `json:"summaryIndexStatus,omitempty"`
 	ChunkingDiagnostics documentchunk.SplitDiagnostics `json:"chunkingDiagnostics"`
 	ParserMetadata      map[string]string              `json:"parserMetadata,omitempty"`
+	Tags                []documenttag.Tag              `json:"tags,omitempty"`
 }
 
 // Summary is the cached, document-level summary generated on demand.
@@ -1028,7 +1029,20 @@ func (s *PostgresStore) listWithScope(ctx context.Context, knowledgeBaseID int64
 	query := `
 		SELECT d.id, d.knowledge_base_id, d.original_filename, d.folder_path, d.content_type, d.size_bytes, d.content_sha256,
 		       d.chunking_diagnostics, d.parser_metadata, d.summary_status, d.summary_index_status,
-		       COALESCE(task.status, 'pending') AS processing_status
+		       COALESCE(task.status, 'pending') AS processing_status,
+		       COALESCE((
+				SELECT jsonb_agg(jsonb_build_object(
+					'id', tag.id,
+					'knowledgeBaseId', tag.knowledge_base_id,
+					'name', tag.name,
+					'color', tag.color,
+					'createdAt', tag.created_at,
+					'updatedAt', tag.updated_at
+				) ORDER BY lower(tag.name), tag.id)
+				FROM document_tags AS link
+				JOIN knowledge_base_tags AS tag ON tag.id = link.tag_id
+				WHERE link.document_id = d.id
+			), '[]'::jsonb) AS tags
 		FROM documents AS d
 		LEFT JOIN LATERAL (
 			SELECT status FROM document_processing_tasks
@@ -1049,12 +1063,12 @@ func scanDocuments(rows *sql.Rows) ([]Document, error) {
 	documents := make([]Document, 0)
 	for rows.Next() {
 		var document Document
-		var diagnostics, parserMetadata []byte
+		var diagnostics, parserMetadata, tags []byte
 		if err := rows.Scan(
 			&document.ID, &document.KnowledgeBaseID, &document.OriginalFilename,
 			&document.FolderPath, &document.ContentType, &document.SizeBytes,
 			&document.ContentSHA256, &diagnostics, &parserMetadata,
-			&document.SummaryStatus, &document.SummaryIndexStatus, &document.ProcessingStatus,
+			&document.SummaryStatus, &document.SummaryIndexStatus, &document.ProcessingStatus, &tags,
 		); err != nil {
 			return nil, fmt.Errorf("scan document: %w", err)
 		}
@@ -1066,6 +1080,11 @@ func scanDocuments(rows *sql.Rows) ([]Document, error) {
 		if len(parserMetadata) > 0 {
 			if err := json.Unmarshal(parserMetadata, &document.ParserMetadata); err != nil {
 				return nil, fmt.Errorf("decode parser metadata: %w", err)
+			}
+		}
+		if len(tags) > 0 {
+			if err := json.Unmarshal(tags, &document.Tags); err != nil {
+				return nil, fmt.Errorf("decode document tags: %w", err)
 			}
 		}
 		documents = append(documents, document)
