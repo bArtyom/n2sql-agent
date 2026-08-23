@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/usage"
@@ -20,6 +21,7 @@ var (
 	ErrInvalidMaxDistance        = errors.New("search distance threshold must be greater than 0 and at most 1")
 	ErrInvalidKeywordThreshold   = errors.New("keyword score threshold must be between 0 and 1")
 	ErrInvalidDocumentIDs        = errors.New("invalid document filter")
+	ErrInvalidFolderPath         = errors.New("invalid folder filter")
 	ErrDocumentFilterUnavailable = errors.New("document filter is unavailable")
 	ErrQueryRewriteUnavailable   = errors.New("query rewrite is unavailable")
 )
@@ -100,6 +102,18 @@ type FilteredKeywordSearcher interface {
 	SearchKeywordWithDocuments(context.Context, int64, string, int, []int64) ([]Result, error)
 }
 
+// FolderFilteredChunkSearcher applies both the selected document IDs and the
+// folder scope in the same SQL query. Keeping this boundary at the chunk store
+// prevents a broad retrieval followed by an in-memory filter from leaking
+// unrelated chunks into ranking or wasting embedding/search work.
+type FolderFilteredChunkSearcher interface {
+	SearchWithFolder(context.Context, int64, []float32, int, []int64, string, bool) ([]Result, error)
+}
+
+type FolderFilteredKeywordSearcher interface {
+	SearchKeywordWithFolder(context.Context, int64, string, int, []int64, string, bool) ([]Result, error)
+}
+
 // NeighborSearcher is an optional store capability. Existing custom stores
 // continue to work; PostgreSQL stores can additionally provide nearby chunks.
 type NeighborSearcher interface {
@@ -127,6 +141,8 @@ const (
 
 type SearchOptions struct {
 	DocumentIDs      []int64
+	FolderPath       *string
+	FolderRecursive  bool
 	QueryRewrite     bool
 	KeywordThreshold float64
 }
@@ -331,11 +347,19 @@ func (s *Service) searchWithOptions(ctx context.Context, knowledgeBaseID int64, 
 		return nil, err
 	}
 	options.DocumentIDs = documentIDs
+	var folderPath string
+	if options.FolderPath != nil {
+		folderPath, err = document.NormalizeFolderPath(*options.FolderPath)
+		if err != nil {
+			return nil, ErrInvalidFolderPath
+		}
+		options.FolderPath = &folderPath
+	}
 	if err := ValidateKeywordThreshold(options.KeywordThreshold); err != nil {
 		return nil, err
 	}
 	options.KeywordThreshold = effectiveKeywordThreshold(options.KeywordThreshold)
-	key := makeResultCacheKey(knowledgeBaseID, query, limit, documentIDs, options.QueryRewrite, options.KeywordThreshold)
+	key := makeResultCacheKeyWithFolder(knowledgeBaseID, query, limit, documentIDs, options.QueryRewrite, options.KeywordThreshold, folderPath, options.FolderPath != nil, options.FolderPath != nil && options.FolderRecursive)
 	if s.cache != nil {
 		if value, ok := s.cache.get(key); ok {
 			usage.ObserveQueryRewrite(ctx, value.rewriteState)
@@ -539,7 +563,7 @@ func (s *Service) searchUncached(ctx context.Context, knowledgeBaseID int64, que
 		waitGroup.Add(1)
 		go func() {
 			defer waitGroup.Done()
-			results, searchErr := s.searchOneQuery(queryContext, knowledgeBaseID, searchQuery, candidateLimit, documentIDs, options.KeywordThreshold)
+			results, searchErr := s.searchOneQuery(queryContext, knowledgeBaseID, searchQuery, candidateLimit, documentIDs, options.FolderPath, options.FolderRecursive, options.KeywordThreshold)
 			if searchErr != nil {
 				firstErrOnce.Do(func() {
 					firstErr = searchErr
@@ -611,7 +635,7 @@ type querySearchResult struct {
 	observation usage.RetrievalObservation
 }
 
-func (s *Service) searchOneQuery(ctx context.Context, knowledgeBaseID int64, searchQuery string, candidateLimit int, documentIDs []int64, keywordThreshold float64) (querySearchResult, error) {
+func (s *Service) searchOneQuery(ctx context.Context, knowledgeBaseID int64, searchQuery string, candidateLimit int, documentIDs []int64, folderPath *string, folderRecursive bool, keywordThreshold float64) (querySearchResult, error) {
 	response, embedErr := s.embedder.Embed(ctx, []string{searchQuery})
 	if embedErr != nil {
 		return querySearchResult{}, fmt.Errorf("embed search query: %w", embedErr)
@@ -621,7 +645,13 @@ func (s *Service) searchOneQuery(ctx context.Context, knowledgeBaseID int64, sea
 	}
 	var vectorResults []Result
 	var err error
-	if len(documentIDs) == 0 {
+	if folderPath != nil {
+		filtered, ok := s.chunks.(FolderFilteredChunkSearcher)
+		if !ok {
+			return querySearchResult{}, ErrDocumentFilterUnavailable
+		}
+		vectorResults, err = filtered.SearchWithFolder(ctx, knowledgeBaseID, response.Data[0].Vector, candidateLimit, documentIDs, *folderPath, folderRecursive)
+	} else if len(documentIDs) == 0 {
 		vectorResults, err = s.chunks.Search(ctx, knowledgeBaseID, response.Data[0].Vector, candidateLimit)
 	} else {
 		filtered, ok := s.chunks.(FilteredChunkSearcher)
@@ -637,7 +667,13 @@ func (s *Service) searchOneQuery(ctx context.Context, knowledgeBaseID int64, sea
 	queryResults := vectorResults
 	if s.keyword != nil {
 		var keywordResults []Result
-		if len(documentIDs) == 0 {
+		if folderPath != nil {
+			filtered, ok := s.keyword.(FolderFilteredKeywordSearcher)
+			if !ok {
+				return querySearchResult{}, ErrDocumentFilterUnavailable
+			}
+			keywordResults, err = filtered.SearchKeywordWithFolder(ctx, knowledgeBaseID, searchQuery, candidateLimit, documentIDs, *folderPath, folderRecursive)
+		} else if len(documentIDs) == 0 {
 			keywordResults, err = s.keyword.SearchKeyword(ctx, knowledgeBaseID, searchQuery, candidateLimit)
 		} else {
 			filtered, ok := s.keyword.(FilteredKeywordSearcher)

@@ -91,6 +91,8 @@ type KnowledgeSearchTool struct {
 	maxDistance      float64
 	keywordThreshold float64
 	documentIDs      []int64
+	folderPath       *string
+	folderRecursive  bool
 	queryRewrite     bool
 }
 
@@ -191,6 +193,20 @@ func (t *KnowledgeSearchTool) Description() string {
 	return "搜索指定知识库中与问题最相关的文档片段"
 }
 
+// SetFolderScope fixes the search boundary for this Agent run. It is not a
+// model-visible tool argument, so the model cannot accidentally search outside
+// the documents selected by the user.
+func (t *KnowledgeSearchTool) SetFolderScope(folderPath *string, recursive bool) {
+	if folderPath == nil {
+		t.folderPath = nil
+		t.folderRecursive = false
+		return
+	}
+	copyOfPath := *folderPath
+	t.folderPath = &copyOfPath
+	t.folderRecursive = recursive
+}
+
 func (t *KnowledgeSearchTool) Parameters() json.RawMessage {
 	if t != nil && t.knowledgeBaseID > 0 {
 		return append(json.RawMessage(nil), scopedKnowledgeSearchParameters...)
@@ -244,11 +260,11 @@ func (t *KnowledgeSearchTool) Call(ctx context.Context, raw json.RawMessage) (To
 		results []retrieval.Result
 		err     error
 	)
-	if len(t.documentIDs) == 0 && !t.queryRewrite && t.keywordThreshold <= 0 {
+	if len(t.documentIDs) == 0 && t.folderPath == nil && !t.queryRewrite && t.keywordThreshold <= 0 {
 		results, err = t.searcher.Search(ctx, input.KnowledgeBaseID, input.Query, input.Limit)
 	} else if filtered, ok := t.searcher.(retrieval.FilteredSearcher); ok {
-		results, err = filtered.SearchWithOptions(ctx, input.KnowledgeBaseID, input.Query, input.Limit, retrieval.SearchOptions{DocumentIDs: t.documentIDs, QueryRewrite: t.queryRewrite, KeywordThreshold: t.keywordThreshold})
-	} else if len(t.documentIDs) > 0 || t.queryRewrite {
+		results, err = filtered.SearchWithOptions(ctx, input.KnowledgeBaseID, input.Query, input.Limit, retrieval.SearchOptions{DocumentIDs: t.documentIDs, FolderPath: t.folderPath, FolderRecursive: t.folderRecursive, QueryRewrite: t.queryRewrite, KeywordThreshold: t.keywordThreshold})
+	} else if len(t.documentIDs) > 0 || t.folderPath != nil || t.queryRewrite {
 		return ToolResult{}, retrieval.ErrDocumentFilterUnavailable
 	} else {
 		results, err = t.searcher.Search(ctx, input.KnowledgeBaseID, input.Query, input.Limit)

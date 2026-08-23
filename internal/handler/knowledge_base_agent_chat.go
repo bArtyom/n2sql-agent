@@ -17,6 +17,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
+	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
@@ -181,8 +182,10 @@ func idempotencyRequestHash(knowledgeBaseID int64, request agentservice.ChatRequ
 		Threshold           float64                       `json:"similarity_threshold"`
 		KeywordThreshold    float64                       `json:"keyword_threshold"`
 		DocumentIDs         []int64                       `json:"document_ids"`
+		FolderPath          *string                       `json:"folder_path"`
+		FolderRecursive     bool                          `json:"folder_recursive"`
 		QueryRewrite        bool                          `json:"query_rewrite"`
-	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message, ChatModel: request.ChatModel, ThinkingMode: request.ThinkingMode, MaxCompletionTokens: request.MaxCompletionTokens, Attachments: request.Attachments, TopK: request.TopK, Threshold: request.SimilarityThreshold, KeywordThreshold: request.KeywordThreshold, DocumentIDs: request.DocumentIDs, QueryRewrite: request.QueryRewrite})
+	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message, ChatModel: request.ChatModel, ThinkingMode: request.ThinkingMode, MaxCompletionTokens: request.MaxCompletionTokens, Attachments: request.Attachments, TopK: request.TopK, Threshold: request.SimilarityThreshold, KeywordThreshold: request.KeywordThreshold, DocumentIDs: request.DocumentIDs, FolderPath: request.FolderPath, FolderRecursive: request.FolderRecursive, QueryRewrite: request.QueryRewrite})
 	if err != nil {
 		return "", err
 	}
@@ -259,6 +262,12 @@ func decodeKnowledgeBaseAgentChatRequest(w http.ResponseWriter, r *http.Request,
 		return 0, agentservice.ChatRequest{}, false
 	}
 	request.DocumentIDs = normalizedDocumentIDs
+	if request.FolderPath != nil {
+		if _, err := document.NormalizeFolderPath(*request.FolderPath); err != nil {
+			http.Error(w, `{"error":"invalid agent chat folder_path"}`, http.StatusBadRequest)
+			return 0, agentservice.ChatRequest{}, false
+		}
+	}
 	for index := range request.History {
 		if request.History[index].Role != "user" && request.History[index].Role != "assistant" {
 			http.Error(w, `{"error":"invalid agent chat history"}`, http.StatusBadRequest)
@@ -293,6 +302,8 @@ func knowledgeBaseAgentChatError(err error) (string, int) {
 		return "invalid agent chat request", http.StatusBadRequest
 	case errors.Is(err, retrieval.ErrInvalidDocumentIDs):
 		return "invalid agent chat document filter", http.StatusBadRequest
+	case errors.Is(err, retrieval.ErrInvalidFolderPath):
+		return "invalid agent chat folder filter", http.StatusBadRequest
 	case errors.Is(err, conversation.ErrInvalidConversation), errors.Is(err, conversation.ErrInvalidKnowledgeBase), errors.Is(err, conversation.ErrInvalidMessage), errors.Is(err, conversation.ErrInvalidIdempotencyKey):
 		return "invalid conversation request", http.StatusBadRequest
 	case errors.Is(err, conversation.ErrIdempotencyConflict):

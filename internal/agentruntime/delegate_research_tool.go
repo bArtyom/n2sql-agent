@@ -44,6 +44,8 @@ type DelegateResearchTool struct {
 	maxResultBytes    int
 	maxSteps          int
 	documentIDs       []int64
+	folderPath        *string
+	folderRecursive   bool
 	queryRewrite      bool
 	keywordThreshold  float64
 	parentRunID       int64
@@ -62,6 +64,8 @@ type ChildRunSpec struct {
 	KnowledgeBaseID   int64
 	Question          string
 	DocumentIDs       []int64
+	FolderPath        *string
+	FolderRecursive   bool
 	QueryRewrite      bool
 	TopK              int
 	KeywordThreshold  float64
@@ -120,6 +124,22 @@ func (t *DelegateResearchTool) SetChildEventSink(sink EventSink) {
 	if t != nil {
 		t.childEventSink = sink
 	}
+}
+
+// SetFolderScope propagates the parent's user-selected document boundary to
+// every child Agent. Child research may narrow its reasoning, but it must not
+// escape the parent's folder scope.
+func (t *DelegateResearchTool) SetFolderScope(folderPath *string, recursive bool) {
+	if t == nil || folderPath == nil {
+		if t != nil {
+			t.folderPath = nil
+			t.folderRecursive = false
+		}
+		return
+	}
+	copyOfPath := *folderPath
+	t.folderPath = &copyOfPath
+	t.folderRecursive = recursive
 }
 
 func NewDelegateResearchTool(chat modelruntime.ToolChatRunner, searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxSteps int, documentIDs []int64, queryRewrite bool, keywordThreshold float64) (*DelegateResearchTool, error) {
@@ -194,8 +214,13 @@ func (t *DelegateResearchTool) Call(ctx context.Context, raw json.RawMessage) (a
 	if err != nil {
 		return agent.ToolResult{}, fmt.Errorf("create child research registry: %w", err)
 	}
+	if t.folderPath != nil {
+		if err := registry.SetKnowledgeSearchFolderScope(t.folderPath, t.folderRecursive); err != nil {
+			return agent.ToolResult{}, fmt.Errorf("configure child research folder scope: %w", err)
+		}
+	}
 	childRunID := t.newChildRunID(input.Question)
-	childSpec := ChildRunSpec{RunID: childRunID, ParentRunID: t.parentRunID, ParentRunPublicID: t.parentRunPublicID, KnowledgeBaseID: t.knowledgeBaseID, Question: input.Question, DocumentIDs: append([]int64(nil), t.documentIDs...), QueryRewrite: t.queryRewrite, TopK: retrieval.DefaultResults, KeywordThreshold: t.keywordThreshold}
+	childSpec := ChildRunSpec{RunID: childRunID, ParentRunID: t.parentRunID, ParentRunPublicID: t.parentRunPublicID, KnowledgeBaseID: t.knowledgeBaseID, Question: input.Question, DocumentIDs: append([]int64(nil), t.documentIDs...), FolderPath: t.folderPath, FolderRecursive: t.folderRecursive, QueryRewrite: t.queryRewrite, TopK: retrieval.DefaultResults, KeywordThreshold: t.keywordThreshold}
 	if asyncLifecycle, ok := t.lifecycle.(AsyncChildRunLifecycle); ok && t.parentRunID > 0 {
 		startedID, ready, asyncResult, asyncErr := asyncLifecycle.EnqueueChild(ctx, childSpec)
 		if asyncErr != nil {

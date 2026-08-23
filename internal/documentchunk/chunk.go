@@ -556,14 +556,23 @@ func (s *PostgresStore) Search(ctx context.Context, knowledgeBaseID int64, embed
 }
 
 func (s *PostgresStore) SearchWithDocuments(ctx context.Context, knowledgeBaseID int64, embedding []float32, limit int, documentIDs []int64) ([]SearchResult, error) {
+	return s.searchVectorWithScope(ctx, knowledgeBaseID, embedding, limit, documentIDs, nil, false)
+}
+
+func (s *PostgresStore) SearchWithFolder(ctx context.Context, knowledgeBaseID int64, embedding []float32, limit int, documentIDs []int64, folderPath string, recursive bool) ([]SearchResult, error) {
+	return s.searchVectorWithScope(ctx, knowledgeBaseID, embedding, limit, documentIDs, folderPath, recursive)
+}
+
+func (s *PostgresStore) searchVectorWithScope(ctx context.Context, knowledgeBaseID int64, embedding []float32, limit int, documentIDs []int64, folderPath any, recursive bool) ([]SearchResult, error) {
 	queryVector := vectorLiteral(embedding)
 	query := "SELECT chunks.document_id, documents.original_filename, chunks.position, chunks.content, chunks.chunk_kind, chunks.heading_path, " +
 		"chunks.embedding <=> $2::vector AS distance " +
 		"FROM document_chunks AS chunks JOIN documents AS documents ON documents.id = chunks.document_id " +
 		"WHERE documents.knowledge_base_id = $1 AND chunks.embedding IS NOT NULL " +
 		"AND ($4::bigint[] IS NULL OR chunks.document_id = ANY($4::bigint[])) " +
+		"AND ($5::text IS NULL OR documents.folder_path = $5 OR ($6::boolean AND LEFT(documents.folder_path, LENGTH($5) + 1) = $5 || '/')) " +
 		"ORDER BY chunks.embedding <=> $2::vector, chunks.position LIMIT $3"
-	rows, err := s.db.QueryContext(ctx, query, knowledgeBaseID, queryVector, limit, documentIDsArgument(documentIDs))
+	rows, err := s.db.QueryContext(ctx, query, knowledgeBaseID, queryVector, limit, documentIDsArgument(documentIDs), folderPath, recursive)
 	if err != nil {
 		return nil, fmt.Errorf("query filtered document chunks: %w", err)
 	}
@@ -595,6 +604,14 @@ func (s *PostgresStore) SearchKeyword(ctx context.Context, knowledgeBaseID int64
 }
 
 func (s *PostgresStore) SearchKeywordWithDocuments(ctx context.Context, knowledgeBaseID int64, query string, limit int, documentIDs []int64) ([]SearchResult, error) {
+	return s.searchKeywordWithScope(ctx, knowledgeBaseID, query, limit, documentIDs, nil, false)
+}
+
+func (s *PostgresStore) SearchKeywordWithFolder(ctx context.Context, knowledgeBaseID int64, query string, limit int, documentIDs []int64, folderPath string, recursive bool) ([]SearchResult, error) {
+	return s.searchKeywordWithScope(ctx, knowledgeBaseID, query, limit, documentIDs, folderPath, recursive)
+}
+
+func (s *PostgresStore) searchKeywordWithScope(ctx context.Context, knowledgeBaseID int64, query string, limit int, documentIDs []int64, folderPath any, recursive bool) ([]SearchResult, error) {
 	exactPattern := "%" + strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(strings.ToLower(query)) + "%"
 	sqlQuery := "WITH search_query AS (" +
 		"SELECT plainto_tsquery('simple', $2) AS terms" +
@@ -606,10 +623,11 @@ func (s *PostgresStore) SearchKeywordWithDocuments(ctx context.Context, knowledg
 		"FROM document_chunks AS chunks JOIN documents AS documents ON documents.id = chunks.document_id " +
 		"CROSS JOIN search_query WHERE documents.knowledge_base_id = $1 " +
 		"AND (chunks.content_search @@ search_query.terms OR chunks.heading_search @@ search_query.terms OR lower(chunks.content) LIKE $3 ESCAPE E'\\\\' OR lower(chunks.heading_path) LIKE $3 ESCAPE E'\\\\' OR lower(documents.original_filename) LIKE $3 ESCAPE E'\\\\') " +
-		"AND ($4::bigint[] IS NULL OR chunks.document_id = ANY($4::bigint[]))" +
+		"AND ($4::bigint[] IS NULL OR chunks.document_id = ANY($4::bigint[])) " +
+		"AND ($5::text IS NULL OR documents.folder_path = $5 OR ($6::boolean AND LEFT(documents.folder_path, LENGTH($5) + 1) = $5 || '/'))" +
 		") SELECT document_id, original_filename, position, content, chunk_kind, heading_path, 0::float8 AS distance, GREATEST(keyword_score, exact_score) AS keyword_score, heading_score " +
-		"FROM scored ORDER BY exact_score DESC, keyword_score DESC, position, document_id LIMIT $5"
-	rows, err := s.db.QueryContext(ctx, sqlQuery, knowledgeBaseID, query, exactPattern, documentIDsArgument(documentIDs), limit)
+		"FROM scored ORDER BY exact_score DESC, keyword_score DESC, position, document_id LIMIT $7"
+	rows, err := s.db.QueryContext(ctx, sqlQuery, knowledgeBaseID, query, exactPattern, documentIDsArgument(documentIDs), folderPath, recursive, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query filtered keyword document chunks: %w", err)
 	}

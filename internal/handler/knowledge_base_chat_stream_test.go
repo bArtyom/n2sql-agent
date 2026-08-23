@@ -15,6 +15,19 @@ import (
 
 type streamAnswererStub struct{}
 
+type folderStreamAnswererStub struct {
+	options *retrieval.SearchOptions
+}
+
+func (s *folderStreamAnswererStub) Stream(context.Context, int64, string, int, func(rag.StreamEvent) error) error {
+	return nil
+}
+
+func (s *folderStreamAnswererStub) StreamWithSearchOptions(_ context.Context, _ int64, _ string, _ int, _ float64, options retrieval.SearchOptions, emit func(rag.StreamEvent) error) error {
+	s.options = &options
+	return emit(rag.StreamEvent{Type: "delta", Delta: "范围回答"})
+}
+
 func (streamAnswererStub) Stream(_ context.Context, _ int64, _ string, _ int, emit func(rag.StreamEvent) error) error {
 	if err := emit(rag.StreamEvent{
 		Type: "sources",
@@ -47,6 +60,20 @@ func TestKnowledgeBaseChatStreamWritesSSEEvents(t *testing.T) {
 	want := "event: sources\ndata: {\"type\":\"sources\",\"sources\":[{\"documentId\":10,\"originalFilename\":\"guide.md\",\"position\":2,\"content\":\"执行命令\",\"distance\":0}]}\n\nevent: delta\ndata: {\"type\":\"delta\",\"delta\":\"回答片段\"}\n\nevent: done\ndata: {}\n\n"
 	if response.Body.String() != want {
 		t.Fatalf("body = %q, want %q", response.Body.String(), want)
+	}
+}
+
+func TestKnowledgeBaseChatStreamPassesFolderScope(t *testing.T) {
+	answerer := &folderStreamAnswererStub{}
+	endpoint := handler.NewKnowledgeBaseChatStream(answerer)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/chat/stream", strings.NewReader(`{"message":"问题","folder_path":"docs/api","folder_recursive":true}`))
+	request.SetPathValue("id", "7")
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || answerer.options == nil || answerer.options.FolderPath == nil || *answerer.options.FolderPath != "docs/api" || !answerer.options.FolderRecursive {
+		t.Fatalf("status=%d options=%#v body=%q", response.Code, answerer.options, response.Body.String())
 	}
 }
 

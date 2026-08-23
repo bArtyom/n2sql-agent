@@ -18,6 +18,7 @@ type answererStub struct {
 	question        string
 	topK            int
 	err             error
+	options         *retrieval.SearchOptions
 }
 
 func (s *answererStub) Answer(_ context.Context, knowledgeBaseID int64, question string, topK int) (rag.Response, error) {
@@ -38,6 +39,11 @@ func (s *answererStub) Answer(_ context.Context, knowledgeBaseID int64, question
 	}, nil
 }
 
+func (s *answererStub) AnswerWithSearchOptions(_ context.Context, knowledgeBaseID int64, question string, topK int, _ float64, options retrieval.SearchOptions) (rag.Response, error) {
+	s.options = &options
+	return s.Answer(context.Background(), knowledgeBaseID, question, topK)
+}
+
 func TestKnowledgeBaseChatReturnsAnswerAndSources(t *testing.T) {
 	answerer := &answererStub{}
 	endpoint := handler.NewKnowledgeBaseChat(answerer)
@@ -55,6 +61,20 @@ func TestKnowledgeBaseChatReturnsAnswerAndSources(t *testing.T) {
 	}
 	if answerer.knowledgeBaseID != 7 || answerer.question != "如何启动服务？" || answerer.topK != 5 {
 		t.Fatalf("answer arguments = %#v", answerer)
+	}
+}
+
+func TestKnowledgeBaseChatPassesFolderScope(t *testing.T) {
+	answerer := &answererStub{}
+	endpoint := handler.NewKnowledgeBaseChat(answerer)
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/chat", strings.NewReader(`{"message":"问题","folder_path":"docs/api","folder_recursive":true}`))
+	request.SetPathValue("id", "7")
+	response := httptest.NewRecorder()
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || answerer.options == nil || answerer.options.FolderPath == nil || *answerer.options.FolderPath != "docs/api" || !answerer.options.FolderRecursive {
+		t.Fatalf("status=%d options=%#v", response.Code, answerer.options)
 	}
 }
 

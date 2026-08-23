@@ -237,6 +237,13 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	if err := retrieval.ValidateKeywordThreshold(request.KeywordThreshold); err != nil {
 		return Response{}, ErrInvalidRequest
 	}
+	if request.FolderPath != nil {
+		normalizedFolderPath, err := document.NormalizeFolderPath(*request.FolderPath)
+		if err != nil {
+			return Response{}, ErrInvalidRequest
+		}
+		request.FolderPath = &normalizedFolderPath
+	}
 	maxDistance := agent.DefaultMaxKnowledgeDistance
 	if request.SimilarityThreshold != 0 {
 		if err := agent.ValidateMaxKnowledgeDistance(request.SimilarityThreshold); err != nil {
@@ -311,12 +318,22 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	if err != nil {
 		return Response{}, fmt.Errorf("create knowledge search registry: %w", err)
 	}
+	if request.FolderPath != nil {
+		if err := registry.SetKnowledgeSearchFolderScope(request.FolderPath, request.FolderRecursive); err != nil {
+			return Response{}, fmt.Errorf("configure knowledge search folder scope: %w", err)
+		}
+	}
 	if request.ChildMode {
 		registry, err = agent.NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewriteAndKeywordThreshold(
 			s.searcher, knowledgeBaseID, s.maxToolResultBytes, request.TopK, maxDistance, keywordThreshold, request.DocumentIDs, request.QueryRewrite,
 		)
 		if err != nil {
 			return Response{}, fmt.Errorf("create child knowledge search registry: %w", err)
+		}
+		if request.FolderPath != nil {
+			if err := registry.SetKnowledgeSearchFolderScope(request.FolderPath, request.FolderRecursive); err != nil {
+				return Response{}, fmt.Errorf("configure child knowledge search folder scope: %w", err)
+			}
 		}
 	}
 	if request.KnowledgePolicy == KnowledgeBasePreferred {
@@ -334,6 +351,7 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 			return Response{}, fmt.Errorf("create delegate research tool: %w", delegateErr)
 		}
 		delegate.SetParentRun(request.ParentRunDatabaseID, request.RunID)
+		delegate.SetFolderScope(request.FolderPath, request.FolderRecursive)
 		delegate.SetChildRunLifecycle(s.childLifecycle)
 		delegate.SetChildScheduler(s.childScheduler)
 		delegate.SetChildEventSink(sink)

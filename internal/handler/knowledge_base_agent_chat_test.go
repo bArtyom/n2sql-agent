@@ -61,6 +61,20 @@ func TestKnowledgeBaseAgentChatReturnsAnswer(t *testing.T) {
 	}
 }
 
+func TestKnowledgeBaseAgentChatPassesFolderScope(t *testing.T) {
+	answerer := &agentAnswererStub{response: agentservice.Response{Answer: "OK"}}
+	endpoint := handler.NewKnowledgeBaseAgentChat(answerer)
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat", strings.NewReader(`{"message":"问题","folder_path":"docs/api","folder_recursive":true}`))
+	request.SetPathValue("id", "7")
+	response := httptest.NewRecorder()
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || answerer.request.FolderPath == nil || *answerer.request.FolderPath != "docs/api" || !answerer.request.FolderRecursive {
+		t.Fatalf("status=%d request=%#v", response.Code, answerer.request)
+	}
+}
+
 func TestKnowledgeBaseAgentChatPassesSelectedChatModel(t *testing.T) {
 	answerer := &agentAnswererStub{response: agentservice.Response{Answer: "OK"}}
 	endpoint := handler.NewKnowledgeBaseAgentChat(answerer)

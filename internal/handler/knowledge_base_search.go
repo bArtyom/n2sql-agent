@@ -35,6 +35,8 @@ func NewKnowledgeBaseSearch(searcher retrieval.Searcher) http.Handler {
 			Query            string  `json:"query"`
 			Limit            int     `json:"limit"`
 			DocumentIDs      []int64 `json:"document_ids,omitempty"`
+			FolderPath       *string `json:"folder_path,omitempty"`
+			FolderRecursive  bool    `json:"folder_recursive,omitempty"`
 			QueryRewrite     bool    `json:"query_rewrite,omitempty"`
 			KeywordThreshold float64 `json:"keyword_threshold,omitempty"`
 			Debug            bool    `json:"debug,omitempty"`
@@ -74,7 +76,7 @@ func NewKnowledgeBaseSearch(searcher retrieval.Searcher) http.Handler {
 		var results []retrieval.Result
 		retrievalTracker := usage.NewRetrievalTracker()
 		searchContext := usage.WithRetrievalObserver(r.Context(), retrievalTracker)
-		if len(normalizedDocumentIDs) == 0 && !request.QueryRewrite && request.KeywordThreshold == 0 {
+		if len(normalizedDocumentIDs) == 0 && request.FolderPath == nil && !request.QueryRewrite && request.KeywordThreshold == 0 {
 			results, err = searcher.Search(searchContext, knowledgeBaseID, request.Query, request.Limit)
 		} else {
 			filtered, ok := searcher.(retrieval.FilteredSearcher)
@@ -82,7 +84,7 @@ func NewKnowledgeBaseSearch(searcher retrieval.Searcher) http.Handler {
 				writeSearchError(w, retrieval.ErrDocumentFilterUnavailable)
 				return
 			}
-			results, err = filtered.SearchWithOptions(searchContext, knowledgeBaseID, request.Query, request.Limit, retrieval.SearchOptions{DocumentIDs: normalizedDocumentIDs, QueryRewrite: request.QueryRewrite, KeywordThreshold: request.KeywordThreshold})
+			results, err = filtered.SearchWithOptions(searchContext, knowledgeBaseID, request.Query, request.Limit, retrieval.SearchOptions{DocumentIDs: normalizedDocumentIDs, FolderPath: request.FolderPath, FolderRecursive: request.FolderRecursive, QueryRewrite: request.QueryRewrite, KeywordThreshold: request.KeywordThreshold})
 		}
 		if err != nil {
 			writeSearchError(w, err)
@@ -107,7 +109,7 @@ func NewKnowledgeBaseSearch(searcher retrieval.Searcher) http.Handler {
 
 func writeSearchError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, retrieval.ErrInvalidKnowledgeBase), errors.Is(err, retrieval.ErrInvalidQuery), errors.Is(err, retrieval.ErrInvalidLimit), errors.Is(err, retrieval.ErrInvalidDocumentIDs), errors.Is(err, retrieval.ErrInvalidKeywordThreshold):
+	case errors.Is(err, retrieval.ErrInvalidKnowledgeBase), errors.Is(err, retrieval.ErrInvalidQuery), errors.Is(err, retrieval.ErrInvalidLimit), errors.Is(err, retrieval.ErrInvalidDocumentIDs), errors.Is(err, retrieval.ErrInvalidFolderPath), errors.Is(err, retrieval.ErrInvalidKeywordThreshold):
 		http.Error(w, `{"error":"invalid search request"}`, http.StatusBadRequest)
 	case errors.Is(err, retrieval.ErrQueryRewriteUnavailable):
 		http.Error(w, `{"error":"query rewrite is unavailable"}`, http.StatusInternalServerError)

@@ -33,6 +33,9 @@ type resultCacheKey struct {
 	query            string
 	limit            int
 	documentIDs      string
+	folderPath       string
+	folderScoped     bool
+	folderRecursive  bool
 	queryRewrite     bool
 	keywordThreshold float64
 }
@@ -206,10 +209,10 @@ func cloneCachedResult(value cachedResult) cachedResult {
 }
 
 func makeResultCacheKey(knowledgeBaseID int64, query string, limit int, documentIDs []int64, queryRewrite bool, thresholds ...float64) resultCacheKey {
-	var keywordThreshold float64
-	if len(thresholds) > 0 {
-		keywordThreshold = thresholds[0]
-	}
+	return makeResultCacheKeyWithFolder(knowledgeBaseID, query, limit, documentIDs, queryRewrite, firstFloat(thresholds), "", false, false)
+}
+
+func makeResultCacheKeyWithFolder(knowledgeBaseID int64, query string, limit int, documentIDs []int64, queryRewrite bool, keywordThreshold float64, folderPath string, folderScoped bool, folderRecursive bool) resultCacheKey {
 	var builder strings.Builder
 	for index, documentID := range documentIDs {
 		if index > 0 {
@@ -222,9 +225,19 @@ func makeResultCacheKey(knowledgeBaseID int64, query string, limit int, document
 		query:            normalizedCacheQuery(query),
 		limit:            limit,
 		documentIDs:      builder.String(),
+		folderPath:       folderPath,
+		folderScoped:     folderScoped,
+		folderRecursive:  folderRecursive,
 		queryRewrite:     queryRewrite,
 		keywordThreshold: keywordThreshold,
 	}
+}
+
+func firstFloat(values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	return values[0]
 }
 
 func normalizedCacheQuery(query string) string {

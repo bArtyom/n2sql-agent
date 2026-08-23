@@ -82,6 +82,12 @@ type filteredChunkStoreStub struct {
 	documentIDs []int64
 }
 
+type folderChunkStoreStub struct {
+	folderPath string
+	recursive  bool
+	callCount  int
+}
+
 func (s *filteredChunkStoreStub) Search(context.Context, int64, []float32, int) ([]retrieval.Result, error) {
 	return nil, nil
 }
@@ -89,6 +95,16 @@ func (s *filteredChunkStoreStub) Search(context.Context, int64, []float32, int) 
 func (s *filteredChunkStoreStub) SearchWithDocuments(_ context.Context, _ int64, _ []float32, _ int, documentIDs []int64) ([]retrieval.Result, error) {
 	s.documentIDs = append([]int64(nil), documentIDs...)
 	return []retrieval.Result{{DocumentID: documentIDs[0], Position: 0, Content: "范围内资料", Distance: 0.1}}, nil
+}
+
+func (s *folderChunkStoreStub) Search(_ context.Context, _ int64, _ []float32, _ int) ([]retrieval.Result, error) {
+	return nil, nil
+}
+
+func (s *folderChunkStoreStub) SearchWithFolder(_ context.Context, _ int64, _ []float32, _ int, _ []int64, folderPath string, recursive bool) ([]retrieval.Result, error) {
+	s.folderPath, s.recursive = folderPath, recursive
+	s.callCount++
+	return []retrieval.Result{{DocumentID: int64(s.callCount), Position: 0, Content: folderPath}}, nil
 }
 
 type hybridChunkStoreStub struct{}
@@ -219,6 +235,28 @@ func TestServicePassesNormalizedDocumentFilter(t *testing.T) {
 	}
 	if !reflect.DeepEqual(store.documentIDs, []int64{3, 9}) {
 		t.Fatalf("document IDs = %#v, want [3 9]", store.documentIDs)
+	}
+}
+
+func TestServicePassesNormalizedFolderFilterAndSeparatesCacheEntries(t *testing.T) {
+	store := &folderChunkStoreStub{}
+	service := retrieval.NewService(&embeddingStub{}, store)
+	firstPath := `docs\\Go//api`
+	secondPath := "docs/web"
+
+	first, err := service.SearchWithOptions(context.Background(), 7, "问题", 5, retrieval.SearchOptions{FolderPath: &firstPath, FolderRecursive: true})
+	if err != nil {
+		t.Fatalf("first SearchWithOptions() error = %v", err)
+	}
+	second, err := service.SearchWithOptions(context.Background(), 7, "问题", 5, retrieval.SearchOptions{FolderPath: &secondPath})
+	if err != nil {
+		t.Fatalf("second SearchWithOptions() error = %v", err)
+	}
+	if store.folderPath != "docs/web" || store.recursive || store.callCount != 2 {
+		t.Fatalf("folder calls path=%q recursive=%v count=%d", store.folderPath, store.recursive, store.callCount)
+	}
+	if len(first) != 1 || first[0].Content != "docs/Go/api" || len(second) != 1 || second[0].Content != "docs/web" {
+		t.Fatalf("folder results first=%#v second=%#v", first, second)
 	}
 }
 

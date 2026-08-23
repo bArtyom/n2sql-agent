@@ -65,6 +65,8 @@ type ChatRequest struct {
 	KeywordThreshold    float64                             `json:"keyword_threshold,omitempty"`
 	KnowledgePolicy     KnowledgePolicy                     `json:"knowledge_policy,omitempty"`
 	DocumentIDs         []int64                             `json:"document_ids,omitempty"`
+	FolderPath          *string                             `json:"folder_path,omitempty"`
+	FolderRecursive     bool                                `json:"folder_recursive,omitempty"`
 	QueryRewrite        bool                                `json:"query_rewrite,omitempty"`
 	History             []HistoryMessage                    `json:"history,omitempty"`
 	ConversationID      int64                               `json:"conversation_id,omitempty"`

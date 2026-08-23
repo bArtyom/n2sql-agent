@@ -177,3 +177,11 @@ func mustBegin(cache *resultCache, key resultCacheKey) *cacheFlight {
 	}
 	return flight
 }
+
+func TestResultCacheSeparatesUnscopedSearchFromKnowledgeBaseRootFolder(t *testing.T) {
+	unscoped := makeResultCacheKey(7, "问题", 5, nil, false)
+	rootFolder := makeResultCacheKeyWithFolder(7, "问题", 5, nil, false, 0, "", true, false)
+	if unscoped == rootFolder {
+		t.Fatal("unscoped search and explicit root-folder search must not share a cache entry")
+	}
+}

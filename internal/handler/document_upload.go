@@ -140,6 +140,8 @@ func writeDocumentUploadError(w http.ResponseWriter, err error) {
 		http.Error(w, `{"error":"knowledge base not found"}`, http.StatusNotFound)
 	case errors.Is(err, document.ErrUnsupportedFile):
 		http.Error(w, `{"error":"unsupported file"}`, http.StatusUnsupportedMediaType)
+	case errors.Is(err, document.ErrInvalidFolderPath):
+		http.Error(w, `{"error":"invalid folder path"}`, http.StatusBadRequest)
 	case errors.Is(err, document.ErrDuplicateDocument):
 		http.Error(w, `{"error":"document already exists"}`, http.StatusConflict)
 	default:

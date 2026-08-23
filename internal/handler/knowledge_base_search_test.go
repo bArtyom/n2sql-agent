@@ -17,6 +17,16 @@ type searcherStub struct {
 	limit           int
 }
 
+type optionsSearcherStub struct {
+	searcherStub
+	options retrieval.SearchOptions
+}
+
+func (s *optionsSearcherStub) SearchWithOptions(_ context.Context, _ int64, _ string, _ int, options retrieval.SearchOptions) ([]retrieval.Result, error) {
+	s.options = options
+	return []retrieval.Result{{DocumentID: 11, Position: 0, Content: "范围内资料"}}, nil
+}
+
 func (s *searcherStub) Search(_ context.Context, knowledgeBaseID int64, query string, limit int) ([]retrieval.Result, error) {
 	s.knowledgeBaseID = knowledgeBaseID
 	s.query = query
@@ -41,6 +51,20 @@ func TestKnowledgeBaseSearchReturnsSimilarChunks(t *testing.T) {
 	}
 	if searcher.knowledgeBaseID != 7 || searcher.query != "后端怎么运行" || searcher.limit != 5 {
 		t.Fatalf("search arguments = %#v", searcher)
+	}
+}
+
+func TestKnowledgeBaseSearchPassesFolderScope(t *testing.T) {
+	searcher := &optionsSearcherStub{}
+	endpoint := handler.NewKnowledgeBaseSearch(searcher)
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/search", strings.NewReader(`{"query":"问题","folder_path":"docs\\\\Go//api","folder_recursive":true}`))
+	request.SetPathValue("id", "7")
+	response := httptest.NewRecorder()
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || searcher.options.FolderPath == nil || *searcher.options.FolderPath != `docs\\Go//api` || !searcher.options.FolderRecursive {
+		t.Fatalf("status=%d options=%#v", response.Code, searcher.options)
 	}
 }
 

@@ -72,6 +72,7 @@ func (l *PersistentChildRunLifecycle) EnqueueChild(ctx context.Context, spec age
 	}{Request: ChatRequest{
 		Message: spec.Question, RunID: spec.RunID, ParentRunDatabaseID: spec.ParentRunID,
 		ParentRunPublicID: spec.ParentRunPublicID, DocumentIDs: append([]int64(nil), spec.DocumentIDs...),
+		FolderPath: spec.FolderPath, FolderRecursive: spec.FolderRecursive,
 		QueryRewrite: spec.QueryRewrite, TopK: spec.TopK, KeywordThreshold: spec.KeywordThreshold, ChildMode: true,
 	}})
 	if err != nil {
