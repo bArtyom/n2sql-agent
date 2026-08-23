@@ -2,17 +2,21 @@ package handler
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/bArtyom/n2sql-agent/internal/document"
+	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 )
 
 const maxUploadRequestBytes int64 = document.MaxFileBytes + (1 << 20)
 const maxOriginalFilenameBytes = 255
+const maxProcessConfigBytes = 64 << 10
 
 func NewDocumentUpload(uploader document.Uploader) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -44,12 +48,18 @@ func NewDocumentUpload(uploader document.Uploader) http.Handler {
 			http.Error(w, `{"error":"unsupported file"}`, http.StatusUnsupportedMediaType)
 			return
 		}
+		processConfig, err := parseProcessConfig(r.FormValue("process_config"))
+		if err != nil {
+			http.Error(w, `{"error":"invalid process_config"}`, http.StatusBadRequest)
+			return
+		}
 		document, err := uploader.Upload(r.Context(), document.UploadInput{
 			KnowledgeBaseID:  knowledgeBaseID,
 			OriginalFilename: filename,
 			FolderPath:       r.FormValue("folder_path"),
 			ContentType:      contentType,
 			Content:          content,
+			ProcessConfig:    processConfig,
 		})
 		if err != nil {
 			writeDocumentUploadError(w, err)
@@ -59,6 +69,33 @@ func NewDocumentUpload(uploader document.Uploader) http.Handler {
 		w.WriteHeader(http.StatusCreated)
 		writeJSON(w, document)
 	})
+}
+
+func parseProcessConfig(raw string) (*documentextractor.ProcessConfig, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	if len([]byte(raw)) > maxProcessConfigBytes {
+		return nil, errors.New("process_config is too large")
+	}
+	var config documentextractor.ProcessConfig
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&config); err != nil {
+		return nil, err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("process_config must contain one JSON object")
+		}
+		return nil, err
+	}
+	if err := documentextractor.ValidateProcessConfig(&config); err != nil {
+		return nil, err
+	}
+	return &config, nil
 }
 
 func validUploadFilename(filename string) bool {
@@ -142,6 +179,8 @@ func writeDocumentUploadError(w http.ResponseWriter, err error) {
 		http.Error(w, `{"error":"unsupported file"}`, http.StatusUnsupportedMediaType)
 	case errors.Is(err, document.ErrInvalidFolderPath):
 		http.Error(w, `{"error":"invalid folder path"}`, http.StatusBadRequest)
+	case errors.Is(err, document.ErrInvalidProcessConfig):
+		http.Error(w, `{"error":"invalid process_config"}`, http.StatusBadRequest)
 	case errors.Is(err, document.ErrDuplicateDocument):
 		http.Error(w, `{"error":"document already exists"}`, http.StatusConflict)
 	default:

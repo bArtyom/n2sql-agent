@@ -53,6 +53,45 @@ func TestDocumentUploadAcceptsTextFile(t *testing.T) {
 	}
 }
 
+func TestDocumentUploadPassesProcessConfigToUploader(t *testing.T) {
+	uploader := &documentUploaderStub{}
+	endpoint := handler.NewDocumentUpload(uploader)
+	body, contentType := multipartBodyWithFields(t, "notes.txt", []byte("hello"), map[string]string{
+		"process_config": `{"parser_engine_rules":[{"file_types":["txt"],"engine":"simple"}]}`,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/4/documents", body)
+	request.Header.Set("Content-Type", contentType)
+	request.SetPathValue("id", "4")
+	response := httptest.NewRecorder()
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusCreated || uploader.input.ProcessConfig == nil {
+		t.Fatalf("status=%d process_config=%#v", response.Code, uploader.input.ProcessConfig)
+	}
+	rules := uploader.input.ProcessConfig.ParserEngineRules
+	if len(rules) != 1 || rules[0].Engine != "simple" || rules[0].FileTypes[0] != "txt" {
+		t.Fatalf("process_config=%#v", uploader.input.ProcessConfig)
+	}
+}
+
+func TestDocumentUploadRejectsUnknownProcessConfigField(t *testing.T) {
+	endpoint := handler.NewDocumentUpload(&documentUploaderStub{})
+	body, contentType := multipartBodyWithFields(t, "notes.txt", []byte("hello"), map[string]string{
+		"process_config": `{"chunking_config":{"chunk_size":100}}`,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/4/documents", body)
+	request.Header.Set("Content-Type", contentType)
+	request.SetPathValue("id", "4")
+	response := httptest.NewRecorder()
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want %d", response.Code, http.StatusBadRequest)
+	}
+}
+
 func TestDocumentUploadAcceptsHTMLFile(t *testing.T) {
 	uploader := &documentUploaderStub{}
 	endpoint := handler.NewDocumentUpload(uploader)
@@ -223,6 +262,10 @@ func TestDocumentListRejectsInvalidKnowledgeBaseID(t *testing.T) {
 }
 
 func multipartBody(t *testing.T, filename string, content []byte) (*bytes.Buffer, string) {
+	return multipartBodyWithFields(t, filename, content, nil)
+}
+
+func multipartBodyWithFields(t *testing.T, filename string, content []byte, fields map[string]string) (*bytes.Buffer, string) {
 	t.Helper()
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
@@ -232,6 +275,11 @@ func multipartBody(t *testing.T, filename string, content []byte) (*bytes.Buffer
 	}
 	if _, err := file.Write(content); err != nil {
 		t.Fatalf("write form file: %v", err)
+	}
+	for name, value := range fields {
+		if err := writer.WriteField(name, value); err != nil {
+			t.Fatalf("write form field %s: %v", name, err)
+		}
 	}
 	if err := writer.Close(); err != nil {
 		t.Fatalf("close multipart writer: %v", err)

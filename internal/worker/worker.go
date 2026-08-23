@@ -33,6 +33,7 @@ type Task struct {
 	StoragePath      string
 	OriginalFilename string
 	ContentType      string
+	ProcessConfig    documentextractor.ProcessConfig
 	ParserEngine     string
 }
 
@@ -532,7 +533,7 @@ func NewPostgresStore(db *sql.DB) *PostgresStore { return &PostgresStore{db: db}
 
 func (s *PostgresStore) ClaimNext(ctx context.Context) (Task, error) {
 	var task Task
-	var parserRules []byte
+	var processConfig []byte
 	err := s.db.QueryRowContext(ctx, `
 		WITH next_task AS (
 			SELECT id
@@ -552,8 +553,8 @@ func (s *PostgresStore) ClaimNext(ctx context.Context) (Task, error) {
 		JOIN knowledge_bases AS knowledge_base ON knowledge_base.id = document.knowledge_base_id
 		WHERE task.id = next_task.id
 		  AND document.id = task.document_id
-			RETURNING task.id, document.id, document.knowledge_base_id, task.attempt_count, document.storage_path, document.original_filename, document.content_type, knowledge_base.parser_engine_rules`).Scan(
-		&task.ID, &task.DocumentID, &task.KnowledgeBaseID, &task.AttemptCount, &task.StoragePath, &task.OriginalFilename, &task.ContentType, &parserRules,
+			RETURNING task.id, document.id, document.knowledge_base_id, task.attempt_count, document.storage_path, document.original_filename, document.content_type, task.process_config`).Scan(
+		&task.ID, &task.DocumentID, &task.KnowledgeBaseID, &task.AttemptCount, &task.StoragePath, &task.OriginalFilename, &task.ContentType, &processConfig,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, ErrNoTask
@@ -561,13 +562,12 @@ func (s *PostgresStore) ClaimNext(ctx context.Context) (Task, error) {
 	if err != nil {
 		return Task{}, fmt.Errorf("claim next document processing task: %w", err)
 	}
-	if len(parserRules) > 0 {
-		var rules []documentextractor.ParserEngineRule
-		if err := json.Unmarshal(parserRules, &rules); err != nil {
-			return Task{}, fmt.Errorf("decode parser engine rules: %w", err)
+	if len(processConfig) > 0 {
+		if err := json.Unmarshal(processConfig, &task.ProcessConfig); err != nil {
+			return Task{}, fmt.Errorf("decode document process config: %w", err)
 		}
-		task.ParserEngine = documentextractor.ResolveParserEngine(rules, task.ContentType, task.OriginalFilename)
 	}
+	task.ParserEngine = documentextractor.ResolveParserEngine(task.ProcessConfig.ParserEngineRules, task.ContentType, task.OriginalFilename)
 	return task, nil
 }
 

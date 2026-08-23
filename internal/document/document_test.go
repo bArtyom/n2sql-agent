@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/bArtyom/n2sql-agent/internal/document"
+	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 )
 
 type documentStoreStub struct {
@@ -93,6 +94,44 @@ func TestServiceUploadsDocumentAndCreatesPendingTask(t *testing.T) {
 	}
 	if string(content) != "hello knowledge base" {
 		t.Fatalf("stored content = %q", content)
+	}
+}
+
+func TestServiceValidatesAndCarriesUploadProcessConfig(t *testing.T) {
+	store := &documentStoreStub{}
+	service := document.NewService(store, document.NewLocalFileStore(t.TempDir()))
+	config := &documentextractor.ProcessConfig{ParserEngineRules: []documentextractor.ParserEngineRule{
+		{FileTypes: []string{"pdf"}, Engine: "mineru"},
+	}}
+
+	if _, err := service.Upload(context.Background(), document.UploadInput{
+		KnowledgeBaseID:  4,
+		OriginalFilename: "guide.pdf",
+		ContentType:      "application/pdf",
+		Content:          strings.NewReader("%PDF-1.7"),
+		ProcessConfig:    config,
+	}); err != nil {
+		t.Fatalf("Upload() error = %v", err)
+	}
+	if store.input.ProcessConfig == nil || store.input.ProcessConfig.ParserEngineRules[0].Engine != "mineru" {
+		t.Fatalf("create input process config = %#v", store.input.ProcessConfig)
+	}
+}
+
+func TestServiceRejectsInvalidUploadProcessConfig(t *testing.T) {
+	store := &documentStoreStub{}
+	service := document.NewService(store, document.NewLocalFileStore(t.TempDir()))
+	_, err := service.Upload(context.Background(), document.UploadInput{
+		KnowledgeBaseID:  4,
+		OriginalFilename: "notes.txt",
+		ContentType:      "text/plain",
+		Content:          strings.NewReader("hello"),
+		ProcessConfig: &documentextractor.ProcessConfig{ParserEngineRules: []documentextractor.ParserEngineRule{
+			{FileTypes: []string{"txt"}},
+		}},
+	})
+	if !errors.Is(err, document.ErrInvalidProcessConfig) {
+		t.Fatalf("Upload() error = %v, want ErrInvalidProcessConfig", err)
 	}
 }
 

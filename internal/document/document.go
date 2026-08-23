@@ -35,6 +35,7 @@ var (
 	ErrDuplicateDocument     = errors.New("document already exists")
 	ErrInvalidStoragePath    = errors.New("invalid document storage path")
 	ErrInvalidFolderPath     = errors.New("invalid document folder path")
+	ErrInvalidProcessConfig  = errors.New("invalid document process config")
 	ErrNoDocumentsSelected   = errors.New("no documents selected")
 	ErrFolderMoveConflict    = errors.New("folder destination is inside the source folder")
 )
@@ -69,6 +70,7 @@ type UploadInput struct {
 	FolderPath       string
 	ContentType      string
 	Content          io.Reader
+	ProcessConfig    *documentextractor.ProcessConfig
 }
 
 type Uploader interface {
@@ -92,6 +94,7 @@ type CreateInput struct {
 	ContentType      string
 	SizeBytes        int64
 	ContentSHA256    string
+	ProcessConfig    *documentextractor.ProcessConfig
 }
 
 type Store interface {
@@ -351,6 +354,9 @@ func (s *Service) Upload(ctx context.Context, input UploadInput) (Document, erro
 	if err := s.store.EnsureKnowledgeBase(ctx, input.KnowledgeBaseID); err != nil {
 		return Document{}, err
 	}
+	if err := documentextractor.ValidateProcessConfig(input.ProcessConfig); err != nil {
+		return Document{}, fmt.Errorf("%w: %v", ErrInvalidProcessConfig, err)
+	}
 	storagePath, sizeBytes, contentSHA256, err := s.files.Save(ctx, extension, io.LimitReader(input.Content, MaxFileBytes+1))
 	if err != nil {
 		return Document{}, err
@@ -367,6 +373,7 @@ func (s *Service) Upload(ctx context.Context, input UploadInput) (Document, erro
 		ContentType:      input.ContentType,
 		SizeBytes:        sizeBytes,
 		ContentSHA256:    contentSHA256,
+		ProcessConfig:    input.ProcessConfig,
 	})
 	if err != nil {
 		_ = s.files.Delete(context.WithoutCancel(ctx), storagePath)
@@ -1068,7 +1075,13 @@ func (s *PostgresStore) Reprocess(ctx context.Context, knowledgeBaseID, document
 	if active {
 		return ErrDocumentProcessing
 	}
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO document_processing_tasks (document_id) VALUES ($1)`, documentID); err != nil {
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO document_processing_tasks (document_id, process_config)
+		SELECT $1, COALESCE(
+			(SELECT process_config FROM document_processing_tasks
+			 WHERE document_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1),
+			'{}'::jsonb
+		)`, documentID); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.ConstraintName == "document_processing_tasks_active_document_idx" {
 			return ErrDocumentProcessing
@@ -1180,6 +1193,17 @@ func (s *PostgresStore) SaveSummaryIndexError(ctx context.Context, knowledgeBase
 }
 
 func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Document, error) {
+	if err := documentextractor.ValidateProcessConfig(input.ProcessConfig); err != nil {
+		return Document{}, fmt.Errorf("%w: %v", ErrInvalidProcessConfig, err)
+	}
+	processConfig := []byte("{}")
+	if input.ProcessConfig != nil {
+		var marshalErr error
+		processConfig, marshalErr = json.Marshal(input.ProcessConfig)
+		if marshalErr != nil {
+			return Document{}, fmt.Errorf("encode document process config: %w", marshalErr)
+		}
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Document{}, fmt.Errorf("begin document transaction: %w", err)
@@ -1202,7 +1226,14 @@ func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Document
 		}
 		return Document{}, fmt.Errorf("create document: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO document_processing_tasks (document_id) VALUES ($1)`, document.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO document_processing_tasks (document_id, process_config)
+		SELECT $1,
+		       CASE WHEN $2::boolean THEN $3::jsonb
+		            ELSE jsonb_build_object('parser_engine_rules', knowledge_base.parser_engine_rules)
+		       END
+		FROM knowledge_bases AS knowledge_base
+		WHERE knowledge_base.id = $4`, document.ID, input.ProcessConfig != nil, processConfig, input.KnowledgeBaseID); err != nil {
 		return Document{}, fmt.Errorf("create document processing task: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
