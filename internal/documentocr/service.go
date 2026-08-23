@@ -38,6 +38,10 @@ type PageTextExtractor interface {
 	ExtractPageText(context.Context, []byte, int) (string, error)
 }
 
+type SelectivePageRenderer interface {
+	RenderPages(context.Context, []byte, []int) ([]PageImage, error)
+}
+
 // Provider recognizes one page image as text.
 type Provider interface {
 	Recognize(context.Context, []byte) (string, error)
@@ -48,19 +52,24 @@ type Service struct {
 	renderer    PageRenderer
 	provider    Provider
 	pageText    PageTextExtractor
+	pageCounter PageCounter
 	maxPages    int
 	concurrency int
 }
 
 func NewService(renderer PageRenderer, provider Provider, maxPages, concurrency int) *Service {
-	return newService(renderer, provider, nil, maxPages, concurrency)
+	return newService(renderer, provider, nil, nil, maxPages, concurrency)
 }
 
 func NewServiceWithPageText(renderer PageRenderer, provider Provider, pageText PageTextExtractor, maxPages, concurrency int) *Service {
-	return newService(renderer, provider, pageText, maxPages, concurrency)
+	return newService(renderer, provider, pageText, nil, maxPages, concurrency)
 }
 
-func newService(renderer PageRenderer, provider Provider, pageText PageTextExtractor, maxPages, concurrency int) *Service {
+func NewServiceWithPageTextAndCounter(renderer PageRenderer, provider Provider, pageText PageTextExtractor, pageCounter PageCounter, maxPages, concurrency int) *Service {
+	return newService(renderer, provider, pageText, pageCounter, maxPages, concurrency)
+}
+
+func newService(renderer PageRenderer, provider Provider, pageText PageTextExtractor, pageCounter PageCounter, maxPages, concurrency int) *Service {
 	if maxPages <= 0 {
 		maxPages = defaultMaxPages
 	}
@@ -71,9 +80,65 @@ func newService(renderer PageRenderer, provider Provider, pageText PageTextExtra
 		renderer:    renderer,
 		provider:    provider,
 		pageText:    pageText,
+		pageCounter: pageCounter,
 		maxPages:    maxPages,
 		concurrency: concurrency,
 	}
+}
+
+// InspectPages reads only the PDF text layer. It deliberately does not
+// render pages or call the OCR provider, so callers can decide which pages
+// need the expensive scan path first.
+func (s *Service) InspectPages(ctx context.Context, pdf []byte) ([]documentextractor.PDFPage, error) {
+	if s == nil || s.pageCounter == nil || s.pageText == nil {
+		return nil, ErrNotConfigured
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	count, err := s.pageCounter.CountPages(ctx, pdf)
+	if err != nil {
+		return nil, err
+	}
+	if count > s.maxPages {
+		count = s.maxPages
+	}
+	pages := make([]documentextractor.PDFPage, 0, count)
+	for pageNumber := 1; pageNumber <= count; pageNumber++ {
+		text, textErr := s.pageText.ExtractPageText(ctx, pdf, pageNumber)
+		if textErr != nil {
+			return nil, fmt.Errorf("inspect PDF page %d: %w", pageNumber, textErr)
+		}
+		pages = append(pages, documentextractor.PDFPage{Number: pageNumber, Text: strings.TrimSpace(text)})
+	}
+	return pages, nil
+}
+
+// RenderPages renders only the selected page numbers when the renderer
+// supports selective rendering. The fallback keeps custom renderers working
+// by filtering their normal output in memory.
+func (s *Service) RenderPages(ctx context.Context, pdf []byte, pageNumbers []int) ([]PageImage, error) {
+	if s == nil || s.renderer == nil {
+		return nil, ErrNotConfigured
+	}
+	if selective, ok := s.renderer.(SelectivePageRenderer); ok {
+		return selective.RenderPages(ctx, pdf, pageNumbers)
+	}
+	pages, err := s.renderer.Render(ctx, pdf)
+	if err != nil {
+		return nil, err
+	}
+	wanted := make(map[int]struct{}, len(pageNumbers))
+	for _, pageNumber := range pageNumbers {
+		wanted[pageNumber] = struct{}{}
+	}
+	filtered := make([]PageImage, 0, len(pageNumbers))
+	for _, page := range pages {
+		if _, ok := wanted[page.Number]; ok {
+			filtered = append(filtered, page)
+		}
+	}
+	return filtered, nil
 }
 
 func (s *Service) Extract(ctx context.Context, pdf []byte) (string, error) {

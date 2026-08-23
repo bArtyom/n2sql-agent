@@ -43,8 +43,47 @@ func (r *PDFToImageRenderer) Render(ctx context.Context, pdf []byte) ([]PageImag
 	if r == nil {
 		return nil, ErrNotConfigured
 	}
+	return r.renderRange(ctx, pdf, 1, r.maxPages)
+}
+
+func (r *PDFToImageRenderer) RenderPages(ctx context.Context, pdf []byte, pageNumbers []int) ([]PageImage, error) {
+	if r == nil {
+		return nil, ErrNotConfigured
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	unique := make(map[int]struct{}, len(pageNumbers))
+	for _, pageNumber := range pageNumbers {
+		if pageNumber > 0 && pageNumber <= r.maxPages {
+			unique[pageNumber] = struct{}{}
+		}
+	}
+	selected := make([]int, 0, len(unique))
+	for pageNumber := range unique {
+		selected = append(selected, pageNumber)
+	}
+	sort.Ints(selected)
+	pages := make([]PageImage, 0, len(selected))
+	for _, pageNumber := range selected {
+		rendered, err := r.renderRange(ctx, pdf, pageNumber, pageNumber)
+		if err != nil {
+			return nil, err
+		}
+		pages = append(pages, rendered...)
+	}
+	return pages, nil
+}
+
+func (r *PDFToImageRenderer) renderRange(ctx context.Context, pdf []byte, firstPage, lastPage int) ([]PageImage, error) {
+	if r == nil {
+		return nil, ErrNotConfigured
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if firstPage <= 0 || lastPage < firstPage {
+		return nil, fmt.Errorf("invalid PDF render page range %d-%d", firstPage, lastPage)
 	}
 	workDir, err := os.MkdirTemp("", "n2sql-ocr-render-")
 	if err != nil {
@@ -57,7 +96,7 @@ func (r *PDFToImageRenderer) Render(ctx context.Context, pdf []byte) ([]PageImag
 		return nil, fmt.Errorf("write PDF for rendering: %w", err)
 	}
 	prefix := filepath.Join(workDir, "page")
-	args := []string{"-jpeg", "-r", strconv.Itoa(r.dpi), "-f", "1", "-l", strconv.Itoa(r.maxPages), pdfPath, prefix}
+	args := []string{"-jpeg", "-r", strconv.Itoa(r.dpi), "-f", strconv.Itoa(firstPage), "-l", strconv.Itoa(lastPage), pdfPath, prefix}
 	output, err := exec.CommandContext(ctx, r.binary, args...).CombinedOutput()
 	if err != nil {
 		message := strings.TrimSpace(string(output))
