@@ -15,9 +15,15 @@ import (
 type documentReaderStub struct {
 	documents []document.Document
 	err       error
+	tagIDs    []int64
 }
 
 func (s documentReaderStub) List(context.Context, int64) ([]document.Document, error) {
+	return s.documents, s.err
+}
+
+func (s *documentReaderStub) ListWithTags(_ context.Context, _ int64, tagIDs []int64) ([]document.Document, error) {
+	s.tagIDs = tagIDs
 	return s.documents, s.err
 }
 
@@ -72,6 +78,24 @@ func TestDocumentUploadPassesProcessConfigToUploader(t *testing.T) {
 	rules := uploader.input.ProcessConfig.ParserEngineRules
 	if len(rules) != 1 || rules[0].Engine != "simple" || rules[0].FileTypes[0] != "txt" {
 		t.Fatalf("process_config=%#v", uploader.input.ProcessConfig)
+	}
+}
+
+func TestDocumentUploadPassesNormalizedTagIDs(t *testing.T) {
+	uploader := &documentUploaderStub{}
+	endpoint := handler.NewDocumentUpload(uploader)
+	body, contentType := multipartBodyWithFields(t, "notes.txt", []byte("hello"), map[string]string{
+		"tag_ids": "7,2,7",
+	})
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/4/documents", body)
+	request.Header.Set("Content-Type", contentType)
+	request.SetPathValue("id", "4")
+	response := httptest.NewRecorder()
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusCreated || len(uploader.input.TagIDs) != 2 || uploader.input.TagIDs[0] != 2 || uploader.input.TagIDs[1] != 7 {
+		t.Fatalf("status=%d tag IDs=%v", response.Code, uploader.input.TagIDs)
 	}
 }
 
@@ -245,6 +269,20 @@ func TestDocumentListReturnsDocuments(t *testing.T) {
 	}
 	if got := response.Body.String(); !bytes.Contains([]byte(got), []byte(`"processingStatus":"processing"`)) {
 		t.Fatalf("response body = %s", got)
+	}
+}
+
+func TestDocumentListPassesTagScopeToStore(t *testing.T) {
+	reader := &documentReaderStub{documents: []document.Document{{ID: 12, KnowledgeBaseID: 4}}}
+	endpoint := handler.NewDocumentList(reader)
+	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/4/documents?tag_ids=7,2,7", nil)
+	request.SetPathValue("id", "4")
+	response := httptest.NewRecorder()
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || len(reader.tagIDs) != 2 || reader.tagIDs[0] != 2 || reader.tagIDs[1] != 7 {
+		t.Fatalf("status=%d tag IDs=%v", response.Code, reader.tagIDs)
 	}
 }
 

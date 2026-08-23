@@ -12,6 +12,7 @@ import (
 
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
+	"github.com/bArtyom/n2sql-agent/internal/documenttag"
 )
 
 const maxUploadRequestBytes int64 = document.MaxFileBytes + (1 << 20)
@@ -53,12 +54,18 @@ func NewDocumentUpload(uploader document.Uploader) http.Handler {
 			http.Error(w, `{"error":"invalid process_config"}`, http.StatusBadRequest)
 			return
 		}
+		tagIDs, err := parseDocumentTagIDs(r.Form["tag_ids"])
+		if err != nil {
+			http.Error(w, `{"error":"invalid tag_ids"}`, http.StatusBadRequest)
+			return
+		}
 		document, err := uploader.Upload(r.Context(), document.UploadInput{
 			KnowledgeBaseID:  knowledgeBaseID,
 			OriginalFilename: filename,
 			FolderPath:       r.FormValue("folder_path"),
 			ContentType:      contentType,
 			Content:          content,
+			TagIDs:           tagIDs,
 			ProcessConfig:    processConfig,
 		})
 		if err != nil {
@@ -183,6 +190,8 @@ func writeDocumentUploadError(w http.ResponseWriter, err error) {
 		http.Error(w, `{"error":"invalid process_config"}`, http.StatusBadRequest)
 	case errors.Is(err, document.ErrDuplicateDocument):
 		http.Error(w, `{"error":"document already exists"}`, http.StatusConflict)
+	case errors.Is(err, documenttag.ErrInvalidTagIDs), errors.Is(err, documenttag.ErrTagNotFound):
+		http.Error(w, `{"error":"invalid tag_ids"}`, http.StatusBadRequest)
 	default:
 		http.Error(w, `{"error":"unable to upload document"}`, http.StatusInternalServerError)
 	}

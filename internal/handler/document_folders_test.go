@@ -16,6 +16,7 @@ type folderDocumentReaderStub struct {
 	documents []document.Document
 	path      string
 	recursive bool
+	tagIDs    []int64
 }
 
 func (s *folderDocumentReaderStub) List(context.Context, int64) ([]document.Document, error) {
@@ -24,6 +25,11 @@ func (s *folderDocumentReaderStub) List(context.Context, int64) ([]document.Docu
 
 func (s *folderDocumentReaderStub) ListInFolder(_ context.Context, _ int64, path string, recursive bool) ([]document.Document, error) {
 	s.path, s.recursive = path, recursive
+	return s.documents, nil
+}
+
+func (s *folderDocumentReaderStub) ListInFolderWithTags(_ context.Context, _ int64, path string, recursive bool, tagIDs []int64) ([]document.Document, error) {
+	s.path, s.recursive, s.tagIDs = path, recursive, tagIDs
 	return s.documents, nil
 }
 
@@ -38,6 +44,20 @@ func TestDocumentListPassesFolderScopeToStore(t *testing.T) {
 
 	if response.Code != http.StatusOK || reader.path != "docs/api" || !reader.recursive {
 		t.Fatalf("status=%d path=%q recursive=%v", response.Code, reader.path, reader.recursive)
+	}
+}
+
+func TestDocumentListPassesFolderAndTagScopeToStore(t *testing.T) {
+	reader := &folderDocumentReaderStub{documents: []document.Document{{ID: 1, FolderPath: "docs/api"}}}
+	endpoint := handler.NewDocumentList(reader)
+	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/4/documents?folder_path=docs%2Fapi&folder_recursive=true&tag_ids=6,3", nil)
+	request.SetPathValue("id", "4")
+	response := httptest.NewRecorder()
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || reader.path != "docs/api" || !reader.recursive || len(reader.tagIDs) != 2 || reader.tagIDs[0] != 3 || reader.tagIDs[1] != 6 {
+		t.Fatalf("status=%d path=%q recursive=%v tags=%v", response.Code, reader.path, reader.recursive, reader.tagIDs)
 	}
 }
 

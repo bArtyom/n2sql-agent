@@ -20,6 +20,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
+	"github.com/bArtyom/n2sql-agent/internal/documenttag"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/lib/pq"
 )
@@ -71,6 +72,7 @@ type UploadInput struct {
 	FolderPath       string
 	ContentType      string
 	Content          io.Reader
+	TagIDs           []int64
 	ProcessConfig    *documentextractor.ProcessConfig
 }
 
@@ -99,6 +101,7 @@ type CreateInput struct {
 	ContentType      string
 	SizeBytes        int64
 	ContentSHA256    string
+	TagIDs           []int64
 	ProcessConfig    *documentextractor.ProcessConfig
 }
 
@@ -122,6 +125,16 @@ type CacheInvalidator interface {
 
 type Reader interface {
 	List(context.Context, int64) ([]Document, error)
+}
+
+// TagReader applies a document-tag filter in the database query. It is kept
+// optional so lightweight readers can continue serving unfiltered lists.
+type TagReader interface {
+	ListWithTags(context.Context, int64, []int64) ([]Document, error)
+}
+
+type FolderTagReader interface {
+	ListInFolderWithTags(context.Context, int64, string, bool, []int64) ([]Document, error)
 }
 
 // FolderReader supports both exact-folder and recursive-subtree listings.
@@ -362,6 +375,11 @@ func (s *Service) Upload(ctx context.Context, input UploadInput) (Document, erro
 	if err := documentextractor.ValidateProcessConfig(input.ProcessConfig); err != nil {
 		return Document{}, fmt.Errorf("%w: %v", ErrInvalidProcessConfig, err)
 	}
+	tagIDs, err := documenttag.NormalizeIDs(input.TagIDs)
+	if err != nil {
+		return Document{}, err
+	}
+	input.TagIDs = tagIDs
 	storagePath, sizeBytes, contentSHA256, err := s.files.Save(ctx, extension, io.LimitReader(input.Content, MaxFileBytes+1))
 	if err != nil {
 		return Document{}, err
@@ -378,6 +396,7 @@ func (s *Service) Upload(ctx context.Context, input UploadInput) (Document, erro
 		ContentType:      input.ContentType,
 		SizeBytes:        sizeBytes,
 		ContentSHA256:    contentSHA256,
+		TagIDs:           input.TagIDs,
 		ProcessConfig:    input.ProcessConfig,
 	})
 	if err != nil {
@@ -457,6 +476,24 @@ func (s *Service) List(ctx context.Context, knowledgeBaseID int64) ([]Document, 
 	return documents, nil
 }
 
+func (s *Service) ListWithTags(ctx context.Context, knowledgeBaseID int64, tagIDs []int64) ([]Document, error) {
+	if knowledgeBaseID <= 0 {
+		return nil, ErrKnowledgeBaseNotFound
+	}
+	normalized, err := documenttag.NormalizeIDs(tagIDs)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.store.EnsureKnowledgeBase(ctx, knowledgeBaseID); err != nil {
+		return nil, err
+	}
+	reader, ok := s.store.(TagReader)
+	if !ok {
+		return nil, ErrUnsupportedFile
+	}
+	return reader.ListWithTags(ctx, knowledgeBaseID, normalized)
+}
+
 func (s *Service) ListInFolder(ctx context.Context, knowledgeBaseID int64, folderPath string, recursive bool) ([]Document, error) {
 	if knowledgeBaseID <= 0 {
 		return nil, ErrKnowledgeBaseNotFound
@@ -473,6 +510,28 @@ func (s *Service) ListInFolder(ctx context.Context, knowledgeBaseID int64, folde
 		return nil, ErrUnsupportedFile
 	}
 	return reader.ListInFolder(ctx, knowledgeBaseID, normalized, recursive)
+}
+
+func (s *Service) ListInFolderWithTags(ctx context.Context, knowledgeBaseID int64, folderPath string, recursive bool, tagIDs []int64) ([]Document, error) {
+	if knowledgeBaseID <= 0 {
+		return nil, ErrKnowledgeBaseNotFound
+	}
+	normalizedPath, err := NormalizeFolderPath(folderPath)
+	if err != nil {
+		return nil, err
+	}
+	normalizedTags, err := documenttag.NormalizeIDs(tagIDs)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.store.EnsureKnowledgeBase(ctx, knowledgeBaseID); err != nil {
+		return nil, err
+	}
+	reader, ok := s.store.(FolderTagReader)
+	if !ok {
+		return nil, ErrUnsupportedFile
+	}
+	return reader.ListInFolderWithTags(ctx, knowledgeBaseID, normalizedPath, recursive, normalizedTags)
 }
 
 func (s *Service) ListFolderTree(ctx context.Context, knowledgeBaseID int64) (FolderTree, error) {
@@ -923,73 +982,50 @@ func (s *PostgresStore) SaveParseResult(ctx context.Context, documentID int64, r
 }
 
 func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Document, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT d.id, d.knowledge_base_id, d.original_filename, d.folder_path, d.content_type, d.size_bytes, d.content_sha256,
-		       d.chunking_diagnostics, d.parser_metadata, d.summary_status, d.summary_index_status,
-		       COALESCE(task.status, 'pending') AS processing_status
-		FROM documents AS d
-		LEFT JOIN LATERAL (
-			SELECT status
-			FROM document_processing_tasks
-			WHERE document_id = d.id
-			ORDER BY created_at DESC, id DESC
-			LIMIT 1
-		) AS task ON TRUE
-		WHERE d.knowledge_base_id = $1
-		  AND d.knowledge_base_id IN (
-			SELECT id FROM knowledge_bases
-			WHERE administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
-		  )
-		ORDER BY d.created_at DESC, d.id DESC`, knowledgeBaseID)
-	if err != nil {
-		return nil, fmt.Errorf("list documents: %w", err)
-	}
-	defer rows.Close()
+	return s.listWithScope(ctx, knowledgeBaseID, nil, false, nil)
+}
 
-	documents := make([]Document, 0)
-	for rows.Next() {
-		var document Document
-		var diagnostics, parserMetadata []byte
-		if err := rows.Scan(
-			&document.ID,
-			&document.KnowledgeBaseID,
-			&document.OriginalFilename,
-			&document.FolderPath,
-			&document.ContentType,
-			&document.SizeBytes,
-			&document.ContentSHA256,
-			&diagnostics,
-			&parserMetadata,
-			&document.SummaryStatus,
-			&document.SummaryIndexStatus,
-			&document.ProcessingStatus,
-		); err != nil {
-			return nil, fmt.Errorf("scan document: %w", err)
-		}
-		if len(diagnostics) > 0 {
-			if err := json.Unmarshal(diagnostics, &document.ChunkingDiagnostics); err != nil {
-				return nil, fmt.Errorf("decode chunking diagnostics: %w", err)
-			}
-		}
-		if len(parserMetadata) > 0 {
-			if err := json.Unmarshal(parserMetadata, &document.ParserMetadata); err != nil {
-				return nil, fmt.Errorf("decode parser metadata: %w", err)
-			}
-		}
-		documents = append(documents, document)
+func (s *PostgresStore) ListWithTags(ctx context.Context, knowledgeBaseID int64, tagIDs []int64) ([]Document, error) {
+	normalized, err := documenttag.NormalizeIDs(tagIDs)
+	if err != nil {
+		return nil, err
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate documents: %w", err)
-	}
-	return documents, nil
+	return s.listWithScope(ctx, knowledgeBaseID, nil, false, normalized)
 }
 
 func (s *PostgresStore) ListInFolder(ctx context.Context, knowledgeBaseID int64, folderPath string, recursive bool) ([]Document, error) {
-	condition := "d.folder_path = $2"
-	if recursive && folderPath != "" {
-		condition = "(d.folder_path = $2 OR LEFT(d.folder_path, LENGTH($2) + 1) = $2 || '/')"
+	return s.listWithScope(ctx, knowledgeBaseID, &folderPath, recursive, nil)
+}
+
+func (s *PostgresStore) ListInFolderWithTags(ctx context.Context, knowledgeBaseID int64, folderPath string, recursive bool, tagIDs []int64) ([]Document, error) {
+	normalized, err := documenttag.NormalizeIDs(tagIDs)
+	if err != nil {
+		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	return s.listWithScope(ctx, knowledgeBaseID, &folderPath, recursive, normalized)
+}
+
+func (s *PostgresStore) listWithScope(ctx context.Context, knowledgeBaseID int64, folderPath *string, recursive bool, tagIDs []int64) ([]Document, error) {
+	conditions := []string{
+		"d.knowledge_base_id = $1",
+		"d.knowledge_base_id IN (SELECT id FROM knowledge_bases WHERE administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1))",
+	}
+	args := []any{knowledgeBaseID}
+	if folderPath != nil {
+		folderParam := len(args) + 1
+		condition := fmt.Sprintf("d.folder_path = $%d", folderParam)
+		if recursive && *folderPath != "" {
+			condition = fmt.Sprintf("(d.folder_path = $%d OR LEFT(d.folder_path, LENGTH($%d) + 1) = $%d || '/')", folderParam, folderParam, folderParam)
+		}
+		conditions = append(conditions, condition)
+		args = append(args, *folderPath)
+	}
+	if len(tagIDs) > 0 {
+		tagParam := len(args) + 1
+		conditions = append(conditions, fmt.Sprintf("EXISTS (SELECT 1 FROM document_tags AS link JOIN knowledge_base_tags AS tag ON tag.id = link.tag_id WHERE link.document_id = d.id AND tag.knowledge_base_id = d.knowledge_base_id AND tag.id = ANY($%d::bigint[]))", tagParam))
+		args = append(args, pq.Array(tagIDs))
+	}
+	query := `
 		SELECT d.id, d.knowledge_base_id, d.original_filename, d.folder_path, d.content_type, d.size_bytes, d.content_sha256,
 		       d.chunking_diagnostics, d.parser_metadata, d.summary_status, d.summary_index_status,
 		       COALESCE(task.status, 'pending') AS processing_status
@@ -999,15 +1035,11 @@ func (s *PostgresStore) ListInFolder(ctx context.Context, knowledgeBaseID int64,
 			WHERE document_id = d.id
 			ORDER BY created_at DESC, id DESC LIMIT 1
 		) AS task ON TRUE
-		WHERE d.knowledge_base_id = $1
-		  AND `+condition+`
-		  AND d.knowledge_base_id IN (
-			SELECT id FROM knowledge_bases
-			WHERE administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
-		  )
-		ORDER BY d.created_at DESC, d.id DESC`, knowledgeBaseID, folderPath)
+		WHERE ` + strings.Join(conditions, " AND ") + `
+		ORDER BY d.created_at DESC, d.id DESC`
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list documents in folder: %w", err)
+		return nil, fmt.Errorf("list documents: %w", err)
 	}
 	defer rows.Close()
 	return scanDocuments(rows)
@@ -1330,6 +1362,11 @@ func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Document
 	if err := documentextractor.ValidateProcessConfig(input.ProcessConfig); err != nil {
 		return Document{}, fmt.Errorf("%w: %v", ErrInvalidProcessConfig, err)
 	}
+	tagIDs, err := documenttag.NormalizeIDs(input.TagIDs)
+	if err != nil {
+		return Document{}, err
+	}
+	input.TagIDs = tagIDs
 	processConfig := []byte("{}")
 	if input.ProcessConfig != nil {
 		var marshalErr error
@@ -1359,6 +1396,25 @@ func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Document
 			return Document{}, ErrDuplicateDocument
 		}
 		return Document{}, fmt.Errorf("create document: %w", err)
+	}
+	if len(input.TagIDs) > 0 {
+		var validCount int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*)
+			FROM knowledge_base_tags AS tag
+			JOIN knowledge_bases AS kb ON kb.id = tag.knowledge_base_id
+			WHERE tag.knowledge_base_id = $1 AND tag.id = ANY($2::bigint[])
+			  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, input.KnowledgeBaseID, pq.Array(input.TagIDs)).Scan(&validCount); err != nil {
+			return Document{}, fmt.Errorf("check upload document tags: %w", err)
+		}
+		if validCount != len(input.TagIDs) {
+			return Document{}, documenttag.ErrTagNotFound
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO document_tags (document_id, tag_id)
+			SELECT $1, unnest($2::bigint[])`, document.ID, pq.Array(input.TagIDs)); err != nil {
+			return Document{}, fmt.Errorf("assign upload document tags: %w", err)
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO document_processing_tasks (document_id, process_config)

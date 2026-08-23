@@ -107,6 +107,24 @@ func TestServiceUploadsDocumentAndCreatesPendingTask(t *testing.T) {
 	}
 }
 
+func TestServiceNormalizesUploadTagIDs(t *testing.T) {
+	store := &documentStoreStub{}
+	service := document.NewService(store, document.NewLocalFileStore(t.TempDir()))
+
+	if _, err := service.Upload(context.Background(), document.UploadInput{
+		KnowledgeBaseID:  4,
+		OriginalFilename: "notes.txt",
+		ContentType:      "text/plain",
+		Content:          strings.NewReader("hello"),
+		TagIDs:           []int64{4, 2, 4},
+	}); err != nil {
+		t.Fatalf("Upload() error = %v", err)
+	}
+	if len(store.input.TagIDs) != 2 || store.input.TagIDs[0] != 2 || store.input.TagIDs[1] != 4 {
+		t.Fatalf("normalized tag IDs = %v, want [2 4]", store.input.TagIDs)
+	}
+}
+
 func TestServiceValidatesAndCarriesUploadProcessConfig(t *testing.T) {
 	store := &documentStoreStub{}
 	service := document.NewService(store, document.NewLocalFileStore(t.TempDir()))
