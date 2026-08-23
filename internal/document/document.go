@@ -302,6 +302,16 @@ func BuildFolderTree(counts map[string]int64) FolderTree {
 	return tree
 }
 
+// FolderPathInScope reports whether a document path belongs to a selected
+// folder. The root folder is represented by an empty path and only contains
+// root-level documents; recursive selection includes descendants.
+func FolderPathInScope(path, scope string, recursive bool) bool {
+	if path == scope {
+		return true
+	}
+	return recursive && scope != "" && strings.HasPrefix(path, scope+"/")
+}
+
 type assetMetadataStore interface {
 	AssetMetadata(context.Context, int64, int64) (string, string, string, int64, error)
 }

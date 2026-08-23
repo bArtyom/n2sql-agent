@@ -137,17 +137,30 @@ func (r *ToolRegistry) Get(name string) (Tool, bool) {
 // the read-only knowledge_search tool. The model cannot widen this scope from
 // its function arguments; it is fixed by the user's Chat/Agent request.
 func (r *ToolRegistry) SetKnowledgeSearchFolderScope(folderPath *string, recursive bool) error {
-	tool, ok := r.Get("knowledge_search")
-	if !ok {
-		return ErrToolNotFound
-	}
-	scoped, ok := tool.(interface {
-		SetFolderScope(*string, bool)
-	})
-	if !ok {
+	return r.SetFolderScope(folderPath, recursive)
+}
+
+// SetFolderScope applies a request-level folder boundary to every registered
+// tool that can expose knowledge-base documents. Tools without this optional
+// capability remain unchanged.
+func (r *ToolRegistry) SetFolderScope(folderPath *string, recursive bool) error {
+	if r == nil {
 		return ErrInvalidTool
 	}
-	scoped.SetFolderScope(folderPath, recursive)
+	found := false
+	for _, tool := range r.tools {
+		scoped, ok := tool.(interface {
+			SetFolderScope(*string, bool)
+		})
+		if !ok {
+			continue
+		}
+		scoped.SetFolderScope(folderPath, recursive)
+		found = true
+	}
+	if !found {
+		return ErrToolNotFound
+	}
 	return nil
 }
 

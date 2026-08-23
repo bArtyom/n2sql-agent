@@ -17,10 +17,17 @@ type documentReaderStub struct {
 	documents       []document.Document
 	err             error
 	knowledgeBaseID int64
+	folderPath      string
+	folderRecursive bool
 }
 
 func (s *documentReaderStub) List(_ context.Context, knowledgeBaseID int64) ([]document.Document, error) {
 	s.knowledgeBaseID = knowledgeBaseID
+	return s.documents, s.err
+}
+
+func (s *documentReaderStub) ListInFolder(_ context.Context, _ int64, folderPath string, recursive bool) ([]document.Document, error) {
+	s.folderPath, s.folderRecursive = folderPath, recursive
 	return s.documents, s.err
 }
 
@@ -77,6 +84,23 @@ func TestDocumentListToolReturnsReaderFailure(t *testing.T) {
 	}
 }
 
+func TestDocumentListToolUsesFolderScope(t *testing.T) {
+	reader := &documentReaderStub{documents: []document.Document{{ID: 8, OriginalFilename: "api.md", FolderPath: "docs/api"}}}
+	tool, err := agent.NewDocumentListToolForKnowledgeBase(reader, 7, 4096, 20)
+	if err != nil {
+		t.Fatalf("NewDocumentListToolForKnowledgeBase() error = %v", err)
+	}
+	path := "docs/api"
+	tool.SetFolderScope(&path, true)
+	result, err := tool.Call(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Call() error = %v", err)
+	}
+	if reader.folderPath != path || !reader.folderRecursive || !strings.Contains(result.Content, `"folder_path":"docs/api"`) {
+		t.Fatalf("scope/result path=%q recursive=%v result=%s", reader.folderPath, reader.folderRecursive, result.Content)
+	}
+}
+
 func TestDocumentInfoToolReturnsOneDocument(t *testing.T) {
 	reader := &documentReaderStub{documents: []document.Document{
 		{ID: 8, OriginalFilename: "guide.md", ContentType: "text/markdown", SizeBytes: 128, ProcessingStatus: "succeeded"},
@@ -103,6 +127,20 @@ func TestDocumentInfoToolRejectsDocumentOutsideScope(t *testing.T) {
 	_, err = tool.Call(context.Background(), []byte(`{"document_id":99}`))
 	if !errors.Is(err, document.ErrDocumentNotFound) {
 		t.Fatalf("Call() error = %v, want ErrDocumentNotFound", err)
+	}
+}
+
+func TestDocumentInfoToolRejectsDocumentOutsideSelectedFolder(t *testing.T) {
+	reader := &documentReaderStub{documents: []document.Document{{ID: 8, FolderPath: "docs/web"}}}
+	tool, err := agent.NewDocumentInfoToolForKnowledgeBase(reader, 7, 4096)
+	if err != nil {
+		t.Fatalf("NewDocumentInfoToolForKnowledgeBase() error = %v", err)
+	}
+	path := "docs/api"
+	tool.SetFolderScope(&path, true)
+	_, err = tool.Call(context.Background(), []byte(`{"document_id":8}`))
+	if !errors.Is(err, document.ErrDocumentNotFound) {
+		t.Fatalf("Call() error = %v, want document not found", err)
 	}
 }
 

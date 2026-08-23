@@ -39,6 +39,7 @@ type documentListInput struct {
 type documentListItem struct {
 	ID               int64  `json:"id"`
 	OriginalFilename string `json:"original_filename"`
+	FolderPath       string `json:"folder_path,omitempty"`
 	ContentType      string `json:"content_type"`
 	SizeBytes        int64  `json:"size_bytes"`
 	ProcessingStatus string `json:"processing_status"`
@@ -59,6 +60,8 @@ type DocumentListTool struct {
 	knowledgeBaseID int64
 	maxResultBytes  int
 	maxResults      int
+	folderPath      *string
+	folderRecursive bool
 }
 
 var _ Tool = (*DocumentListTool)(nil)
@@ -90,6 +93,17 @@ func (t *DocumentListTool) Description() string {
 	return "列出当前知识库中的文档名称、类型、大小和处理状态"
 }
 
+func (t *DocumentListTool) SetFolderScope(folderPath *string, recursive bool) {
+	if folderPath == nil {
+		t.folderPath = nil
+		t.folderRecursive = false
+		return
+	}
+	copyOfPath := *folderPath
+	t.folderPath = &copyOfPath
+	t.folderRecursive = recursive
+}
+
 func (t *DocumentListTool) Parameters() json.RawMessage {
 	return append(json.RawMessage(nil), documentListParameters...)
 }
@@ -110,7 +124,17 @@ func (t *DocumentListTool) Call(ctx context.Context, raw json.RawMessage) (ToolR
 		return ToolResult{}, ErrInvalidDocumentListInput
 	}
 
-	documents, err := t.reader.List(ctx, t.knowledgeBaseID)
+	var documents []document.Document
+	var err error
+	if t.folderPath != nil {
+		folderReader, ok := t.reader.(document.FolderReader)
+		if !ok {
+			return ToolResult{}, retrieval.ErrDocumentFilterUnavailable
+		}
+		documents, err = folderReader.ListInFolder(ctx, t.knowledgeBaseID, *t.folderPath, t.folderRecursive)
+	} else {
+		documents, err = t.reader.List(ctx, t.knowledgeBaseID)
+	}
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("list documents: %w", err)
 	}
@@ -132,6 +156,7 @@ func marshalDocumentList(documents []document.Document, limit, maxBytes int) (st
 		candidate := append(selected, documentListItem{
 			ID:               item.ID,
 			OriginalFilename: item.OriginalFilename,
+			FolderPath:       item.FolderPath,
 			ContentType:      item.ContentType,
 			SizeBytes:        item.SizeBytes,
 			ProcessingStatus: item.ProcessingStatus,

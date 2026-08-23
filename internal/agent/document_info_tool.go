@@ -35,6 +35,8 @@ type DocumentInfoTool struct {
 	reader          document.Reader
 	knowledgeBaseID int64
 	maxResultBytes  int
+	folderPath      *string
+	folderRecursive bool
 }
 
 var _ Tool = (*DocumentInfoTool)(nil)
@@ -62,6 +64,17 @@ func (t *DocumentInfoTool) Description() string {
 	return "查询当前知识库中指定文档的文件类型、大小和处理状态"
 }
 
+func (t *DocumentInfoTool) SetFolderScope(folderPath *string, recursive bool) {
+	if folderPath == nil {
+		t.folderPath = nil
+		t.folderRecursive = false
+		return
+	}
+	copyOfPath := *folderPath
+	t.folderPath = &copyOfPath
+	t.folderRecursive = recursive
+}
+
 func (t *DocumentInfoTool) Parameters() json.RawMessage {
 	return append(json.RawMessage(nil), documentInfoParameters...)
 }
@@ -86,9 +99,13 @@ func (t *DocumentInfoTool) Call(ctx context.Context, raw json.RawMessage) (ToolR
 		if item.ID != input.DocumentID {
 			continue
 		}
+		if t.folderPath != nil && !document.FolderPathInScope(item.FolderPath, *t.folderPath, t.folderRecursive) {
+			return ToolResult{}, fmt.Errorf("document %d: %w", input.DocumentID, document.ErrDocumentNotFound)
+		}
 		info := documentListItem{
 			ID:               item.ID,
 			OriginalFilename: item.OriginalFilename,
+			FolderPath:       item.FolderPath,
 			ContentType:      item.ContentType,
 			SizeBytes:        item.SizeBytes,
 			ProcessingStatus: item.ProcessingStatus,
