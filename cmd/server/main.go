@@ -126,6 +126,7 @@ func main() {
 	parentSplitter := documentchunk.NewAdaptiveSplitter(3000, 300)
 	childSplitter := documentchunk.NewAdaptiveSplitter(1000, 150)
 	processor := worker.NewEmbeddingHierarchicalChunkingProcessorWithParseResultStore(extractor, parentSplitter, childSplitter, chunkStore, embeddingService, documentService)
+	parserRegistry := extractor.ParserRegistry()
 	answerService := rag.NewService(searchService, chatService)
 	evaluationStore, err := evaluationrun.NewPostgresStore(db)
 	if err != nil {
@@ -230,6 +231,7 @@ func main() {
 			Providers:               providerStore,
 			KnowledgeBases:          knowledgeBaseService,
 			Documents:               documentService,
+			ParserEngines:           parserRegistry,
 			ChunkReader:             chunkStore,
 			ConnectionChecker:       modelClient,
 			Embeddings:              embeddingService,

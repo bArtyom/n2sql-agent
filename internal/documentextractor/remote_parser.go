@@ -94,6 +94,15 @@ func NewHTTPParserEngine(name, endpoint string, supportedTypes, allowedHosts []s
 
 func (e *HTTPParserEngine) Name() string { return e.name }
 
+func (e *HTTPParserEngine) Description() string { return "Remote HTTP document parser" }
+
+func (e *HTTPParserEngine) Available() (bool, string) {
+	if e == nil || e.client == nil {
+		return false, "remote parser is not initialized"
+	}
+	return true, ""
+}
+
 func (e *HTTPParserEngine) Supports(contentType string) bool {
 	return e != nil && e.supportedTypes[strings.ToLower(strings.TrimSpace(contentType))]
 }

@@ -75,6 +75,22 @@ type ParserEngine interface {
 	Parse(context.Context, ParseRequest) (ParseResult, error)
 }
 
+type ParserEngineInfo struct {
+	Name              string   `json:"name"`
+	Description       string   `json:"description"`
+	ContentTypes      []string `json:"content_types"`
+	Available         bool     `json:"available"`
+	UnavailableReason string   `json:"unavailable_reason,omitempty"`
+}
+
+type parserEngineDescriber interface {
+	Description() string
+}
+
+type parserEngineAvailability interface {
+	Available() (bool, string)
+}
+
 type ParserRegistry struct {
 	engines []ParserEngine
 }
@@ -126,6 +142,33 @@ func (r *ParserRegistry) Parse(ctx context.Context, request ParseRequest) (Parse
 	return result, nil
 }
 
+func (r *ParserRegistry) ListEngineInfos() []ParserEngineInfo {
+	if r == nil {
+		return nil
+	}
+	contentTypes := []string{"text/plain", "text/markdown", "text/html", "application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.openxmlformats-officedocument.presentationml.presentation", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "image/png", "image/jpeg", "image/webp"}
+	infos := make([]ParserEngineInfo, 0, len(r.engines))
+	for _, engine := range r.engines {
+		if engine == nil {
+			continue
+		}
+		info := ParserEngineInfo{Name: engine.Name(), Description: engine.Name(), Available: true}
+		if describer, ok := engine.(parserEngineDescriber); ok && strings.TrimSpace(describer.Description()) != "" {
+			info.Description = describer.Description()
+		}
+		for _, contentType := range contentTypes {
+			if engine.Supports(contentType) {
+				info.ContentTypes = append(info.ContentTypes, contentType)
+			}
+		}
+		if availability, ok := engine.(parserEngineAvailability); ok {
+			info.Available, info.UnavailableReason = availability.Available()
+		}
+		infos = append(infos, info)
+	}
+	return infos
+}
+
 func NewDefaultParserRegistry(scannedPDF ScannedPDFProcessor, image ImageProcessor) *ParserRegistry {
 	return NewDefaultParserRegistryWithExtras(scannedPDF, image)
 }
@@ -147,6 +190,8 @@ type simpleParserEngine struct{}
 
 func (*simpleParserEngine) Name() string { return "simple" }
 
+func (*simpleParserEngine) Description() string { return "Simple text and HTML parser" }
+
 func (*simpleParserEngine) Supports(contentType string) bool {
 	return contentType == "text/plain" || contentType == "text/markdown" || contentType == "text/html"
 }
@@ -166,6 +211,8 @@ func (*simpleParserEngine) Parse(ctx context.Context, request ParseRequest) (Par
 type officeParserEngine struct{}
 
 func (*officeParserEngine) Name() string { return "office" }
+
+func (*officeParserEngine) Description() string { return "DOCX/PPTX/XLSX parser" }
 
 func (*officeParserEngine) Supports(contentType string) bool {
 	return contentType == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
@@ -267,6 +314,10 @@ type pdfParserEngine struct{ scannedPDF ScannedPDFProcessor }
 
 func (*pdfParserEngine) Name() string { return "pdf" }
 
+func (*pdfParserEngine) Description() string { return "PDF text and scanned-page parser" }
+
+func (*pdfParserEngine) Available() (bool, string) { return true, "" }
+
 func (*pdfParserEngine) Supports(contentType string) bool { return contentType == "application/pdf" }
 
 func (e *pdfParserEngine) Parse(ctx context.Context, request ParseRequest) (ParseResult, error) {
@@ -312,6 +363,15 @@ func (e *pdfParserEngine) Parse(ctx context.Context, request ParseRequest) (Pars
 type imageParserEngine struct{ processor ImageProcessor }
 
 func (*imageParserEngine) Name() string { return "image_ocr" }
+
+func (e *imageParserEngine) Description() string { return "Image OCR parser" }
+
+func (e *imageParserEngine) Available() (bool, string) {
+	if e == nil || e.processor == nil {
+		return false, "OCR image processor is not configured"
+	}
+	return true, ""
+}
 
 func (*imageParserEngine) Supports(contentType string) bool {
 	return strings.HasPrefix(contentType, "image/")

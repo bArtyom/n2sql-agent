@@ -129,6 +129,21 @@ func TestResolveParserEngineMatchesExtensionAndMIMEInRuleOrder(t *testing.T) {
 	}
 }
 
+func TestParserRegistryListsEngineAvailability(t *testing.T) {
+	infos := documentextractor.NewDefaultParserRegistry(nil, nil).ListEngineInfos()
+	if len(infos) != 4 {
+		t.Fatalf("engine count = %d, want 4", len(infos))
+	}
+	for _, info := range infos {
+		if info.Name == "simple" && !info.Available {
+			t.Fatalf("simple engine should be available: %#v", info)
+		}
+		if info.Name == "image_ocr" && info.Available {
+			t.Fatalf("image OCR should report unavailable without processor: %#v", info)
+		}
+	}
+}
+
 func TestExtractorReadsDOCXHeadingsAndParagraphs(t *testing.T) {
 	root := t.TempDir()
 	directory := filepath.Join(root, "documents")

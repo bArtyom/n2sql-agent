@@ -78,6 +78,13 @@ func NewWithParserRegistry(root string, registry *ParserRegistry) *Extractor {
 	return &Extractor{root: root, registry: registry}
 }
 
+func (e *Extractor) ParserRegistry() *ParserRegistry {
+	if e == nil {
+		return nil
+	}
+	return e.registry
+}
+
 func (e *Extractor) Extract(ctx context.Context, storagePath, contentType string) (string, error) {
 	result, err := e.ExtractResult(ctx, storagePath, contentType)
 	if err != nil {

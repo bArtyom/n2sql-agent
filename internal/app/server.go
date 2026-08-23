@@ -11,6 +11,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
+	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
 	"github.com/bArtyom/n2sql-agent/internal/evaluationrun"
 	"github.com/bArtyom/n2sql-agent/internal/followup"
@@ -31,6 +32,7 @@ type Dependencies struct {
 	Providers               modelprovider.Store
 	KnowledgeBases          knowledgebase.Store
 	Documents               document.Uploader
+	ParserEngines           *documentextractor.ParserRegistry
 	ChunkReader             documentchunk.Reader
 	ConnectionChecker       modelclient.ConnectionChecker
 	Embeddings              modelruntime.EmbeddingRunner
@@ -85,6 +87,9 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("POST /api/knowledge-bases", knowledgeBaseHandler)
 		mux.Handle("PATCH /api/knowledge-bases/{id}", knowledgeBaseHandler)
 		mux.Handle("DELETE /api/knowledge-bases/{id}", knowledgeBaseHandler)
+	}
+	if dependencies.ParserEngines != nil {
+		mux.Handle("GET /api/parser-engines", handler.NewParserEngines(dependencies.ParserEngines))
 	}
 	if dependencies.Conversations != nil {
 		conversationHandler := handler.NewConversationsWithModelProvider(dependencies.Conversations, dependencies.Providers)
