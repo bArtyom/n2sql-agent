@@ -14,13 +14,14 @@ import (
 )
 
 type documentStoreStub struct {
-	ensureErr error
-	createErr error
-	deleteErr error
-	input     document.CreateInput
-	documents []document.Document
-	deletedKB int64
-	deletedID int64
+	ensureErr         error
+	createErr         error
+	deleteErr         error
+	input             document.CreateInput
+	documents         []document.Document
+	deletedKB         int64
+	deletedID         int64
+	reprocessedConfig *documentextractor.ProcessConfig
 }
 
 func (s *documentStoreStub) EnsureKnowledgeBase(context.Context, int64) error { return s.ensureErr }
@@ -40,6 +41,10 @@ func (s *documentStoreStub) Delete(_ context.Context, knowledgeBaseID, documentI
 		return "", s.deleteErr
 	}
 	return "documents/8.txt", nil
+}
+func (s *documentStoreStub) Reprocess(_ context.Context, _, _ int64, config *documentextractor.ProcessConfig) error {
+	s.reprocessedConfig = config
+	return nil
 }
 
 type cacheInvalidatorStub struct{ knowledgeBaseIDs []int64 }
@@ -132,6 +137,18 @@ func TestServiceRejectsInvalidUploadProcessConfig(t *testing.T) {
 	})
 	if !errors.Is(err, document.ErrInvalidProcessConfig) {
 		t.Fatalf("Upload() error = %v, want ErrInvalidProcessConfig", err)
+	}
+}
+
+func TestServiceReprocessPassesProcessConfig(t *testing.T) {
+	store := &documentStoreStub{}
+	service := document.NewService(store, document.NewLocalFileStore(t.TempDir()))
+	config := &documentextractor.ProcessConfig{ParserEngineOverrides: map[string]string{"pdf_force_scanned": "true"}}
+	if err := service.Reprocess(context.Background(), 4, 8, config); err != nil {
+		t.Fatalf("Reprocess() error = %v", err)
+	}
+	if store.reprocessedConfig == nil || store.reprocessedConfig.ParserEngineOverrides["pdf_force_scanned"] != "true" {
+		t.Fatalf("reprocess config = %#v", store.reprocessedConfig)
 	}
 }
 

@@ -83,7 +83,7 @@ type Deleter interface {
 }
 
 type Reprocessor interface {
-	Reprocess(context.Context, int64, int64) error
+	Reprocess(context.Context, int64, int64, *documentextractor.ProcessConfig) error
 }
 
 type CreateInput struct {
@@ -543,15 +543,18 @@ func (s *Service) RenameFolder(ctx context.Context, knowledgeBaseID int64, from,
 	return moved, err
 }
 
-func (s *Service) Reprocess(ctx context.Context, knowledgeBaseID, documentID int64) error {
+func (s *Service) Reprocess(ctx context.Context, knowledgeBaseID, documentID int64, config *documentextractor.ProcessConfig) error {
 	if knowledgeBaseID <= 0 || documentID <= 0 {
 		return ErrDocumentNotFound
+	}
+	if err := documentextractor.ValidateProcessConfig(config); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidProcessConfig, err)
 	}
 	reprocessor, ok := s.store.(Reprocessor)
 	if !ok {
 		return ErrDeleteUnavailable
 	}
-	return reprocessor.Reprocess(ctx, knowledgeBaseID, documentID)
+	return reprocessor.Reprocess(ctx, knowledgeBaseID, documentID, config)
 }
 
 // Delete removes the database record first so PostgreSQL can cascade chunks,
@@ -1055,7 +1058,18 @@ func (s *PostgresStore) RenameFolder(ctx context.Context, knowledgeBaseID int64,
 	return count, err
 }
 
-func (s *PostgresStore) Reprocess(ctx context.Context, knowledgeBaseID, documentID int64) error {
+func (s *PostgresStore) Reprocess(ctx context.Context, knowledgeBaseID, documentID int64, config *documentextractor.ProcessConfig) error {
+	if err := documentextractor.ValidateProcessConfig(config); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidProcessConfig, err)
+	}
+	processConfig := []byte("{}")
+	if config != nil {
+		var marshalErr error
+		processConfig, marshalErr = json.Marshal(config)
+		if marshalErr != nil {
+			return fmt.Errorf("encode reprocess config: %w", marshalErr)
+		}
+	}
 	var exists, active bool
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT EXISTS (
@@ -1077,11 +1091,11 @@ func (s *PostgresStore) Reprocess(ctx context.Context, knowledgeBaseID, document
 	}
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO document_processing_tasks (document_id, process_config)
-		SELECT $1, COALESCE(
+		SELECT $1, CASE WHEN $2::boolean THEN $3::jsonb ELSE COALESCE(
 			(SELECT process_config FROM document_processing_tasks
 			 WHERE document_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1),
 			'{}'::jsonb
-		)`, documentID); err != nil {
+		) END`, documentID, config != nil, processConfig); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.ConstraintName == "document_processing_tasks_active_document_idx" {
 			return ErrDocumentProcessing
