@@ -212,6 +212,47 @@ func TestExtractorPreservesDOCXTableAsMarkdown(t *testing.T) {
 	}
 }
 
+func TestExtractorReturnsEmbeddedDOCXImages(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "documents")
+	if err := os.Mkdir(directory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "illustrated.docx")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := zip.NewWriter(file)
+	entries := map[string][]byte{
+		"word/document.xml":      []byte(`<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>流程说明</w:t></w:r></w:p></w:body></w:document>`),
+		"word/media/diagram.png": []byte("png-bytes"),
+	}
+	for name, content := range entries {
+		entry, err := archive.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := entry.Write(content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := documentextractor.New(root).ExtractResult(context.Background(), "documents/illustrated.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+	if err != nil {
+		t.Fatalf("ExtractResult DOCX image = %v", err)
+	}
+	if len(result.Images) != 1 || result.Images[0].Filename != "diagram.png" || result.Images[0].MIMEType != "image/png" || result.Images[0].Source != "embedded" {
+		t.Fatalf("embedded images = %#v", result.Images)
+	}
+}
+
 func TestExtractorReadsHTMLStructureWithoutScriptOrStyle(t *testing.T) {
 	root := t.TempDir()
 	directory := filepath.Join(root, "documents")

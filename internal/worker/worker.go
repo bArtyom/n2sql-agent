@@ -60,6 +60,14 @@ type TextExtractor interface {
 	Extract(context.Context, string, string) (string, error)
 }
 
+type ParseResultExtractor interface {
+	ExtractResult(context.Context, string, string) (documentextractor.ParseResult, error)
+}
+
+type ParseResultStore interface {
+	SaveParseResult(context.Context, int64, documentextractor.ParseResult) error
+}
+
 type TextSplitter interface{ Split(string) []string }
 type DocumentTextSplitter interface {
 	TextSplitter
@@ -82,7 +90,7 @@ type Embedder interface {
 
 func NewChunkingProcessor(extractor TextExtractor, splitter TextSplitter, chunks ChunkStore) Processor {
 	return func(ctx context.Context, task Task) error {
-		text, err := extractor.Extract(ctx, task.StoragePath, task.ContentType)
+		text, parsed, err := extractDocument(ctx, extractor, task)
 		if err != nil {
 			return err
 		}
@@ -98,6 +106,9 @@ func NewChunkingProcessor(extractor TextExtractor, splitter TextSplitter, chunks
 		if err := chunks.Replace(ctx, task.DocumentID, contents, nil); err != nil {
 			return err
 		}
+		if err := saveParseResult(ctx, chunks, task, parsed); err != nil {
+			return err
+		}
 		saveDiagnostics(ctx, chunks, splitter, task, text)
 		return nil
 	}
@@ -105,7 +116,7 @@ func NewChunkingProcessor(extractor TextExtractor, splitter TextSplitter, chunks
 
 func NewEmbeddingChunkingProcessor(extractor TextExtractor, splitter TextSplitter, chunks ChunkStore, embedder Embedder) Processor {
 	return func(ctx context.Context, task Task) error {
-		text, err := extractor.Extract(ctx, task.StoragePath, task.ContentType)
+		text, parsed, err := extractDocument(ctx, extractor, task)
 		if err != nil {
 			return err
 		}
@@ -125,6 +136,9 @@ func NewEmbeddingChunkingProcessor(extractor TextExtractor, splitter TextSplitte
 		if err := chunks.Replace(ctx, task.DocumentID, contents, embeddings); err != nil {
 			return err
 		}
+		if err := saveParseResult(ctx, chunks, task, parsed); err != nil {
+			return err
+		}
 		saveDiagnostics(ctx, chunks, splitter, task, text)
 		return nil
 	}
@@ -134,8 +148,12 @@ func NewEmbeddingChunkingProcessor(extractor TextExtractor, splitter TextSplitte
 // context and embeds only their smaller child chunks. The old processor above
 // remains available for callers and documents that do not use this strategy.
 func NewEmbeddingHierarchicalChunkingProcessor(extractor TextExtractor, parentSplitter, childSplitter TextSplitter, chunks HierarchicalChunkStore, embedder Embedder) Processor {
+	return NewEmbeddingHierarchicalChunkingProcessorWithParseResultStore(extractor, parentSplitter, childSplitter, chunks, embedder, nil)
+}
+
+func NewEmbeddingHierarchicalChunkingProcessorWithParseResultStore(extractor TextExtractor, parentSplitter, childSplitter TextSplitter, chunks HierarchicalChunkStore, embedder Embedder, parseResultStore ParseResultStore) Processor {
 	return func(ctx context.Context, task Task) error {
-		text, err := extractor.Extract(ctx, task.StoragePath, task.ContentType)
+		text, parsed, err := extractDocument(ctx, extractor, task)
 		if err != nil {
 			return err
 		}
@@ -172,6 +190,9 @@ func NewEmbeddingHierarchicalChunkingProcessor(extractor TextExtractor, parentSp
 			return fmt.Errorf("embed document child chunks: %w", err)
 		}
 		if err := chunks.ReplaceHierarchical(ctx, task.DocumentID, parents, children, embeddings); err != nil {
+			return err
+		}
+		if err := saveParseResult(ctx, parseResultStore, task, parsed); err != nil {
 			return err
 		}
 		saveDiagnostics(ctx, chunks, parentSplitter, task, text)
@@ -282,9 +303,32 @@ func embedChunks(ctx context.Context, embedder Embedder, parts []string) ([][]fl
 
 func NewTextExtractionProcessor(extractor TextExtractor) Processor {
 	return func(ctx context.Context, task Task) error {
-		_, err := extractor.Extract(ctx, task.StoragePath, task.ContentType)
+		_, _, err := extractDocument(ctx, extractor, task)
 		return err
 	}
+}
+
+func extractDocument(ctx context.Context, extractor TextExtractor, task Task) (string, *documentextractor.ParseResult, error) {
+	if rich, ok := extractor.(ParseResultExtractor); ok {
+		result, err := rich.ExtractResult(ctx, task.StoragePath, task.ContentType)
+		if err != nil {
+			return "", nil, err
+		}
+		return result.Markdown, &result, nil
+	}
+	text, err := extractor.Extract(ctx, task.StoragePath, task.ContentType)
+	return text, nil, err
+}
+
+func saveParseResult(ctx context.Context, owner any, task Task, result *documentextractor.ParseResult) error {
+	store, ok := owner.(ParseResultStore)
+	if !ok || store == nil || result == nil {
+		return nil
+	}
+	if err := store.SaveParseResult(ctx, task.DocumentID, *result); err != nil {
+		return fmt.Errorf("save parsed document resources: %w", err)
+	}
+	return nil
 }
 
 type Runner struct {

@@ -1,6 +1,7 @@
 package document
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -16,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
+	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -44,6 +46,7 @@ type Document struct {
 	SummaryStatus       string                         `json:"summaryStatus,omitempty"`
 	SummaryIndexStatus  string                         `json:"summaryIndexStatus,omitempty"`
 	ChunkingDiagnostics documentchunk.SplitDiagnostics `json:"chunkingDiagnostics"`
+	ParserMetadata      map[string]string              `json:"parserMetadata,omitempty"`
 }
 
 // Summary is the cached, document-level summary generated on demand.
@@ -106,6 +109,7 @@ type FileStore interface {
 }
 
 type Asset struct {
+	ID               int64
 	OriginalFilename string
 	ContentType      string
 	SizeBytes        int64
@@ -117,8 +121,35 @@ type AssetReader interface {
 	OpenAsset(context.Context, int64, int64) (Asset, error)
 }
 
+type AssetItemReader interface {
+	OpenAssetByID(context.Context, int64, int64, int64) (Asset, error)
+}
+
+type AssetInfo struct {
+	ID               int64  `json:"id"`
+	OriginalFilename string `json:"originalFilename"`
+	ContentType      string `json:"contentType"`
+	SizeBytes        int64  `json:"sizeBytes"`
+	Page             int    `json:"page,omitempty"`
+	Source           string `json:"source,omitempty"`
+	IsOriginal       bool   `json:"isOriginal,omitempty"`
+	URL              string `json:"url"`
+}
+
+type AssetListReader interface {
+	ListAssets(context.Context, int64, int64) ([]AssetInfo, error)
+}
+
+type ParseResultStore interface {
+	SaveParseResult(context.Context, int64, documentextractor.ParseResult) error
+}
+
 type assetMetadataStore interface {
 	AssetMetadata(context.Context, int64, int64) (string, string, string, int64, error)
+}
+
+type assetMetadataByIDStore interface {
+	AssetMetadataByID(context.Context, int64, int64, int64) (string, string, string, int64, error)
 }
 
 type assetFileOpener interface {
@@ -189,6 +220,42 @@ func (s *Service) OpenAsset(ctx context.Context, knowledgeBaseID, documentID int
 		return Asset{}, err
 	}
 	return Asset{OriginalFilename: filename, ContentType: contentType, SizeBytes: sizeBytes, Content: content, Close: closeFile}, nil
+}
+
+func (s *Service) OpenAssetByID(ctx context.Context, knowledgeBaseID, documentID, assetID int64) (Asset, error) {
+	metadataStore, ok := s.store.(assetMetadataByIDStore)
+	if !ok {
+		return Asset{}, ErrUnsupportedFile
+	}
+	opener, ok := s.files.(assetFileOpener)
+	if !ok {
+		return Asset{}, ErrUnsupportedFile
+	}
+	storagePath, filename, contentType, sizeBytes, err := metadataStore.AssetMetadataByID(ctx, knowledgeBaseID, documentID, assetID)
+	if err != nil {
+		return Asset{}, err
+	}
+	content, closeFile, err := opener.Open(ctx, storagePath)
+	if err != nil {
+		return Asset{}, err
+	}
+	return Asset{ID: assetID, OriginalFilename: filename, ContentType: contentType, SizeBytes: sizeBytes, Content: content, Close: closeFile}, nil
+}
+
+func (s *Service) ListAssets(ctx context.Context, knowledgeBaseID, documentID int64) ([]AssetInfo, error) {
+	reader, ok := s.store.(AssetListReader)
+	if !ok {
+		return nil, ErrUnsupportedFile
+	}
+	return reader.ListAssets(ctx, knowledgeBaseID, documentID)
+}
+
+func (s *Service) SaveParseResult(ctx context.Context, documentID int64, result documentextractor.ParseResult) error {
+	store, ok := s.store.(ParseResultStore)
+	if !ok {
+		return ErrUnsupportedFile
+	}
+	return store.SaveParseResult(ctx, documentID, result)
 }
 
 func (s *Service) List(ctx context.Context, knowledgeBaseID int64) ([]Document, error) {
@@ -313,9 +380,16 @@ func (s *LocalFileStore) Delete(ctx context.Context, storagePath string) error {
 	return nil
 }
 
-type PostgresStore struct{ db *sql.DB }
+type PostgresStore struct {
+	db    *sql.DB
+	files FileStore
+}
 
 func NewPostgresStore(db *sql.DB) *PostgresStore { return &PostgresStore{db: db} }
+
+func NewPostgresStoreWithFileStore(db *sql.DB, files FileStore) *PostgresStore {
+	return &PostgresStore{db: db, files: files}
+}
 
 func (s *PostgresStore) EnsureKnowledgeBase(ctx context.Context, id int64) error {
 	var exists bool
@@ -354,10 +428,184 @@ func (s *PostgresStore) AssetMetadata(ctx context.Context, knowledgeBaseID, docu
 	return storagePath, filename, contentType, sizeBytes, nil
 }
 
+func (s *PostgresStore) AssetMetadataByID(ctx context.Context, knowledgeBaseID, documentID, assetID int64) (string, string, string, int64, error) {
+	var storagePath, filename, contentType string
+	var sizeBytes int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT a.storage_path, a.original_filename, a.content_type, a.size_bytes
+		FROM document_assets AS a
+		JOIN documents AS d ON d.id = a.document_id
+		JOIN knowledge_bases AS kb ON kb.id = d.knowledge_base_id
+		WHERE a.id = $1 AND a.document_id = $2 AND d.knowledge_base_id = $3
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, assetID, documentID, knowledgeBaseID).
+		Scan(&storagePath, &filename, &contentType, &sizeBytes)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", "", 0, ErrDocumentNotFound
+	}
+	if err != nil {
+		return "", "", "", 0, fmt.Errorf("read document asset metadata: %w", err)
+	}
+	return storagePath, filename, contentType, sizeBytes, nil
+}
+
+func (s *PostgresStore) ListAssets(ctx context.Context, knowledgeBaseID, documentID int64) ([]AssetInfo, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT a.id, a.original_filename, a.content_type, a.size_bytes, a.page, a.source, a.is_original
+		FROM document_assets AS a
+		JOIN documents AS d ON d.id = a.document_id
+		JOIN knowledge_bases AS kb ON kb.id = d.knowledge_base_id
+		WHERE a.document_id = $1 AND d.knowledge_base_id = $2
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
+		ORDER BY a.asset_index, a.id`, documentID, knowledgeBaseID)
+	if err != nil {
+		return nil, fmt.Errorf("list document assets: %w", err)
+	}
+	defer rows.Close()
+	assets := make([]AssetInfo, 0)
+	for rows.Next() {
+		var asset AssetInfo
+		if err := rows.Scan(&asset.ID, &asset.OriginalFilename, &asset.ContentType, &asset.SizeBytes, &asset.Page, &asset.Source, &asset.IsOriginal); err != nil {
+			return nil, fmt.Errorf("scan document asset: %w", err)
+		}
+		asset.URL = fmt.Sprintf("/api/knowledge-bases/%d/documents/%d/assets/%d", knowledgeBaseID, documentID, asset.ID)
+		assets = append(assets, asset)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate document assets: %w", err)
+	}
+	return assets, nil
+}
+
+func (s *PostgresStore) AssetURLs(ctx context.Context, knowledgeBaseID, documentID int64) ([]string, error) {
+	assets, err := s.ListAssets(ctx, knowledgeBaseID, documentID)
+	if err != nil {
+		return nil, err
+	}
+	urls := make([]string, 0, len(assets))
+	for _, asset := range assets {
+		urls = append(urls, asset.URL)
+	}
+	return urls, nil
+}
+
+func (s *PostgresStore) SaveParseResult(ctx context.Context, documentID int64, result documentextractor.ParseResult) error {
+	if s.files == nil {
+		return ErrUnsupportedFile
+	}
+	metadata, err := json.Marshal(result.Metadata)
+	if err != nil {
+		return fmt.Errorf("encode parser metadata: %w", err)
+	}
+	var originalPath, originalName, originalType string
+	var originalSize int64
+	if err := s.db.QueryRowContext(ctx, `SELECT storage_path, original_filename, content_type, size_bytes FROM documents WHERE id = $1`, documentID).Scan(&originalPath, &originalName, &originalType, &originalSize); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrDocumentNotFound
+		}
+		return fmt.Errorf("read document for parser result: %w", err)
+	}
+
+	type storedAsset struct {
+		index                    int
+		name, path, mime, source string
+		page                     int
+		size                     int64
+		original                 bool
+	}
+	stored := make([]storedAsset, 0, len(result.Images))
+	newPaths := make([]string, 0)
+	cleanupNew := func() {
+		for _, path := range newPaths {
+			_ = s.files.Delete(context.WithoutCancel(ctx), path)
+		}
+	}
+	for index, image := range result.Images {
+		if !strings.HasPrefix(image.MIMEType, "image/") || len(image.Data) == 0 || int64(len(image.Data)) > MaxFileBytes {
+			cleanupNew()
+			return fmt.Errorf("invalid parser image asset at index %d", index)
+		}
+		asset := storedAsset{index: index, name: image.Filename, mime: image.MIMEType, source: image.Source, page: image.Page, size: int64(len(image.Data)), original: image.Original}
+		if asset.name == "" {
+			asset.name = fmt.Sprintf("image-%d", index+1)
+		}
+		if image.Original {
+			asset.path, asset.name, asset.mime, asset.size = originalPath, originalName, originalType, originalSize
+		} else {
+			extension, ok := extensionForContentType(image.MIMEType)
+			if !ok {
+				cleanupNew()
+				return fmt.Errorf("unsupported parser image MIME type %q", image.MIMEType)
+			}
+			path, size, _, saveErr := s.files.Save(ctx, extension, bytes.NewReader(image.Data))
+			if saveErr != nil {
+				cleanupNew()
+				return fmt.Errorf("save parser image asset: %w", saveErr)
+			}
+			asset.path, asset.size = path, size
+			newPaths = append(newPaths, path)
+		}
+		stored = append(stored, asset)
+	}
+
+	rows, err := s.db.QueryContext(ctx, `SELECT storage_path, is_original FROM document_assets WHERE document_id = $1`, documentID)
+	if err != nil {
+		cleanupNew()
+		return fmt.Errorf("read old document assets: %w", err)
+	}
+	var oldPaths []string
+	for rows.Next() {
+		var path string
+		var isOriginal bool
+		if scanErr := rows.Scan(&path, &isOriginal); scanErr != nil {
+			rows.Close()
+			cleanupNew()
+			return fmt.Errorf("scan old document asset: %w", scanErr)
+		}
+		if !isOriginal {
+			oldPaths = append(oldPaths, path)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		cleanupNew()
+		return fmt.Errorf("close old document assets: %w", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		cleanupNew()
+		return fmt.Errorf("begin parser result transaction: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE documents SET parser_metadata = $2::jsonb WHERE id = $1`, documentID, metadata); err != nil {
+		cleanupNew()
+		return fmt.Errorf("save parser metadata: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM document_assets WHERE document_id = $1`, documentID); err != nil {
+		cleanupNew()
+		return fmt.Errorf("replace document assets: %w", err)
+	}
+	for _, asset := range stored {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO document_assets (document_id, asset_index, original_filename, storage_path, content_type, size_bytes, page, source, is_original)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, documentID, asset.index, asset.name, asset.path, asset.mime, asset.size, asset.page, asset.source, asset.original); err != nil {
+			cleanupNew()
+			return fmt.Errorf("insert document asset: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		cleanupNew()
+		return fmt.Errorf("commit parser result: %w", err)
+	}
+	for _, path := range oldPaths {
+		_ = s.files.Delete(context.WithoutCancel(ctx), path)
+	}
+	return nil
+}
+
 func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Document, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT d.id, d.knowledge_base_id, d.original_filename, d.content_type, d.size_bytes, d.content_sha256,
-		       d.chunking_diagnostics, d.summary_status, d.summary_index_status,
+		       d.chunking_diagnostics, d.parser_metadata, d.summary_status, d.summary_index_status,
 		       COALESCE(task.status, 'pending') AS processing_status
 		FROM documents AS d
 		LEFT JOIN LATERAL (
@@ -381,7 +629,7 @@ func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Docu
 	documents := make([]Document, 0)
 	for rows.Next() {
 		var document Document
-		var diagnostics []byte
+		var diagnostics, parserMetadata []byte
 		if err := rows.Scan(
 			&document.ID,
 			&document.KnowledgeBaseID,
@@ -390,6 +638,7 @@ func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Docu
 			&document.SizeBytes,
 			&document.ContentSHA256,
 			&diagnostics,
+			&parserMetadata,
 			&document.SummaryStatus,
 			&document.SummaryIndexStatus,
 			&document.ProcessingStatus,
@@ -399,6 +648,11 @@ func (s *PostgresStore) List(ctx context.Context, knowledgeBaseID int64) ([]Docu
 		if len(diagnostics) > 0 {
 			if err := json.Unmarshal(diagnostics, &document.ChunkingDiagnostics); err != nil {
 				return nil, fmt.Errorf("decode chunking diagnostics: %w", err)
+			}
+		}
+		if len(parserMetadata) > 0 {
+			if err := json.Unmarshal(parserMetadata, &document.ParserMetadata); err != nil {
+				return nil, fmt.Errorf("decode parser metadata: %w", err)
 			}
 		}
 		documents = append(documents, document)

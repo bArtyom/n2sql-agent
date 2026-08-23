@@ -1,11 +1,18 @@
 package documentextractor
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"path/filepath"
+	"sort"
 	"strings"
 )
+
+const maxEmbeddedImageBytes int64 = 5 << 20
 
 // ParseRequest is the parser-independent input passed to one document engine.
 type ParseRequest struct {
@@ -134,7 +141,79 @@ func (*officeParserEngine) Parse(ctx context.Context, request ParseRequest) (Par
 	default:
 		return ParseResult{}, ErrUnsupportedType
 	}
-	return ParseResult{Markdown: text}, err
+	if err != nil {
+		return ParseResult{}, err
+	}
+	prefix := "word/media/"
+	if request.ContentType == "application/vnd.openxmlformats-officedocument.presentationml.presentation" {
+		prefix = "ppt/media/"
+	}
+	images, imageErr := extractArchiveImages(ctx, request.Content, prefix)
+	if imageErr != nil {
+		return ParseResult{}, imageErr
+	}
+	return ParseResult{Markdown: text, Images: images}, nil
+}
+
+func extractArchiveImages(ctx context.Context, content []byte, prefix string) ([]ImageAsset, error) {
+	archive, err := zip.NewReader(bytes.NewReader(content), int64(len(content)))
+	if err != nil {
+		return nil, fmt.Errorf("open office archive for images: %w", err)
+	}
+	files := make([]*zip.File, 0)
+	for _, file := range archive.File {
+		if strings.HasPrefix(file.Name, prefix) && !strings.HasSuffix(file.Name, "/") {
+			files = append(files, file)
+		}
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
+	assets := make([]ImageAsset, 0, len(files))
+	for index, file := range files {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if file.UncompressedSize64 > uint64(maxEmbeddedImageBytes) {
+			return nil, fmt.Errorf("embedded image %s is too large", file.Name)
+		}
+		reader, err := file.Open()
+		if err != nil {
+			return nil, fmt.Errorf("open embedded image %s: %w", file.Name, err)
+		}
+		data, readErr := io.ReadAll(io.LimitReader(reader, maxEmbeddedImageBytes+1))
+		_ = reader.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("read embedded image %s: %w", file.Name, readErr)
+		}
+		if int64(len(data)) > maxEmbeddedImageBytes {
+			return nil, fmt.Errorf("embedded image %s is too large", file.Name)
+		}
+		filename := filepath.Base(file.Name)
+		mimeType := imageMIMEType(filename)
+		if mimeType == "" {
+			continue
+		}
+		assets = append(assets, ImageAsset{
+			Filename: filename,
+			MIMEType: mimeType,
+			Data:     data,
+			Source:   "embedded",
+			Page:     index + 1,
+		})
+	}
+	return assets, nil
+}
+
+func imageMIMEType(filename string) string {
+	switch strings.ToLower(filepath.Ext(filename)) {
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".webp":
+		return "image/webp"
+	default:
+		return ""
+	}
 }
 
 type pdfParserEngine struct{ scannedPDF ScannedPDFProcessor }

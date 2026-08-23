@@ -57,7 +57,8 @@ func main() {
 	memoryStore := memory.NewPostgresStore(db)
 	authStore := auth.NewPostgresStore(db)
 	knowledgeBaseStore := knowledgebase.NewPostgresStore(db)
-	documentStore := document.NewPostgresStore(db)
+	fileStore := document.NewLocalFileStore(cfg.UploadDir)
+	documentStore := document.NewPostgresStoreWithFileStore(db, fileStore)
 	modelClient := modelclient.NewHTTPClient(&http.Client{Timeout: cfg.ModelProviderTimeout}, cfg.ModelProviderAllowedHosts)
 	embeddingService := modelruntime.NewEmbeddingServiceWithLocalFallback(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv, cfg.LocalEmbeddingBaseURL, cfg.LocalEmbeddingModel, cfg.LocalEmbeddingAPIKey)
 	chatService := modelruntime.NewChatService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
@@ -73,9 +74,6 @@ func main() {
 		extractor = documentextractor.NewWithOCRAndImages(cfg.UploadDir, scannedPDF, scannedPDF)
 		log.Printf("scanned PDF OCR enabled: model=%s renderer=%s max_pages=%d concurrency=%d", cfg.OCRModel, cfg.OCRRendererBinary, cfg.OCRMaxPages, cfg.OCRConcurrency)
 	}
-	parentSplitter := documentchunk.NewAdaptiveSplitter(3000, 300)
-	childSplitter := documentchunk.NewAdaptiveSplitter(1000, 150)
-	processor := worker.NewEmbeddingHierarchicalChunkingProcessor(extractor, parentSplitter, childSplitter, chunkStore, embeddingService)
 	metricsRegistry := metrics.New()
 	agentStreamHub := agentstream.NewHub()
 	checkpointFiles, err := agentrun.NewToolResultFileStore(cfg.AgentCheckpointDir, cfg.AgentCheckpointFileTTL)
@@ -107,9 +105,11 @@ func main() {
 		queryRewriteService,
 		retrieval.CacheConfig{MaxEntries: cfg.RetrievalCacheEntries, TTL: cfg.RetrievalCacheTTL},
 	)
-	fileStore := document.NewLocalFileStore(cfg.UploadDir)
 	documentService := document.NewServiceWithInvalidator(documentStore, fileStore, searchService)
 	knowledgeBaseService := knowledgebase.NewServiceWithInvalidator(knowledgeBaseStore, fileStore, searchService)
+	parentSplitter := documentchunk.NewAdaptiveSplitter(3000, 300)
+	childSplitter := documentchunk.NewAdaptiveSplitter(1000, 150)
+	processor := worker.NewEmbeddingHierarchicalChunkingProcessorWithParseResultStore(extractor, parentSplitter, childSplitter, chunkStore, embeddingService, documentService)
 	answerService := rag.NewService(searchService, chatService)
 	evaluationStore, err := evaluationrun.NewPostgresStore(db)
 	if err != nil {

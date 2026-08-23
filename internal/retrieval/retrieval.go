@@ -106,6 +106,10 @@ type NeighborSearcher interface {
 	SearchNeighbors(context.Context, int64, int64, int, int, int) ([]Result, error)
 }
 
+type AssetURLSearcher interface {
+	AssetURLs(context.Context, int64, int64) ([]string, error)
+}
+
 type ParentSearcher interface {
 	ParentForChunk(context.Context, int64, int64, int) (documentchunk.ParentChunk, bool, error)
 }
@@ -185,7 +189,7 @@ func NormalizeDocumentIDs(documentIDs []int64) ([]int64, error) {
 
 func (s *Service) SearchWithOptions(ctx context.Context, knowledgeBaseID int64, query string, limit int, options SearchOptions) ([]Result, error) {
 	results, err := s.searchWithOptions(ctx, knowledgeBaseID, query, limit, options)
-	return attachAssetURLs(knowledgeBaseID, results), err
+	return s.attachAssetURLs(ctx, knowledgeBaseID, results), err
 }
 
 // FilterByMaxDistance keeps only results close enough to the query. pgvector
@@ -274,13 +278,30 @@ func (s *Service) Search(ctx context.Context, knowledgeBaseID int64, query strin
 	return s.SearchWithOptions(ctx, knowledgeBaseID, query, limit, SearchOptions{})
 }
 
-func attachAssetURLs(knowledgeBaseID int64, results []Result) []Result {
+func (s *Service) attachAssetURLs(ctx context.Context, knowledgeBaseID int64, results []Result) []Result {
 	if knowledgeBaseID <= 0 {
 		return results
 	}
+	assetURLs := make(map[int64][]string)
+	if assetSearcher, ok := s.chunks.(AssetURLSearcher); ok {
+		seenDocuments := make(map[int64]struct{})
+		for _, result := range results {
+			if _, seen := seenDocuments[result.DocumentID]; seen {
+				continue
+			}
+			seenDocuments[result.DocumentID] = struct{}{}
+			if urls, err := assetSearcher.AssetURLs(ctx, knowledgeBaseID, result.DocumentID); err == nil && len(urls) > 0 {
+				assetURLs[result.DocumentID] = urls
+			}
+		}
+	}
 	for index := range results {
-		if isImageFilename(results[index].OriginalFilename) {
+		if urls := assetURLs[results[index].DocumentID]; len(urls) > 0 {
+			results[index].AssetURLs = append([]string(nil), urls...)
+			results[index].AssetURL = urls[0]
+		} else if isImageFilename(results[index].OriginalFilename) {
 			results[index].AssetURL = fmt.Sprintf("/api/knowledge-bases/%d/documents/%d/asset", knowledgeBaseID, results[index].DocumentID)
+			results[index].AssetURLs = []string{results[index].AssetURL}
 		}
 	}
 	return results

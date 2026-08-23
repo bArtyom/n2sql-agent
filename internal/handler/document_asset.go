@@ -41,11 +41,74 @@ func NewDocumentAsset(reader document.AssetReader) http.Handler {
 			http.Error(w, `{"error":"unable to read document asset"}`, http.StatusInternalServerError)
 			return
 		}
-		defer asset.Close()
-		w.Header().Set("Content-Type", asset.ContentType)
-		w.Header().Set("Content-Disposition", `inline; filename="`+safeAssetFilename(asset.OriginalFilename)+`"`)
-		http.ServeContent(w, r, asset.OriginalFilename, time.Time{}, asset.Content)
+		serveAsset(w, r, asset)
 	})
+}
+
+func NewDocumentAssetByID(reader document.AssetItemReader) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		knowledgeBaseID, ok := decodeKnowledgeBaseID(w, r)
+		if !ok {
+			return
+		}
+		documentID, err := strconv.ParseInt(r.PathValue("documentID"), 10, 64)
+		assetID, assetErr := strconv.ParseInt(r.PathValue("assetID"), 10, 64)
+		if err != nil || documentID <= 0 || assetErr != nil || assetID <= 0 {
+			http.Error(w, `{"error":"invalid document asset ID"}`, http.StatusBadRequest)
+			return
+		}
+		asset, err := reader.OpenAssetByID(r.Context(), knowledgeBaseID, documentID, assetID)
+		if errors.Is(err, document.ErrDocumentNotFound) {
+			http.Error(w, `{"error":"document asset not found"}`, http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, `{"error":"unable to read document asset"}`, http.StatusInternalServerError)
+			return
+		}
+		serveAsset(w, r, asset)
+	})
+}
+
+func NewDocumentAssetList(reader document.AssetListReader) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		knowledgeBaseID, ok := decodeKnowledgeBaseID(w, r)
+		if !ok {
+			return
+		}
+		documentID, err := strconv.ParseInt(r.PathValue("documentID"), 10, 64)
+		if err != nil || documentID <= 0 {
+			http.Error(w, `{"error":"invalid document ID"}`, http.StatusBadRequest)
+			return
+		}
+		assets, err := reader.ListAssets(r.Context(), knowledgeBaseID, documentID)
+		if errors.Is(err, document.ErrDocumentNotFound) {
+			http.Error(w, `{"error":"document asset not found"}`, http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, `{"error":"unable to list document assets"}`, http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, struct {
+			Assets []document.AssetInfo `json:"assets"`
+		}{Assets: assets})
+	})
+}
+
+func serveAsset(w http.ResponseWriter, r *http.Request, asset document.Asset) {
+	defer asset.Close()
+	w.Header().Set("Content-Type", asset.ContentType)
+	w.Header().Set("Content-Disposition", `inline; filename="`+safeAssetFilename(asset.OriginalFilename)+`"`)
+	http.ServeContent(w, r, asset.OriginalFilename, time.Time{}, asset.Content)
 }
 
 func safeAssetFilename(filename string) string {

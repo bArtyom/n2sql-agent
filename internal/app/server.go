@@ -122,6 +122,12 @@ func New(dependencies Dependencies) http.Handler {
 		if assetReader, ok := dependencies.Documents.(document.AssetReader); ok {
 			mux.Handle("GET /api/knowledge-bases/{id}/documents/{documentID}/asset", handler.NewDocumentAsset(assetReader))
 		}
+		if assetItemReader, ok := dependencies.Documents.(document.AssetItemReader); ok {
+			mux.Handle("GET /api/knowledge-bases/{id}/documents/{documentID}/assets/{assetID}", handler.NewDocumentAssetByID(assetItemReader))
+		}
+		if assetListReader, ok := dependencies.Documents.(document.AssetListReader); ok {
+			mux.Handle("GET /api/knowledge-bases/{id}/documents/{documentID}/assets", handler.NewDocumentAssetList(assetListReader))
+		}
 	}
 	if dependencies.ChunkReader != nil {
 		mux.Handle("GET /api/knowledge-bases/{id}/documents/{documentID}/chunks/{position}", handler.NewDocumentChunk(dependencies.ChunkReader))

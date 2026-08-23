@@ -431,6 +431,7 @@ func conversationMetadataFromAgentResponse(response agentservice.Response) conve
 				DocumentID:       source.DocumentID,
 				OriginalFilename: source.OriginalFilename,
 				AssetURL:         source.AssetURL,
+				AssetURLs:        append([]string(nil), source.AssetURLs...),
 				Position:         source.Position,
 				ChunkKind:        source.ChunkKind,
 				Content:          content,

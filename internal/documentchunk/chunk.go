@@ -163,6 +163,7 @@ type SearchResult struct {
 	DocumentID        int64          `json:"documentId"`
 	OriginalFilename  string         `json:"originalFilename,omitempty"`
 	AssetURL          string         `json:"assetUrl,omitempty"`
+	AssetURLs         []string       `json:"assetUrls,omitempty"`
 	Position          int            `json:"position"`
 	Content           string         `json:"content"`
 	ChunkKind         string         `json:"chunkKind,omitempty"`
@@ -190,6 +191,33 @@ type ContextChunk struct {
 type PostgresStore struct{ db *sql.DB }
 
 func NewPostgresStore(db *sql.DB) *PostgresStore { return &PostgresStore{db: db} }
+
+func (s *PostgresStore) AssetURLs(ctx context.Context, knowledgeBaseID, documentID int64) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT a.id
+		FROM document_assets AS a
+		JOIN documents AS d ON d.id = a.document_id
+		JOIN knowledge_bases AS kb ON kb.id = d.knowledge_base_id
+		WHERE a.document_id = $1 AND d.knowledge_base_id = $2
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
+		ORDER BY a.asset_index, a.id`, documentID, knowledgeBaseID)
+	if err != nil {
+		return nil, fmt.Errorf("list document asset URLs: %w", err)
+	}
+	defer rows.Close()
+	urls := make([]string, 0)
+	for rows.Next() {
+		var assetID int64
+		if err := rows.Scan(&assetID); err != nil {
+			return nil, fmt.Errorf("scan document asset URL: %w", err)
+		}
+		urls = append(urls, fmt.Sprintf("/api/knowledge-bases/%d/documents/%d/assets/%d", knowledgeBaseID, documentID, assetID))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate document asset URLs: %w", err)
+	}
+	return urls, nil
+}
 
 func (s *PostgresStore) SaveChunkingDiagnostics(ctx context.Context, documentID int64, diagnostics SplitDiagnostics) error {
 	payload, err := json.Marshal(diagnostics)

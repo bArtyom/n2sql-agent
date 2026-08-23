@@ -95,22 +95,23 @@ type MessageMetadata struct {
 // so reopening a conversation does not turn the messages table into a second
 // copy of the document corpus.
 type SourceReference struct {
-	DocumentID       int64   `json:"documentId"`
-	OriginalFilename string  `json:"originalFilename,omitempty"`
-	AssetURL         string  `json:"assetUrl,omitempty"`
-	Position         int     `json:"position"`
-	ChunkKind        string  `json:"chunkKind,omitempty"`
-	Content          string  `json:"content"`
-	HeadingPath      string  `json:"headingPath,omitempty"`
-	ContentTruncated bool    `json:"contentTruncated,omitempty"`
-	ParentContent    string  `json:"parentContent,omitempty"`
-	ParentPosition   int     `json:"parentPosition,omitempty"`
-	Distance         float64 `json:"distance"`
-	MatchType        string  `json:"matchType,omitempty"`
-	KeywordScore     float64 `json:"keywordScore,omitempty"`
-	HeadingScore     float64 `json:"headingScore,omitempty"`
-	FusionScore      float64 `json:"fusionScore,omitempty"`
-	RerankScore      float64 `json:"rerankScore,omitempty"`
+	DocumentID       int64    `json:"documentId"`
+	OriginalFilename string   `json:"originalFilename,omitempty"`
+	AssetURL         string   `json:"assetUrl,omitempty"`
+	AssetURLs        []string `json:"assetUrls,omitempty"`
+	Position         int      `json:"position"`
+	ChunkKind        string   `json:"chunkKind,omitempty"`
+	Content          string   `json:"content"`
+	HeadingPath      string   `json:"headingPath,omitempty"`
+	ContentTruncated bool     `json:"contentTruncated,omitempty"`
+	ParentContent    string   `json:"parentContent,omitempty"`
+	ParentPosition   int      `json:"parentPosition,omitempty"`
+	Distance         float64  `json:"distance"`
+	MatchType        string   `json:"matchType,omitempty"`
+	KeywordScore     float64  `json:"keywordScore,omitempty"`
+	HeadingScore     float64  `json:"headingScore,omitempty"`
+	FusionScore      float64  `json:"fusionScore,omitempty"`
+	RerankScore      float64  `json:"rerankScore,omitempty"`
 }
 
 // AgentTrace is the small, display-safe part of an Agent run that we restore

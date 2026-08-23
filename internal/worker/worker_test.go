@@ -63,6 +63,35 @@ func (oversizedProtectedBlockExtractor) Extract(context.Context, string, string)
 	return "```go\n" + strings.Repeat("x", 40) + "\n```", nil
 }
 
+type richExtractorStub struct{}
+
+func (richExtractorStub) Extract(context.Context, string, string) (string, error) {
+	return "source text", nil
+}
+
+func (richExtractorStub) ExtractResult(context.Context, string, string) (documentextractor.ParseResult, error) {
+	return documentextractor.ParseResult{
+		Markdown: "source text",
+		Images: []documentextractor.ImageAsset{{
+			Filename: "diagram.png",
+			MIMEType: "image/png",
+			Data:     []byte("png"),
+			Source:   "embedded",
+		}},
+		Metadata: map[string]string{"parser": "office"},
+	}, nil
+}
+
+type parseResultStoreStub struct {
+	documentID int64
+	result     documentextractor.ParseResult
+}
+
+func (s *parseResultStoreStub) SaveParseResult(_ context.Context, documentID int64, result documentextractor.ParseResult) error {
+	s.documentID, s.result = documentID, result
+	return nil
+}
+
 type splitterStub struct{}
 
 func (splitterStub) Split(string) []string { return []string{"first", "second"} }
@@ -200,6 +229,26 @@ func TestEmbeddingHierarchicalProcessorEmbedsOnlyChildren(t *testing.T) {
 	}
 	if len(embedder.batches) != 1 || !reflect.DeepEqual(embedder.batches[0], []string{"child", "child"}) {
 		t.Fatalf("embedding input = %#v", embedder.batches)
+	}
+}
+
+func TestEmbeddingHierarchicalProcessorPersistsParseResult(t *testing.T) {
+	chunks := &hierarchicalChunkStoreStub{}
+	assets := &parseResultStoreStub{}
+	processor := worker.NewEmbeddingHierarchicalChunkingProcessorWithParseResultStore(
+		richExtractorStub{},
+		fixedSplitter{chunks: []string{"parent"}},
+		fixedSplitter{chunks: []string{"child"}},
+		chunks,
+		matchingEmbedderStub{},
+		assets,
+	)
+
+	if err := processor(context.Background(), worker.Task{DocumentID: 9}); err != nil {
+		t.Fatalf("processor error = %v", err)
+	}
+	if assets.documentID != 9 || len(assets.result.Images) != 1 || assets.result.Metadata["parser"] != "office" {
+		t.Fatalf("saved parse result = %#v", assets)
 	}
 }
 
