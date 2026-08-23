@@ -31,6 +31,45 @@ type ParserEngineRule struct {
 	Engine    string   `json:"engine"`
 }
 
+// ProcessConfig contains per-upload parser overrides. It is intentionally
+// separate from the knowledge-base defaults so a queued task can keep the
+// exact configuration selected when the upload was accepted.
+type ProcessConfig struct {
+	ParserEngineRules []ParserEngineRule `json:"parser_engine_rules,omitempty"`
+}
+
+const (
+	maxProcessConfigRules     = 32
+	maxProcessConfigFileTypes = 32
+	maxProcessConfigValueSize = 100
+)
+
+// ValidateProcessConfig validates the small, parser-owned portion of the
+// upload process configuration. A nil config means "use knowledge-base
+// defaults" and is valid.
+func ValidateProcessConfig(config *ProcessConfig) error {
+	if config == nil {
+		return nil
+	}
+	if len(config.ParserEngineRules) > maxProcessConfigRules {
+		return fmt.Errorf("too many parser engine rules")
+	}
+	for _, rule := range config.ParserEngineRules {
+		if strings.TrimSpace(rule.Engine) == "" {
+			return fmt.Errorf("parser engine is required")
+		}
+		if len(rule.FileTypes) == 0 || len(rule.FileTypes) > maxProcessConfigFileTypes {
+			return fmt.Errorf("invalid parser engine file types")
+		}
+		for _, fileType := range rule.FileTypes {
+			if value := strings.TrimSpace(fileType); value == "" || len(value) > maxProcessConfigValueSize {
+				return fmt.Errorf("invalid parser engine file type")
+			}
+		}
+	}
+	return nil
+}
+
 func ResolveParserEngine(rules []ParserEngineRule, contentType, filename string) string {
 	contentType = strings.ToLower(strings.TrimSpace(contentType))
 	extension := strings.ToLower(strings.TrimPrefix(filepath.Ext(filename), "."))
