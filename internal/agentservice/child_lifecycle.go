@@ -43,6 +43,7 @@ func (l *PersistentChildRunLifecycle) StartChild(ctx context.Context, spec agent
 		"message":           spec.Question,
 		"parent_run_id":     spec.ParentRunID,
 		"knowledge_base_id": spec.KnowledgeBaseID,
+		"tag_ids":           spec.TagIDs,
 	})
 	if err != nil {
 		return "", fmt.Errorf("encode child run snapshot: %w", err)
@@ -72,6 +73,7 @@ func (l *PersistentChildRunLifecycle) EnqueueChild(ctx context.Context, spec age
 	}{Request: ChatRequest{
 		Message: spec.Question, RunID: spec.RunID, ParentRunDatabaseID: spec.ParentRunID,
 		ParentRunPublicID: spec.ParentRunPublicID, DocumentIDs: append([]int64(nil), spec.DocumentIDs...),
+		TagIDs:     append([]int64(nil), spec.TagIDs...),
 		FolderPath: spec.FolderPath, FolderRecursive: spec.FolderRecursive,
 		QueryRewrite: spec.QueryRewrite, TopK: spec.TopK, KeywordThreshold: spec.KeywordThreshold, ChildMode: true,
 	}})

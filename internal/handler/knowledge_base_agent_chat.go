@@ -182,10 +182,11 @@ func idempotencyRequestHash(knowledgeBaseID int64, request agentservice.ChatRequ
 		Threshold           float64                       `json:"similarity_threshold"`
 		KeywordThreshold    float64                       `json:"keyword_threshold"`
 		DocumentIDs         []int64                       `json:"document_ids"`
+		TagIDs              []int64                       `json:"tag_ids"`
 		FolderPath          *string                       `json:"folder_path"`
 		FolderRecursive     bool                          `json:"folder_recursive"`
 		QueryRewrite        bool                          `json:"query_rewrite"`
-	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message, ChatModel: request.ChatModel, ThinkingMode: request.ThinkingMode, MaxCompletionTokens: request.MaxCompletionTokens, Attachments: request.Attachments, TopK: request.TopK, Threshold: request.SimilarityThreshold, KeywordThreshold: request.KeywordThreshold, DocumentIDs: request.DocumentIDs, FolderPath: request.FolderPath, FolderRecursive: request.FolderRecursive, QueryRewrite: request.QueryRewrite})
+	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message, ChatModel: request.ChatModel, ThinkingMode: request.ThinkingMode, MaxCompletionTokens: request.MaxCompletionTokens, Attachments: request.Attachments, TopK: request.TopK, Threshold: request.SimilarityThreshold, KeywordThreshold: request.KeywordThreshold, DocumentIDs: request.DocumentIDs, TagIDs: request.TagIDs, FolderPath: request.FolderPath, FolderRecursive: request.FolderRecursive, QueryRewrite: request.QueryRewrite})
 	if err != nil {
 		return "", err
 	}
@@ -262,6 +263,12 @@ func decodeKnowledgeBaseAgentChatRequest(w http.ResponseWriter, r *http.Request,
 		return 0, agentservice.ChatRequest{}, false
 	}
 	request.DocumentIDs = normalizedDocumentIDs
+	normalizedTagIDs, err := retrieval.NormalizeTagIDs(request.TagIDs)
+	if err != nil {
+		http.Error(w, `{"error":"invalid agent chat tag_ids"}`, http.StatusBadRequest)
+		return 0, agentservice.ChatRequest{}, false
+	}
+	request.TagIDs = normalizedTagIDs
 	if request.FolderPath != nil {
 		if _, err := document.NormalizeFolderPath(*request.FolderPath); err != nil {
 			http.Error(w, `{"error":"invalid agent chat folder_path"}`, http.StatusBadRequest)
@@ -302,6 +309,8 @@ func knowledgeBaseAgentChatError(err error) (string, int) {
 		return "invalid agent chat request", http.StatusBadRequest
 	case errors.Is(err, retrieval.ErrInvalidDocumentIDs):
 		return "invalid agent chat document filter", http.StatusBadRequest
+	case errors.Is(err, retrieval.ErrInvalidTagIDs):
+		return "invalid agent chat tag filter", http.StatusBadRequest
 	case errors.Is(err, retrieval.ErrInvalidFolderPath):
 		return "invalid agent chat folder filter", http.StatusBadRequest
 	case errors.Is(err, conversation.ErrInvalidConversation), errors.Is(err, conversation.ErrInvalidKnowledgeBase), errors.Is(err, conversation.ErrInvalidMessage), errors.Is(err, conversation.ErrInvalidIdempotencyKey):

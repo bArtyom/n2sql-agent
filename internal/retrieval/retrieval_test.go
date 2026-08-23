@@ -455,6 +455,19 @@ func TestServiceRejectsInvalidSearchArguments(t *testing.T) {
 	}
 }
 
+func TestNormalizeTagIDsSortsAndRejectsInvalidIDs(t *testing.T) {
+	got, err := retrieval.NormalizeTagIDs([]int64{8, 2, 8})
+	if err != nil {
+		t.Fatalf("NormalizeTagIDs() error = %v", err)
+	}
+	if len(got) != 2 || got[0] != 2 || got[1] != 8 {
+		t.Fatalf("NormalizeTagIDs() = %v, want [2 8]", got)
+	}
+	if _, err := retrieval.NormalizeTagIDs([]int64{0}); !errors.Is(err, retrieval.ErrInvalidTagIDs) {
+		t.Fatalf("NormalizeTagIDs(0) error = %v, want ErrInvalidTagIDs", err)
+	}
+}
+
 func TestServiceRejectsEmptyQueryVector(t *testing.T) {
 	service := retrieval.NewService(emptyEmbeddingStub{}, &chunkStoreStub{})
 

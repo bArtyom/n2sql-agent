@@ -33,6 +33,7 @@ type resultCacheKey struct {
 	query            string
 	limit            int
 	documentIDs      string
+	tagIDs           string
 	folderPath       string
 	folderScoped     bool
 	folderRecursive  bool
@@ -213,6 +214,10 @@ func makeResultCacheKey(knowledgeBaseID int64, query string, limit int, document
 }
 
 func makeResultCacheKeyWithFolder(knowledgeBaseID int64, query string, limit int, documentIDs []int64, queryRewrite bool, keywordThreshold float64, folderPath string, folderScoped bool, folderRecursive bool) resultCacheKey {
+	return makeResultCacheKeyWithFolderAndTags(knowledgeBaseID, query, limit, documentIDs, nil, queryRewrite, keywordThreshold, folderPath, folderScoped, folderRecursive)
+}
+
+func makeResultCacheKeyWithFolderAndTags(knowledgeBaseID int64, query string, limit int, documentIDs, tagIDs []int64, queryRewrite bool, keywordThreshold float64, folderPath string, folderScoped bool, folderRecursive bool) resultCacheKey {
 	var builder strings.Builder
 	for index, documentID := range documentIDs {
 		if index > 0 {
@@ -220,11 +225,19 @@ func makeResultCacheKeyWithFolder(knowledgeBaseID int64, query string, limit int
 		}
 		builder.WriteString(strconv.FormatInt(documentID, 10))
 	}
+	var tagBuilder strings.Builder
+	for index, tagID := range tagIDs {
+		if index > 0 {
+			tagBuilder.WriteByte(',')
+		}
+		tagBuilder.WriteString(strconv.FormatInt(tagID, 10))
+	}
 	return resultCacheKey{
 		knowledgeBaseID:  knowledgeBaseID,
 		query:            normalizedCacheQuery(query),
 		limit:            limit,
 		documentIDs:      builder.String(),
+		tagIDs:           tagBuilder.String(),
 		folderPath:       folderPath,
 		folderScoped:     folderScoped,
 		folderRecursive:  folderRecursive,

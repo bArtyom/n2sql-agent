@@ -27,6 +27,7 @@ type knowledgeBaseChatRequest struct {
 	SimilarityThreshold float64 `json:"similarity_threshold,omitempty"`
 	KeywordThreshold    float64 `json:"keyword_threshold,omitempty"`
 	DocumentIDs         []int64 `json:"document_ids,omitempty"`
+	TagIDs              []int64 `json:"tag_ids,omitempty"`
 	FolderPath          *string `json:"folder_path,omitempty"`
 	FolderRecursive     bool    `json:"folder_recursive,omitempty"`
 	QueryRewrite        bool    `json:"query_rewrite,omitempty"`
@@ -45,13 +46,13 @@ func NewKnowledgeBaseChat(answerer rag.Answerer) http.Handler {
 
 		var response rag.Response
 		var err error
-		if len(request.DocumentIDs) > 0 || request.FolderPath != nil || request.QueryRewrite || request.KeywordThreshold != 0 {
+		if len(request.DocumentIDs) > 0 || len(request.TagIDs) > 0 || request.FolderPath != nil || request.QueryRewrite || request.KeywordThreshold != 0 {
 			optionsAnswerer, ok := answerer.(rag.OptionsAnswerer)
 			if !ok {
 				writeKnowledgeBaseChatError(w, rag.ErrThresholdUnavailable)
 				return
 			}
-			response, err = optionsAnswerer.AnswerWithSearchOptions(r.Context(), knowledgeBaseID, request.Message, request.TopK, request.SimilarityThreshold, retrieval.SearchOptions{DocumentIDs: request.DocumentIDs, FolderPath: request.FolderPath, FolderRecursive: request.FolderRecursive, QueryRewrite: request.QueryRewrite, KeywordThreshold: request.KeywordThreshold})
+			response, err = optionsAnswerer.AnswerWithSearchOptions(r.Context(), knowledgeBaseID, request.Message, request.TopK, request.SimilarityThreshold, retrieval.SearchOptions{DocumentIDs: request.DocumentIDs, TagIDs: request.TagIDs, FolderPath: request.FolderPath, FolderRecursive: request.FolderRecursive, QueryRewrite: request.QueryRewrite, KeywordThreshold: request.KeywordThreshold})
 		} else if request.SimilarityThreshold != 0 {
 			thresholdAnswerer, ok := answerer.(rag.ThresholdAnswerer)
 			if !ok {
@@ -79,7 +80,7 @@ func knowledgeBaseChatError(err error) (string, int) {
 	switch {
 	case errors.Is(err, rag.ErrNoSources):
 		return "no relevant document sources found", http.StatusNotFound
-	case errors.Is(err, retrieval.ErrInvalidKnowledgeBase), errors.Is(err, retrieval.ErrInvalidQuery), errors.Is(err, retrieval.ErrInvalidLimit), errors.Is(err, retrieval.ErrInvalidDocumentIDs), errors.Is(err, retrieval.ErrInvalidFolderPath):
+	case errors.Is(err, retrieval.ErrInvalidKnowledgeBase), errors.Is(err, retrieval.ErrInvalidQuery), errors.Is(err, retrieval.ErrInvalidLimit), errors.Is(err, retrieval.ErrInvalidDocumentIDs), errors.Is(err, retrieval.ErrInvalidFolderPath), errors.Is(err, retrieval.ErrInvalidTagIDs):
 		return "invalid chat request", http.StatusBadRequest
 	case errors.Is(err, retrieval.ErrInvalidMaxDistance):
 		return "invalid similarity threshold", http.StatusBadRequest
@@ -149,6 +150,12 @@ func decodeKnowledgeBaseChatRequest(w http.ResponseWriter, r *http.Request) (int
 		return 0, knowledgeBaseChatRequest{}, false
 	}
 	request.DocumentIDs = normalizedDocumentIDs
+	normalizedTagIDs, err := retrieval.NormalizeTagIDs(request.TagIDs)
+	if err != nil {
+		http.Error(w, `{"error":"invalid chat tag_ids"}`, http.StatusBadRequest)
+		return 0, knowledgeBaseChatRequest{}, false
+	}
+	request.TagIDs = normalizedTagIDs
 	if request.FolderPath != nil {
 		if _, err := document.NormalizeFolderPath(*request.FolderPath); err != nil {
 			http.Error(w, `{"error":"invalid chat folder_path"}`, http.StatusBadRequest)

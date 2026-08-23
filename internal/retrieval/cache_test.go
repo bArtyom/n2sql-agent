@@ -185,3 +185,12 @@ func TestResultCacheSeparatesUnscopedSearchFromKnowledgeBaseRootFolder(t *testin
 		t.Fatal("unscoped search and explicit root-folder search must not share a cache entry")
 	}
 }
+
+func TestResultCacheSeparatesTagScopes(t *testing.T) {
+	withoutTags := makeResultCacheKeyWithFolderAndTags(7, "问题", 5, nil, nil, false, 0, "", false, false)
+	withGoTag := makeResultCacheKeyWithFolderAndTags(7, "问题", 5, nil, []int64{3}, false, 0, "", false, false)
+	withPythonTag := makeResultCacheKeyWithFolderAndTags(7, "问题", 5, nil, []int64{4}, false, 0, "", false, false)
+	if withoutTags == withGoTag || withGoTag == withPythonTag {
+		t.Fatal("different tag scopes must not share a cache entry")
+	}
+}

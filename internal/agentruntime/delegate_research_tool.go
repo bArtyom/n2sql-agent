@@ -44,6 +44,7 @@ type DelegateResearchTool struct {
 	maxResultBytes    int
 	maxSteps          int
 	documentIDs       []int64
+	tagIDs            []int64
 	folderPath        *string
 	folderRecursive   bool
 	queryRewrite      bool
@@ -64,6 +65,7 @@ type ChildRunSpec struct {
 	KnowledgeBaseID   int64
 	Question          string
 	DocumentIDs       []int64
+	TagIDs            []int64
 	FolderPath        *string
 	FolderRecursive   bool
 	QueryRewrite      bool
@@ -140,6 +142,14 @@ func (t *DelegateResearchTool) SetFolderScope(folderPath *string, recursive bool
 	copyOfPath := *folderPath
 	t.folderPath = &copyOfPath
 	t.folderRecursive = recursive
+}
+
+// SetTagScope propagates the parent's fixed tag boundary to child research.
+func (t *DelegateResearchTool) SetTagScope(tagIDs []int64) {
+	if t == nil {
+		return
+	}
+	t.tagIDs = append([]int64(nil), tagIDs...)
 }
 
 func NewDelegateResearchTool(chat modelruntime.ToolChatRunner, searcher retrieval.Searcher, knowledgeBaseID int64, maxResultBytes, maxSteps int, documentIDs []int64, queryRewrite bool, keywordThreshold float64) (*DelegateResearchTool, error) {
@@ -220,7 +230,7 @@ func (t *DelegateResearchTool) Call(ctx context.Context, raw json.RawMessage) (a
 		}
 	}
 	childRunID := t.newChildRunID(input.Question)
-	childSpec := ChildRunSpec{RunID: childRunID, ParentRunID: t.parentRunID, ParentRunPublicID: t.parentRunPublicID, KnowledgeBaseID: t.knowledgeBaseID, Question: input.Question, DocumentIDs: append([]int64(nil), t.documentIDs...), FolderPath: t.folderPath, FolderRecursive: t.folderRecursive, QueryRewrite: t.queryRewrite, TopK: retrieval.DefaultResults, KeywordThreshold: t.keywordThreshold}
+	childSpec := ChildRunSpec{RunID: childRunID, ParentRunID: t.parentRunID, ParentRunPublicID: t.parentRunPublicID, KnowledgeBaseID: t.knowledgeBaseID, Question: input.Question, DocumentIDs: append([]int64(nil), t.documentIDs...), TagIDs: append([]int64(nil), t.tagIDs...), FolderPath: t.folderPath, FolderRecursive: t.folderRecursive, QueryRewrite: t.queryRewrite, TopK: retrieval.DefaultResults, KeywordThreshold: t.keywordThreshold}
 	if asyncLifecycle, ok := t.lifecycle.(AsyncChildRunLifecycle); ok && t.parentRunID > 0 {
 		startedID, ready, asyncResult, asyncErr := asyncLifecycle.EnqueueChild(ctx, childSpec)
 		if asyncErr != nil {

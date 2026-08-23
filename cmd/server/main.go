@@ -27,6 +27,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 	"github.com/bArtyom/n2sql-agent/internal/documentocr"
 	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
+	"github.com/bArtyom/n2sql-agent/internal/documenttag"
 	"github.com/bArtyom/n2sql-agent/internal/evaluationrun"
 	"github.com/bArtyom/n2sql-agent/internal/evaluationworker"
 	"github.com/bArtyom/n2sql-agent/internal/followup"
@@ -146,6 +147,7 @@ func main() {
 		retrieval.CacheConfig{MaxEntries: cfg.RetrievalCacheEntries, TTL: cfg.RetrievalCacheTTL},
 	)
 	documentService := document.NewServiceWithInvalidator(documentStore, fileStore, searchService)
+	documentTagService := documenttag.NewService(documenttag.NewPostgresStore(db))
 	knowledgeBaseService := knowledgebase.NewServiceWithInvalidator(knowledgeBaseStore, fileStore, searchService)
 	parentSplitter := documentchunk.NewAdaptiveSplitter(3000, 300)
 	childSplitter := documentchunk.NewAdaptiveSplitter(1000, 150)
@@ -255,6 +257,7 @@ func main() {
 			Providers:               providerStore,
 			KnowledgeBases:          knowledgeBaseService,
 			Documents:               documentService,
+			Tags:                    documentTagService,
 			ParserEngines:           parserRegistry,
 			ChunkReader:             chunkStore,
 			ConnectionChecker:       modelClient,

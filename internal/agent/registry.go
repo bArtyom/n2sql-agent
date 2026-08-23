@@ -164,6 +164,29 @@ func (r *ToolRegistry) SetFolderScope(folderPath *string, recursive bool) error 
 	return nil
 }
 
+// SetTagScope applies a request-level tag boundary to every registered
+// knowledge-base tool that supports it.
+func (r *ToolRegistry) SetTagScope(tagIDs []int64) error {
+	if r == nil {
+		return ErrInvalidTool
+	}
+	found := false
+	for _, tool := range r.tools {
+		scoped, ok := tool.(interface{ SetTagScope([]int64) error })
+		if !ok {
+			continue
+		}
+		if err := scoped.SetTagScope(tagIDs); err != nil {
+			return err
+		}
+		found = true
+	}
+	if !found {
+		return ErrToolNotFound
+	}
+	return nil
+}
+
 func (r *ToolRegistry) Find(name string) (Tool, error) {
 	if !r.isAllowed(name) {
 		return nil, fmt.Errorf("%w: %s", ErrToolNotAllowed, name)

@@ -91,6 +91,7 @@ type KnowledgeSearchTool struct {
 	maxDistance      float64
 	keywordThreshold float64
 	documentIDs      []int64
+	tagIDs           []int64
 	folderPath       *string
 	folderRecursive  bool
 	queryRewrite     bool
@@ -207,6 +208,21 @@ func (t *KnowledgeSearchTool) SetFolderScope(folderPath *string, recursive bool)
 	t.folderRecursive = recursive
 }
 
+// SetTagScope fixes the tag boundary for this Agent run. Tags are a server
+// supplied scope, not model-visible tool arguments, so the model cannot widen
+// the user's selected knowledge range.
+func (t *KnowledgeSearchTool) SetTagScope(tagIDs []int64) error {
+	if t == nil {
+		return ErrInvalidKnowledgeSearchInput
+	}
+	normalized, err := retrieval.NormalizeTagIDs(tagIDs)
+	if err != nil {
+		return err
+	}
+	t.tagIDs = normalized
+	return nil
+}
+
 func (t *KnowledgeSearchTool) Parameters() json.RawMessage {
 	if t != nil && t.knowledgeBaseID > 0 {
 		return append(json.RawMessage(nil), scopedKnowledgeSearchParameters...)
@@ -260,11 +276,11 @@ func (t *KnowledgeSearchTool) Call(ctx context.Context, raw json.RawMessage) (To
 		results []retrieval.Result
 		err     error
 	)
-	if len(t.documentIDs) == 0 && t.folderPath == nil && !t.queryRewrite && t.keywordThreshold <= 0 {
+	if len(t.documentIDs) == 0 && len(t.tagIDs) == 0 && t.folderPath == nil && !t.queryRewrite && t.keywordThreshold <= 0 {
 		results, err = t.searcher.Search(ctx, input.KnowledgeBaseID, input.Query, input.Limit)
 	} else if filtered, ok := t.searcher.(retrieval.FilteredSearcher); ok {
-		results, err = filtered.SearchWithOptions(ctx, input.KnowledgeBaseID, input.Query, input.Limit, retrieval.SearchOptions{DocumentIDs: t.documentIDs, FolderPath: t.folderPath, FolderRecursive: t.folderRecursive, QueryRewrite: t.queryRewrite, KeywordThreshold: t.keywordThreshold})
-	} else if len(t.documentIDs) > 0 || t.folderPath != nil || t.queryRewrite {
+		results, err = filtered.SearchWithOptions(ctx, input.KnowledgeBaseID, input.Query, input.Limit, retrieval.SearchOptions{DocumentIDs: t.documentIDs, TagIDs: t.tagIDs, FolderPath: t.folderPath, FolderRecursive: t.folderRecursive, QueryRewrite: t.queryRewrite, KeywordThreshold: t.keywordThreshold})
+	} else if len(t.documentIDs) > 0 || len(t.tagIDs) > 0 || t.folderPath != nil || t.queryRewrite {
 		return ToolResult{}, retrieval.ErrDocumentFilterUnavailable
 	} else {
 		results, err = t.searcher.Search(ctx, input.KnowledgeBaseID, input.Query, input.Limit)

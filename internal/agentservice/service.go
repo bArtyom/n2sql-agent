@@ -323,6 +323,11 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 			return Response{}, fmt.Errorf("configure knowledge search folder scope: %w", err)
 		}
 	}
+	if len(request.TagIDs) > 0 {
+		if err := registry.SetTagScope(request.TagIDs); err != nil {
+			return Response{}, fmt.Errorf("configure knowledge search tag scope: %w", err)
+		}
+	}
 	if request.ChildMode {
 		registry, err = agent.NewKnowledgeSearchRegistryForKnowledgeBaseWithLimitsAndDistanceAndDocumentsAndQueryRewriteAndKeywordThreshold(
 			s.searcher, knowledgeBaseID, s.maxToolResultBytes, request.TopK, maxDistance, keywordThreshold, request.DocumentIDs, request.QueryRewrite,
@@ -333,6 +338,11 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		if request.FolderPath != nil {
 			if err := registry.SetFolderScope(request.FolderPath, request.FolderRecursive); err != nil {
 				return Response{}, fmt.Errorf("configure child knowledge search folder scope: %w", err)
+			}
+		}
+		if len(request.TagIDs) > 0 {
+			if err := registry.SetTagScope(request.TagIDs); err != nil {
+				return Response{}, fmt.Errorf("configure child knowledge search tag scope: %w", err)
 			}
 		}
 	}
@@ -352,6 +362,7 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		}
 		delegate.SetParentRun(request.ParentRunDatabaseID, request.RunID)
 		delegate.SetFolderScope(request.FolderPath, request.FolderRecursive)
+		delegate.SetTagScope(request.TagIDs)
 		delegate.SetChildRunLifecycle(s.childLifecycle)
 		delegate.SetChildScheduler(s.childScheduler)
 		delegate.SetChildEventSink(sink)

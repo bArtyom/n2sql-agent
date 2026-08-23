@@ -13,6 +13,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
+	"github.com/bArtyom/n2sql-agent/internal/documenttag"
 	"github.com/bArtyom/n2sql-agent/internal/evaluationrun"
 	"github.com/bArtyom/n2sql-agent/internal/followup"
 	"github.com/bArtyom/n2sql-agent/internal/handler"
@@ -32,6 +33,7 @@ type Dependencies struct {
 	Providers               modelprovider.Store
 	KnowledgeBases          knowledgebase.Store
 	Documents               document.Uploader
+	Tags                    documenttag.Store
 	ParserEngines           *documentextractor.ParserRegistry
 	ChunkReader             documentchunk.Reader
 	ConnectionChecker       modelclient.ConnectionChecker
@@ -146,6 +148,15 @@ func New(dependencies Dependencies) http.Handler {
 		if assetListReader, ok := dependencies.Documents.(document.AssetListReader); ok {
 			mux.Handle("GET /api/knowledge-bases/{id}/documents/{documentID}/assets", handler.NewDocumentAssetList(assetListReader))
 		}
+	}
+	if dependencies.Tags != nil {
+		tagHandler := handler.NewDocumentTags(dependencies.Tags)
+		mux.Handle("GET /api/knowledge-bases/{id}/tags", tagHandler)
+		mux.Handle("POST /api/knowledge-bases/{id}/tags", tagHandler)
+		mux.Handle("GET /api/knowledge-bases/{id}/documents/{documentID}/tags", tagHandler)
+		mux.Handle("PUT /api/knowledge-bases/{id}/documents/{documentID}/tags", tagHandler)
+		mux.Handle("PATCH /api/knowledge-bases/{id}/tags/{tagID}", handler.NewDocumentTagItem(dependencies.Tags))
+		mux.Handle("DELETE /api/knowledge-bases/{id}/tags/{tagID}", handler.NewDocumentTagItem(dependencies.Tags))
 	}
 	if dependencies.ChunkReader != nil {
 		mux.Handle("GET /api/knowledge-bases/{id}/documents/{documentID}/chunks/{position}", handler.NewDocumentChunk(dependencies.ChunkReader))
