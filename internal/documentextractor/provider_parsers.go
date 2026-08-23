@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -274,6 +275,83 @@ func (e *PaddleOCRVLParserEngine) Parse(ctx context.Context, request ParseReques
 		return ParseResult{}, ErrEmptyText
 	}
 	return result, nil
+}
+
+// AnalyzePage sends one rendered page image through PaddleOCR-VL's layout
+// endpoint. The provider may return Markdown text plus cropped figure images;
+// both are normalized into page blocks so the PDF parser does not depend on
+// the provider response shape.
+func (e *PaddleOCRVLParserEngine) AnalyzePage(ctx context.Context, page PDFPage) ([]PDFPageBlock, error) {
+	if e == nil || len(page.Image) == 0 {
+		return nil, ErrEmptyText
+	}
+	data, err := e.transport.postJSON(ctx, "/layout-parsing", map[string]any{
+		"file":               base64.StdEncoding.EncodeToString(page.Image),
+		"fileType":           1,
+		"visualize":          false,
+		"useLayoutDetection": true,
+		"mergeTables":        true,
+		"restructurePages":   true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("PaddleOCR-VL page layout-parsing: %w", err)
+	}
+	var response struct {
+		ErrorCode int    `json:"errorCode"`
+		ErrorMsg  string `json:"errorMsg"`
+		Result    struct {
+			Pages []struct {
+				Markdown struct {
+					Text   string            `json:"text"`
+					Images map[string]string `json:"images"`
+				} `json:"markdown"`
+			} `json:"layoutParsingResults"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return nil, fmt.Errorf("decode PaddleOCR-VL page response: %w", err)
+	}
+	if response.ErrorCode != 0 {
+		return nil, fmt.Errorf("PaddleOCR-VL page error %d: %s", response.ErrorCode, response.ErrorMsg)
+	}
+	if len(response.Result.Pages) == 0 {
+		return nil, ErrEmptyText
+	}
+	pageResult := response.Result.Pages[0]
+	blocks := make([]PDFPageBlock, 0, len(pageResult.Markdown.Images)+1)
+	if text := strings.TrimSpace(pageResult.Markdown.Text); text != "" {
+		kind := PDFBlockText
+		if looksLikeMarkdownTable(text) {
+			kind = PDFBlockTable
+		}
+		blocks = append(blocks, PDFPageBlock{Page: page.Number, Kind: kind, Text: text, Order: 0, Source: "paddleocr_vl"})
+	}
+	imageNames := make([]string, 0, len(pageResult.Markdown.Images))
+	for imageName := range pageResult.Markdown.Images {
+		imageNames = append(imageNames, imageName)
+	}
+	sort.Strings(imageNames)
+	for index, imageName := range imageNames {
+		asset, err := decodeProviderImage(pageResult.Markdown.Images[imageName], path.Base(imageName), "paddleocr_vl", page.Number)
+		if err != nil {
+			return nil, fmt.Errorf("decode PaddleOCR-VL page image %q: %w", imageName, err)
+		}
+		blocks = append(blocks, PDFPageBlock{Page: page.Number, Kind: PDFBlockFigure, Order: index + 1, Image: asset.Data, MIMEType: asset.MIMEType, Source: asset.Source})
+	}
+	if len(blocks) == 0 {
+		return nil, ErrEmptyText
+	}
+	return blocks, nil
+}
+
+func looksLikeMarkdownTable(text string) bool {
+	lines := strings.Split(text, "\n")
+	for index := 0; index+1 < len(lines); index++ {
+		if strings.Contains(lines[index], "|") && strings.Contains(lines[index+1], "---") {
+			return true
+		}
+	}
+	return false
 }
 
 func providerUploadFilename(filename, contentType string) string {

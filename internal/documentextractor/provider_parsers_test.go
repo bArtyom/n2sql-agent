@@ -86,3 +86,46 @@ func TestPaddleOCRVLParserEngineUsesLayoutParsingProtocol(t *testing.T) {
 		t.Fatalf("PaddleOCR-VL result = %#v", result)
 	}
 }
+
+func TestPaddleOCRVLParserAnalyzesPage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/layout-parsing" || r.Method != http.MethodPost {
+			t.Fatalf("unexpected PaddleOCR-VL request: %s %s", r.Method, r.URL.Path)
+		}
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode PaddleOCR-VL request: %v", err)
+		}
+		if request["fileType"] != float64(1) || request["useLayoutDetection"] != true || request["restructurePages"] != true {
+			t.Fatalf("PaddleOCR-VL page payload = %#v", request)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"errorCode": 0,
+			"result": map[string]any{"layoutParsingResults": []any{
+				map[string]any{"markdown": map[string]any{
+					"text":   "| Name | Value |\n| --- | --- |\n| Agent | RAG |",
+					"images": map[string]string{"figure.png": base64.StdEncoding.EncodeToString([]byte("png"))},
+				}},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	engine, err := NewPaddleOCRVLParserEngine(server.URL, []string{"127.0.0.1"}, server.Client())
+	if err != nil {
+		t.Fatalf("new PaddleOCR-VL engine: %v", err)
+	}
+	blocks, err := engine.AnalyzePage(context.Background(), PDFPage{Number: 5, Image: []byte("page")})
+	if err != nil {
+		t.Fatalf("AnalyzePage() error = %v", err)
+	}
+	if len(blocks) != 2 {
+		t.Fatalf("blocks = %#v, want table and figure", blocks)
+	}
+	if blocks[0].Page != 5 || blocks[0].Kind != PDFBlockTable || !strings.Contains(blocks[0].Text, "Agent") {
+		t.Fatalf("text block = %#v", blocks[0])
+	}
+	if blocks[1].Page != 5 || blocks[1].Kind != PDFBlockFigure || string(blocks[1].Image) != "png" || blocks[1].MIMEType != "image/png" {
+		t.Fatalf("figure block = %#v", blocks[1])
+	}
+}
