@@ -81,6 +81,22 @@ func main() {
 		parserExtras = append(parserExtras, remoteParser)
 		log.Printf("remote document parser enabled: engine=%s endpoint=%s", cfg.DocumentParserRemoteEngine, cfg.DocumentParserRemoteURL)
 	}
+	if cfg.DocumentParserMinerUURL != "" {
+		mineruParser, parserErr := documentextractor.NewMinerUParserEngine(cfg.DocumentParserMinerUURL, cfg.DocumentParserAllowedHosts, &http.Client{Timeout: cfg.DocumentParserRemoteTimeout})
+		if parserErr != nil {
+			log.Fatalf("configure MinerU parser: %v", parserErr)
+		}
+		parserExtras = append(parserExtras, mineruParser)
+		log.Printf("MinerU parser enabled: endpoint=%s", cfg.DocumentParserMinerUURL)
+	}
+	if cfg.DocumentParserPaddleURL != "" {
+		paddleParser, parserErr := documentextractor.NewPaddleOCRVLParserEngine(cfg.DocumentParserPaddleURL, cfg.DocumentParserAllowedHosts, &http.Client{Timeout: cfg.DocumentParserRemoteTimeout})
+		if parserErr != nil {
+			log.Fatalf("configure PaddleOCR-VL parser: %v", parserErr)
+		}
+		parserExtras = append(parserExtras, paddleParser)
+		log.Printf("PaddleOCR-VL parser enabled: endpoint=%s", cfg.DocumentParserPaddleURL)
+	}
 	extractor := documentextractor.NewWithOCRAndImagesAndParser(cfg.UploadDir, nil, nil, cfg.DocumentParserEngine, parserExtras...)
 	if cfg.OCRModel != "" {
 		ocrService := modelruntime.NewOCRService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv, cfg.OCRModel, cfg.OCRPrompt)
