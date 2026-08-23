@@ -37,7 +37,8 @@ func NewAgentRunChildren(reader agentrun.Reader) http.Handler {
 			http.Error(w, `{"error":"agent run children are unavailable"}`, http.StatusNotImplemented)
 			return
 		}
-		node, err := buildAgentRunTree(r.Context(), childReader, parent, 0)
+		attemptReader, _ := reader.(agentrun.AttemptReader)
+		node, err := buildAgentRunTree(r.Context(), childReader, attemptReader, parent, 0)
 		if err != nil {
 			http.Error(w, `{"error":"unable to load agent run children"}`, http.StatusInternalServerError)
 			return
@@ -48,28 +49,36 @@ func NewAgentRunChildren(reader agentrun.Reader) http.Handler {
 }
 
 type agentRunTreeNode struct {
-	RunID        string             `json:"run_id"`
-	ParentRunID  string             `json:"parent_run_id,omitempty"`
-	RunKind      agentrun.Kind      `json:"run_kind"`
-	Status       agentrun.Status    `json:"status"`
-	AttemptCount int                `json:"attempt_count"`
-	Error        string             `json:"error,omitempty"`
-	StopReason   string             `json:"stop_reason,omitempty"`
-	CreatedAt    interface{}        `json:"created_at"`
-	StartedAt    interface{}        `json:"started_at,omitempty"`
-	FinishedAt   interface{}        `json:"finished_at,omitempty"`
-	UpdatedAt    interface{}        `json:"updated_at"`
-	Response     any                `json:"response,omitempty"`
-	Children     []agentRunTreeNode `json:"children,omitempty"`
+	RunID        string                `json:"run_id"`
+	ParentRunID  string                `json:"parent_run_id,omitempty"`
+	RunKind      agentrun.Kind         `json:"run_kind"`
+	Status       agentrun.Status       `json:"status"`
+	AttemptCount int                   `json:"attempt_count"`
+	Error        string                `json:"error,omitempty"`
+	StopReason   string                `json:"stop_reason,omitempty"`
+	CreatedAt    interface{}           `json:"created_at"`
+	StartedAt    interface{}           `json:"started_at,omitempty"`
+	FinishedAt   interface{}           `json:"finished_at,omitempty"`
+	UpdatedAt    interface{}           `json:"updated_at"`
+	Response     any                   `json:"response,omitempty"`
+	Attempts     []safeAgentRunAttempt `json:"attempts,omitempty"`
+	Children     []agentRunTreeNode    `json:"children,omitempty"`
 }
 
-func buildAgentRunTree(ctx context.Context, reader agentrun.ChildReader, run agentrun.Run, depth int) (agentRunTreeNode, error) {
+func buildAgentRunTree(ctx context.Context, reader agentrun.ChildReader, attemptReader agentrun.AttemptReader, run agentrun.Run, depth int) (agentRunTreeNode, error) {
 	node := agentRunTreeNode{
 		RunID: run.RunID, RunKind: run.RunKind, Status: run.Status, AttemptCount: run.AttemptCount,
 		Error: run.ErrorMessage, StopReason: run.StopReason, CreatedAt: run.CreatedAt, StartedAt: run.StartedAt, FinishedAt: run.FinishedAt, UpdatedAt: run.UpdatedAt,
 	}
 	if len(run.Response) > 0 {
 		_ = json.Unmarshal(run.Response, &node.Response)
+	}
+	if attemptReader != nil {
+		attempts, err := attemptReader.ListAttempts(ctx, run.ID)
+		if err != nil {
+			return agentRunTreeNode{}, err
+		}
+		node.Attempts = safeAgentRunAttempts(attempts)
 	}
 	if depth >= 8 {
 		return node, nil
@@ -80,7 +89,7 @@ func buildAgentRunTree(ctx context.Context, reader agentrun.ChildReader, run age
 	}
 	node.Children = make([]agentRunTreeNode, 0, len(children))
 	for _, child := range children {
-		childNode, err := buildAgentRunTree(ctx, reader, child, depth+1)
+		childNode, err := buildAgentRunTree(ctx, reader, attemptReader, child, depth+1)
 		if err != nil {
 			return agentRunTreeNode{}, err
 		}

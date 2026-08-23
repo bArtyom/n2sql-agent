@@ -17,6 +17,7 @@ const (
 	StatusPending         Status = "pending"
 	StatusRunning         Status = "running"
 	StatusWaitingChildren Status = "waiting_children"
+	StatusRequeued        Status = "requeued"
 	StatusSucceeded       Status = "succeeded"
 	StatusFailed          Status = "failed"
 	StatusTimeout         Status = "timeout"
@@ -71,6 +72,21 @@ type Run struct {
 	UpdatedAt       time.Time           `json:"updated_at"`
 	Checkpoints     []ToolCheckpoint    `json:"-"`
 	Decision        *DecisionCheckpoint `json:"-"`
+}
+
+// Attempt is the durable lifecycle record for one Worker claim. It lets the
+// UI explain retries and lease recovery without exposing the request snapshot
+// or transient tool payloads.
+type Attempt struct {
+	ID           int64      `json:"id"`
+	AgentRunID   int64      `json:"agent_run_id"`
+	AttemptCount int        `json:"attempt_count"`
+	Status       Status     `json:"status"`
+	ErrorMessage string     `json:"error_message,omitempty"`
+	StopReason   string     `json:"stop_reason,omitempty"`
+	StartedAt    time.Time  `json:"started_at"`
+	FinishedAt   *time.Time `json:"finished_at,omitempty"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 type CreateInput struct {
@@ -183,6 +199,12 @@ type CancellationStore interface {
 // ChildReader exposes safe parent/child Run metadata for execution trees.
 type ChildReader interface {
 	ListChildren(context.Context, int64, int64) ([]Run, error)
+}
+
+// AttemptReader exposes retry history by internal run ID. The HTTP layer
+// resolves the public run ID and knowledge-base ownership before calling it.
+type AttemptReader interface {
+	ListAttempts(context.Context, int64) ([]Attempt, error)
 }
 
 type ResultWriter interface {
@@ -388,8 +410,13 @@ func (s *PostgresStore) CreateChild(ctx context.Context, input ChildCreateInput)
 	if input.RunID == "" || input.ParentRunID <= 0 || input.KnowledgeBaseID <= 0 || len(input.Request) == 0 || !json.Valid(input.Request) {
 		return Run{}, ErrInvalidRun
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Run{}, fmt.Errorf("begin create child agent run: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
 	var run Run
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO agent_runs (run_id, knowledge_base_id, parent_run_id, run_kind, request, status, attempt_count, started_at, finished_at, response, error_message, updated_at)
 		VALUES ($1, $2, $3, 'child', $4, 'running', 1, CURRENT_TIMESTAMP, NULL, NULL, NULL, CURRENT_TIMESTAMP)
 		ON CONFLICT (run_id) DO UPDATE SET
@@ -413,6 +440,18 @@ func (s *PostgresStore) CreateChild(ctx context.Context, input ChildCreateInput)
 		&run.LeaseUntil, &run.HeartbeatAt, &run.LeaseToken, &run.UpdatedAt)
 	if err != nil {
 		return Run{}, fmt.Errorf("create child agent run: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO agent_run_attempts (agent_run_id, attempt_count, status, started_at, updated_at)
+		VALUES ($1, $2, 'running', $3, $3)
+		ON CONFLICT (agent_run_id, attempt_count)
+		DO UPDATE SET status = 'running', error_message = NULL, stop_reason = NULL,
+		              started_at = EXCLUDED.started_at, finished_at = NULL, updated_at = EXCLUDED.updated_at`,
+		run.ID, run.AttemptCount, run.StartedAt); err != nil {
+		return Run{}, fmt.Errorf("record child agent run attempt: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Run{}, fmt.Errorf("commit create child agent run: %w", err)
 	}
 	return run, nil
 }
@@ -494,19 +533,43 @@ func (s *PostgresStore) markChildFinished(ctx context.Context, id int64, status 
 	if id <= 0 {
 		return ErrInvalidRun
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE agent_runs SET status = $2, error_message = NULLIF($3, ''), finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND run_kind = 'child' AND status = 'running'`, id, status, message)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin mark child agent run %s: %w", status, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var attemptCount int
+	err = tx.QueryRowContext(ctx, `
+		UPDATE agent_runs
+		SET status = $2, error_message = NULLIF($3, ''), finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1 AND run_kind = 'child' AND status = 'running'
+		RETURNING attempt_count`, id, status, message).Scan(&attemptCount)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrRunNotFound
+	}
 	if err != nil {
 		return fmt.Errorf("mark child agent run %s: %w", status, err)
 	}
-	if affected, _ := result.RowsAffected(); affected == 0 {
-		return ErrRunNotFound
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE agent_run_attempts
+		SET status = $2, error_message = NULLIF($3, ''), finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE agent_run_id = $1 AND attempt_count = $4 AND status IN ('running', 'waiting_children')`, id, status, message, attemptCount); err != nil {
+		return fmt.Errorf("update child agent attempt %s: %w", status, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit child agent run %s: %w", status, err)
 	}
 	return nil
 }
 
 func (s *PostgresStore) ClaimNext(ctx context.Context) (Run, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Run{}, fmt.Errorf("begin claim agent run: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
 	var run Run
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		WITH next_run AS (
 			SELECT id FROM agent_runs
 			WHERE status = 'pending'
@@ -534,6 +597,18 @@ func (s *PostgresStore) ClaimNext(ctx context.Context) (Run, error) {
 	}
 	if err != nil {
 		return Run{}, fmt.Errorf("claim agent run: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO agent_run_attempts (agent_run_id, attempt_count, status, started_at, updated_at)
+		VALUES ($1, $2, 'running', $3, $3)
+		ON CONFLICT (agent_run_id, attempt_count)
+		DO UPDATE SET status = 'running', error_message = NULL, stop_reason = NULL,
+		              started_at = EXCLUDED.started_at, finished_at = NULL, updated_at = EXCLUDED.updated_at`,
+		run.ID, run.AttemptCount, run.StartedAt); err != nil {
+		return Run{}, fmt.Errorf("record agent run attempt: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Run{}, fmt.Errorf("commit claim agent run: %w", err)
 	}
 	return run, nil
 }
@@ -571,6 +646,39 @@ func (s *PostgresStore) ListChildren(ctx context.Context, parentRunID, knowledge
 		return nil, fmt.Errorf("iterate child agent runs: %w", err)
 	}
 	return children, nil
+}
+
+func (s *PostgresStore) ListAttempts(ctx context.Context, agentRunID int64) ([]Attempt, error) {
+	if agentRunID <= 0 {
+		return nil, ErrInvalidRun
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, agent_run_id, attempt_count, status,
+		       COALESCE(error_message, ''), COALESCE(stop_reason, ''),
+		       started_at, finished_at, updated_at
+		FROM agent_run_attempts
+		WHERE agent_run_id = $1
+		ORDER BY attempt_count, id`, agentRunID)
+	if err != nil {
+		return nil, fmt.Errorf("list agent run attempts: %w", err)
+	}
+	defer rows.Close()
+	attempts := make([]Attempt, 0)
+	for rows.Next() {
+		var attempt Attempt
+		if err := rows.Scan(
+			&attempt.ID, &attempt.AgentRunID, &attempt.AttemptCount, &attempt.Status,
+			&attempt.ErrorMessage, &attempt.StopReason, &attempt.StartedAt,
+			&attempt.FinishedAt, &attempt.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan agent run attempt: %w", err)
+		}
+		attempts = append(attempts, attempt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate agent run attempts: %w", err)
+	}
+	return attempts, nil
 }
 
 func (s *PostgresStore) SaveResponse(ctx context.Context, id int64, response json.RawMessage) error {
@@ -795,7 +903,12 @@ func truncateCheckpointText(value string, maxBytes int) string {
 }
 
 func (s *PostgresStore) RequeueExpired(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin requeue expired agent runs: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE agent_runs
 		SET status = CASE WHEN attempt_count >= $1 THEN 'failed' ELSE 'pending' END,
 			lease_until = NULL, heartbeat_at = NULL, lease_token = NULL,
@@ -807,9 +920,26 @@ func (s *PostgresStore) RequeueExpired(ctx context.Context) error {
 				ELSE 'worker lease expired' END,
 			finished_at = CASE WHEN attempt_count >= $1 THEN CURRENT_TIMESTAMP ELSE NULL END,
 			updated_at = CURRENT_TIMESTAMP
-		WHERE status = 'running' AND lease_until IS NOT NULL AND lease_until <= CURRENT_TIMESTAMP`, maxAgentRunAttempts)
-	if err != nil {
+		WHERE status = 'running' AND lease_until IS NOT NULL AND lease_until <= CURRENT_TIMESTAMP`, maxAgentRunAttempts); err != nil {
 		return fmt.Errorf("requeue expired agent runs: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE agent_run_attempts AS attempt
+		SET status = CASE WHEN run.status = 'failed' THEN 'failed' ELSE 'requeued' END,
+			error_message = NULLIF(run.error_message, ''),
+			stop_reason = CASE WHEN run.status = 'failed' THEN run.stop_reason ELSE 'orphan_recovered' END,
+			finished_at = CURRENT_TIMESTAMP,
+			updated_at = CURRENT_TIMESTAMP
+		FROM agent_runs AS run
+		WHERE attempt.agent_run_id = run.id
+		  AND attempt.attempt_count = run.attempt_count
+		  AND attempt.status = 'running'
+		  AND run.status IN ('pending', 'failed')
+		  AND run.error_message IN ('worker lease expired', 'worker lease expired: maximum attempts reached')`); err != nil {
+		return fmt.Errorf("record expired agent run attempts: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit requeue expired agent runs: %w", err)
 	}
 	return nil
 }
@@ -865,17 +995,33 @@ func (s *PostgresStore) markFinishedWithReason(ctx context.Context, id int64, le
 	if id <= 0 || leaseToken == "" {
 		return ErrInvalidRun
 	}
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin mark agent run %s: %w", status, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var attemptCount int
+	err = tx.QueryRowContext(ctx, `
 		UPDATE agent_runs
 		SET status = $2, error_message = NULLIF($3, ''), stop_reason = NULLIF($4, ''), finished_at = CURRENT_TIMESTAMP,
 			lease_until = NULL, heartbeat_at = NULL, lease_token = NULL, updated_at = CURRENT_TIMESTAMP
-		WHERE id = $1 AND status = 'running' AND lease_token = $5`, id, status, message, reason, leaseToken)
+		WHERE id = $1 AND status = 'running' AND lease_token = $5
+		RETURNING attempt_count`, id, status, message, reason, leaseToken).Scan(&attemptCount)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("mark agent run %s: no running row", status)
+	}
 	if err != nil {
 		return fmt.Errorf("mark agent run %s: %w", status, err)
 	}
-	affected, err := result.RowsAffected()
-	if err != nil || affected == 0 {
-		return fmt.Errorf("mark agent run %s: no running row", status)
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE agent_run_attempts
+		SET status = $2, error_message = NULLIF($3, ''), stop_reason = NULLIF($4, ''),
+			finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE agent_run_id = $1 AND attempt_count = $5 AND status IN ('running', 'waiting_children')`, id, status, message, reason, attemptCount); err != nil {
+		return fmt.Errorf("update agent run attempt %s: %w", status, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit agent run %s: %w", status, err)
 	}
 	return nil
 }
@@ -884,16 +1030,32 @@ func (s *PostgresStore) MarkWaitingChildren(ctx context.Context, id int64, lease
 	if id <= 0 || strings.TrimSpace(leaseToken) == "" {
 		return ErrInvalidRun
 	}
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin waiting children update: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var attemptCount int
+	err = tx.QueryRowContext(ctx, `
 		UPDATE agent_runs
 		SET status = 'waiting_children', lease_until = NULL, lease_token = NULL,
 			heartbeat_at = NULL, updated_at = CURRENT_TIMESTAMP
-		WHERE id = $1 AND status = 'running' AND lease_token = $2`, id, leaseToken)
+		WHERE id = $1 AND status = 'running' AND lease_token = $2
+		RETURNING attempt_count`, id, leaseToken).Scan(&attemptCount)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrRunNotFound
+		}
 		return fmt.Errorf("mark agent run waiting for children: %w", err)
 	}
-	if affected, _ := result.RowsAffected(); affected == 0 {
-		return ErrRunNotFound
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE agent_run_attempts
+		SET status = 'waiting_children', updated_at = CURRENT_TIMESTAMP
+		WHERE agent_run_id = $1 AND attempt_count = $2 AND status = 'running'`, id, attemptCount); err != nil {
+		return fmt.Errorf("update waiting child attempt: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit waiting children update: %w", err)
 	}
 	return nil
 }

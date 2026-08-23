@@ -201,6 +201,7 @@ func New(dependencies Dependencies) http.Handler {
 			mux.Handle("POST /api/knowledge-bases/{id}/agent-chat/stream", handler.NewKnowledgeBaseAgentChatStreamWithHub(dependencies.AgentStreamingAnswers, dependencies.Conversations, dependencies.AgentMaxHistoryBytes, registry, hub))
 		}
 		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}/stream", handler.NewAgentRunStreamWithStore(hub, dependencies.AgentEventStore))
+		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}/attempts", handler.NewAgentRunAttempts(dependencies.AgentRunReader))
 		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}", handler.NewAgentRunStatus(dependencies.AgentRunReader))
 		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}/children", handler.NewAgentRunChildren(dependencies.AgentRunReader))
 		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}/trace", handler.NewAgentRunTrace(dependencies.AgentEventStore))
