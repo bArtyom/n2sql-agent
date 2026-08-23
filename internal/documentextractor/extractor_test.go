@@ -54,6 +54,24 @@ func TestExtractorReadsTextAndMarkdown(t *testing.T) {
 	}
 }
 
+func TestExtractorReturnsUnifiedParseResult(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "documents"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "documents", "guide.md"), []byte("# Guide\ncontent"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := documentextractor.New(root).ExtractResult(context.Background(), "documents/guide.md", "text/markdown")
+	if err != nil {
+		t.Fatalf("ExtractResult() error = %v", err)
+	}
+	if result.Markdown != "# Guide\ncontent" || result.Metadata["parser"] != "simple" || len(result.Images) != 0 {
+		t.Fatalf("parse result = %#v", result)
+	}
+}
+
 func TestExtractorReadsDOCXHeadingsAndParagraphs(t *testing.T) {
 	root := t.TempDir()
 	directory := filepath.Join(root, "documents")
@@ -377,12 +395,17 @@ func TestExtractorUsesOCRForUploadedImage(t *testing.T) {
 		t.Fatal(err)
 	}
 	processor := &imageProcessorStub{}
-	text, err := documentextractor.NewWithOCRAndImages(root, nil, processor).Extract(context.Background(), "documents/scan.png", "image/png")
+	extractor := documentextractor.NewWithOCRAndImages(root, nil, processor)
+	text, err := extractor.Extract(context.Background(), "documents/scan.png", "image/png")
 	if err != nil {
 		t.Fatalf("Extract image = %v", err)
 	}
 	if text != "OCR image text" || processor.mime != "image/png" {
 		t.Fatalf("Extract image = %q, mime=%q", text, processor.mime)
+	}
+	result, err := extractor.ExtractResult(context.Background(), "documents/scan.png", "image/png")
+	if err != nil || len(result.Images) != 1 || !result.Images[0].Original || result.Metadata["parser"] != "image_ocr" {
+		t.Fatalf("image parse result = %#v, err=%v", result, err)
 	}
 }
 

@@ -38,92 +38,58 @@ type ImageProcessor interface {
 }
 
 type Extractor struct {
-	root       string
-	scannedPDF ScannedPDFProcessor
-	image      ImageProcessor
+	root     string
+	registry *ParserRegistry
 }
 
-func New(root string) *Extractor { return &Extractor{root: root} }
+func New(root string) *Extractor {
+	return &Extractor{root: root, registry: NewDefaultParserRegistry(nil, nil)}
+}
 
 func NewWithOCR(root string, scannedPDF ScannedPDFProcessor) *Extractor {
-	return &Extractor{root: root, scannedPDF: scannedPDF}
+	return &Extractor{root: root, registry: NewDefaultParserRegistry(scannedPDF, nil)}
 }
 
 func NewWithOCRAndImages(root string, scannedPDF ScannedPDFProcessor, image ImageProcessor) *Extractor {
-	return &Extractor{root: root, scannedPDF: scannedPDF, image: image}
+	return &Extractor{root: root, registry: NewDefaultParserRegistry(scannedPDF, image)}
+}
+
+func NewWithParserRegistry(root string, registry *ParserRegistry) *Extractor {
+	return &Extractor{root: root, registry: registry}
 }
 
 func (e *Extractor) Extract(ctx context.Context, storagePath, contentType string) (string, error) {
-	if err := ctx.Err(); err != nil {
+	result, err := e.ExtractResult(ctx, storagePath, contentType)
+	if err != nil {
 		return "", err
 	}
-	if !supportedContentType(contentType) {
-		return "", ErrUnsupportedType
+	return result.Markdown, nil
+}
+
+func (e *Extractor) ExtractResult(ctx context.Context, storagePath, contentType string) (ParseResult, error) {
+	if err := ctx.Err(); err != nil {
+		return ParseResult{}, err
+	}
+	if !supportedContentType(contentType) || e == nil || e.registry == nil {
+		return ParseResult{}, ErrUnsupportedType
 	}
 	normalizedPath := filepath.FromSlash(storagePath)
 	if filepath.IsAbs(normalizedPath) || filepath.Clean(normalizedPath) != normalizedPath || filepath.Dir(normalizedPath) != "documents" {
-		return "", ErrInvalidStoragePath
+		return ParseResult{}, ErrInvalidStoragePath
 	}
 	file, err := os.Open(filepath.Join(e.root, normalizedPath))
 	if err != nil {
-		return "", fmt.Errorf("open document: %w", err)
+		return ParseResult{}, fmt.Errorf("open document: %w", err)
 	}
 	defer file.Close()
 	content, err := io.ReadAll(io.LimitReader(file, maxExtractedTextBytes+1))
 	if err != nil {
-		return "", err
+		return ParseResult{}, err
 	}
 	if int64(len(content)) > maxExtractedTextBytes {
-		return "", fmt.Errorf("extracted text is too large")
+		return ParseResult{}, fmt.Errorf("extracted text is too large")
 	}
-	text := string(content)
-	if strings.HasPrefix(contentType, "image/") {
-		if e.image == nil {
-			return "", ErrEmptyText
-		}
-		text, err = e.image.ExtractImage(ctx, contentType, content)
-		if err != nil {
-			return "", fmt.Errorf("OCR image: %w", err)
-		}
-	} else if contentType == "application/pdf" {
-		text, err = extractPDFText(ctx, content)
-		if err == nil && strings.TrimSpace(text) == "" {
-			err = ErrEmptyText
-		}
-		if errors.Is(err, ErrEmptyText) && e.scannedPDF != nil {
-			text, err = e.scannedPDF.Extract(ctx, content)
-			if err != nil {
-				return "", fmt.Errorf("OCR scanned PDF: %w", err)
-			}
-		}
-		if err != nil {
-			return "", err
-		}
-	} else if contentType == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" {
-		text, err = extractDOCXText(ctx, content)
-		if err != nil {
-			return "", err
-		}
-	} else if contentType == "application/vnd.openxmlformats-officedocument.presentationml.presentation" {
-		text, err = extractPPTXText(ctx, content)
-		if err != nil {
-			return "", err
-		}
-	} else if contentType == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" {
-		text, err = extractXLSXText(ctx, content)
-		if err != nil {
-			return "", err
-		}
-	} else if contentType == "text/html" {
-		text, err = extractHTMLText(ctx, content)
-		if err != nil {
-			return "", err
-		}
-	}
-	if strings.TrimSpace(text) == "" {
-		return "", ErrEmptyText
-	}
-	return text, nil
+	return e.registry.Parse(ctx, ParseRequest{Content: content, ContentType: contentType, Filename: filepath.Base(normalizedPath)})
 }
 
 func supportedContentType(contentType string) bool {
