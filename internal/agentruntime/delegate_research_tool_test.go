@@ -58,6 +58,23 @@ func (delegateSearcherStub) Search(_ context.Context, knowledgeBaseID int64, que
 	return []retrieval.Result{{DocumentID: knowledgeBaseID + 1, OriginalFilename: "员工手册.md", Position: 3, Content: query + "规则"}}, nil
 }
 
+type delegateFolderSearcherStub struct {
+	folderPath string
+	recursive  bool
+}
+
+func (s *delegateFolderSearcherStub) Search(_ context.Context, knowledgeBaseID int64, query string, _ int) ([]retrieval.Result, error) {
+	return []retrieval.Result{{DocumentID: knowledgeBaseID + 1, Position: 3, Content: query}}, nil
+}
+
+func (s *delegateFolderSearcherStub) SearchWithOptions(_ context.Context, _ int64, _ string, _ int, options retrieval.SearchOptions) ([]retrieval.Result, error) {
+	if options.FolderPath != nil {
+		s.folderPath = *options.FolderPath
+	}
+	s.recursive = options.FolderRecursive
+	return []retrieval.Result{{DocumentID: 8, Position: 3, Content: "目录内资料"}}, nil
+}
+
 type childLifecycleStub struct {
 	started  ChildRunSpec
 	finished bool
@@ -167,6 +184,23 @@ func TestDelegateResearchToolRunsScopedReadOnlyChild(t *testing.T) {
 	}
 	if events, ok := result.Metadata["child_events"].([]map[string]any); !ok || len(events) == 0 {
 		t.Fatalf("child events = %#v", result.Metadata["child_events"])
+	}
+}
+
+func TestDelegateResearchToolPropagatesFolderScopeToChildSearch(t *testing.T) {
+	searcher := &delegateFolderSearcherStub{}
+	chat := &delegateChatStub{}
+	tool, err := NewDelegateResearchTool(chat, searcher, 7, 4096, 3, nil, false, retrieval.DefaultKeywordThreshold)
+	if err != nil {
+		t.Fatalf("NewDelegateResearchTool() error = %v", err)
+	}
+	path := "docs/api"
+	tool.SetFolderScope(&path, true)
+	if _, err := tool.Call(context.Background(), json.RawMessage(`{"question":"研究目录内规则"}`)); err != nil {
+		t.Fatalf("Call() error = %v", err)
+	}
+	if searcher.folderPath != "docs/api" || !searcher.recursive {
+		t.Fatalf("child search scope path=%q recursive=%v", searcher.folderPath, searcher.recursive)
 	}
 }
 
