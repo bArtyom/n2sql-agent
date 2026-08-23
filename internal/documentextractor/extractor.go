@@ -94,16 +94,22 @@ func (e *Extractor) Extract(ctx context.Context, storagePath, contentType string
 }
 
 func (e *Extractor) ExtractResult(ctx context.Context, storagePath, contentType string) (ParseResult, error) {
-	return e.extractResult(ctx, storagePath, contentType, e.engineName)
+	return e.extractResult(ctx, storagePath, contentType, e.engineName, nil)
 }
 
 // ExtractResultWithEngine resolves the same source file with an explicit
 // engine selected by the knowledge-base parser rules.
 func (e *Extractor) ExtractResultWithEngine(ctx context.Context, storagePath, contentType, engineName string) (ParseResult, error) {
-	return e.extractResult(ctx, storagePath, contentType, strings.TrimSpace(engineName))
+	return e.extractResult(ctx, storagePath, contentType, strings.TrimSpace(engineName), nil)
 }
 
-func (e *Extractor) extractResult(ctx context.Context, storagePath, contentType, engineName string) (ParseResult, error) {
+// ExtractResultWithEngineOptions resolves a parser and forwards batch-level
+// parser overrides without exposing provider details to the Worker.
+func (e *Extractor) ExtractResultWithEngineOptions(ctx context.Context, storagePath, contentType, engineName string, options map[string]string) (ParseResult, error) {
+	return e.extractResult(ctx, storagePath, contentType, strings.TrimSpace(engineName), options)
+}
+
+func (e *Extractor) extractResult(ctx context.Context, storagePath, contentType, engineName string, options map[string]string) (ParseResult, error) {
 	if err := ctx.Err(); err != nil {
 		return ParseResult{}, err
 	}
@@ -127,10 +133,11 @@ func (e *Extractor) extractResult(ctx context.Context, storagePath, contentType,
 		return ParseResult{}, fmt.Errorf("extracted text is too large")
 	}
 	return e.registry.Parse(ctx, ParseRequest{
-		Content:     content,
-		ContentType: contentType,
-		Filename:    filepath.Base(normalizedPath),
-		EngineName:  engineName,
+		Content:       content,
+		ContentType:   contentType,
+		Filename:      filepath.Base(normalizedPath),
+		EngineName:    engineName,
+		EngineOptions: options,
 	})
 }
 

@@ -71,6 +71,10 @@ type TaskParserExtractor interface {
 	ExtractResultWithEngine(context.Context, string, string, string) (documentextractor.ParseResult, error)
 }
 
+type TaskParserExtractorWithOptions interface {
+	ExtractResultWithEngineOptions(context.Context, string, string, string, map[string]string) (documentextractor.ParseResult, error)
+}
+
 type ParseResultStore interface {
 	SaveParseResult(context.Context, int64, documentextractor.ParseResult) error
 }
@@ -348,6 +352,13 @@ func NewTextExtractionProcessor(extractor TextExtractor) Processor {
 }
 
 func extractDocument(ctx context.Context, extractor TextExtractor, task Task) (string, *documentextractor.ParseResult, error) {
+	if selected, ok := extractor.(TaskParserExtractorWithOptions); ok && (task.ParserEngine != "" || len(task.ProcessConfig.ParserEngineOverrides) > 0) {
+		result, err := selected.ExtractResultWithEngineOptions(ctx, task.StoragePath, task.ContentType, task.ParserEngine, task.ProcessConfig.ParserEngineOverrides)
+		if err != nil {
+			return "", nil, err
+		}
+		return result.Markdown, &result, nil
+	}
 	if selected, ok := extractor.(TaskParserExtractor); ok && task.ParserEngine != "" {
 		result, err := selected.ExtractResultWithEngine(ctx, task.StoragePath, task.ContentType, task.ParserEngine)
 		if err != nil {

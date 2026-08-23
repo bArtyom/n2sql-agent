@@ -89,7 +89,8 @@ func (richExtractorStub) ExtractResult(context.Context, string, string) (documen
 }
 
 type engineRecordingExtractor struct {
-	engine string
+	engine  string
+	options map[string]string
 }
 
 func (s *engineRecordingExtractor) Extract(context.Context, string, string) (string, error) {
@@ -98,6 +99,12 @@ func (s *engineRecordingExtractor) Extract(context.Context, string, string) (str
 
 func (s *engineRecordingExtractor) ExtractResultWithEngine(_ context.Context, _, _, engine string) (documentextractor.ParseResult, error) {
 	s.engine = engine
+	return documentextractor.ParseResult{Markdown: "source text"}, nil
+}
+
+func (s *engineRecordingExtractor) ExtractResultWithEngineOptions(_ context.Context, _, _, engine string, options map[string]string) (documentextractor.ParseResult, error) {
+	s.engine = engine
+	s.options = options
 	return documentextractor.ParseResult{Markdown: "source text"}, nil
 }
 
@@ -214,6 +221,27 @@ func TestEmbeddingChunkingProcessorUsesTaskParserEngineSnapshot(t *testing.T) {
 	}
 	if extractor.engine != "mineru" {
 		t.Fatalf("parser engine = %q, want snapshot engine mineru", extractor.engine)
+	}
+}
+
+func TestEmbeddingChunkingProcessorPassesParserOverridesToExtractor(t *testing.T) {
+	extractor := &engineRecordingExtractor{}
+	processor := worker.NewEmbeddingChunkingProcessor(
+		extractor,
+		fixedSplitter{chunks: []string{"chunk"}},
+		&chunkStoreStub{},
+		matchingEmbedderStub{},
+	)
+	if err := processor(context.Background(), worker.Task{
+		DocumentID: 4,
+		ProcessConfig: documentextractor.ProcessConfig{ParserEngineOverrides: map[string]string{
+			"pdf_force_scanned": "true",
+		}},
+	}); err != nil {
+		t.Fatalf("processor error = %v", err)
+	}
+	if extractor.options["pdf_force_scanned"] != "true" {
+		t.Fatalf("parser options = %#v", extractor.options)
 	}
 }
 

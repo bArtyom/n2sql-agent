@@ -21,6 +21,15 @@ func (scannedPDFProcessorStub) Extract(context.Context, []byte) (string, error) 
 	return "OCR scanned page", nil
 }
 
+type forcedScannedPDFProcessor struct {
+	calls int
+}
+
+func (s *forcedScannedPDFProcessor) Extract(context.Context, []byte) (string, error) {
+	s.calls++
+	return "forced OCR text", nil
+}
+
 type imageProcessorStub struct {
 	mime string
 }
@@ -65,6 +74,23 @@ func TestExtractorReadsTextAndMarkdown(t *testing.T) {
 		if err != nil || text != testCase.want {
 			t.Fatalf("Extract(%s) = %q, %v", testCase.path, text, err)
 		}
+	}
+}
+
+func TestPDFParserHonorsForceScannedOverride(t *testing.T) {
+	processor := &forcedScannedPDFProcessor{}
+	registry := documentextractor.NewDefaultParserRegistry(processor, nil)
+	result, err := registry.Parse(context.Background(), documentextractor.ParseRequest{
+		Content:       []byte("not a PDF but OCR should be forced"),
+		ContentType:   "application/pdf",
+		Filename:      "scan.pdf",
+		EngineOptions: map[string]string{"pdf_force_scanned": "true"},
+	})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if result.Markdown != "forced OCR text" || processor.calls != 1 || result.Metadata["parser_mode"] != "ocr" {
+		t.Fatalf("result=%#v calls=%d, want forced OCR", result, processor.calls)
 	}
 }
 

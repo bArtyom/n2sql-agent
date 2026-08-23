@@ -18,9 +18,19 @@ func TestValidateProcessConfigAllowsParserOverrides(t *testing.T) {
 			ParentChunkSize: 1800,
 			ChildChunkSize:  600,
 		},
+		ParserEngineOverrides: map[string]string{"pdf_force_scanned": "true"},
 	}
 	if err := documentextractor.ValidateProcessConfig(config); err != nil {
 		t.Fatalf("ValidateProcessConfig() error = %v", err)
+	}
+}
+
+func TestValidateProcessConfigRejectsInvalidParserOverride(t *testing.T) {
+	config := &documentextractor.ProcessConfig{ParserEngineOverrides: map[string]string{
+		"pdf_force_scanned": "not-a-bool",
+	}}
+	if err := documentextractor.ValidateProcessConfig(config); err == nil {
+		t.Fatal("ValidateProcessConfig() error = nil, want invalid parser override")
 	}
 }
 

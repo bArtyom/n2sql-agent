@@ -9,6 +9,7 @@ import (
 	"io"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -16,10 +17,11 @@ const maxEmbeddedImageBytes int64 = 5 << 20
 
 // ParseRequest is the parser-independent input passed to one document engine.
 type ParseRequest struct {
-	Content     []byte
-	ContentType string
-	Filename    string
-	EngineName  string
+	Content       []byte
+	ContentType   string
+	Filename      string
+	EngineName    string
+	EngineOptions map[string]string
 }
 
 // ParserEngineRule maps one or more file types to a parser engine. File types
@@ -35,8 +37,9 @@ type ParserEngineRule struct {
 // separate from the knowledge-base defaults so a queued task can keep the
 // exact configuration selected when the upload was accepted.
 type ProcessConfig struct {
-	ParserEngineRules []ParserEngineRule `json:"parser_engine_rules,omitempty"`
-	ChunkingConfig    *ChunkingConfig    `json:"chunking_config,omitempty"`
+	ParserEngineRules     []ParserEngineRule `json:"parser_engine_rules,omitempty"`
+	ChunkingConfig        *ChunkingConfig    `json:"chunking_config,omitempty"`
+	ParserEngineOverrides map[string]string  `json:"parser_engine_overrides,omitempty"`
 }
 
 // ChunkingConfig mirrors the batch-level fields used by WeKnora while keeping
@@ -55,6 +58,7 @@ const (
 	maxProcessConfigRules     = 32
 	maxProcessConfigFileTypes = 32
 	maxProcessConfigValueSize = 100
+	maxProcessConfigOverrides = 32
 	minChunkTarget            = 32
 	maxChunkTarget            = 100000
 	defaultParentChunkSize    = 3000
@@ -70,6 +74,19 @@ func ValidateProcessConfig(config *ProcessConfig) error {
 	}
 	if len(config.ParserEngineRules) > maxProcessConfigRules {
 		return fmt.Errorf("too many parser engine rules")
+	}
+	if len(config.ParserEngineOverrides) > maxProcessConfigOverrides {
+		return fmt.Errorf("too many parser engine overrides")
+	}
+	for key, value := range config.ParserEngineOverrides {
+		if strings.TrimSpace(key) == "" || len(key) > maxProcessConfigValueSize || len(value) > 512 {
+			return fmt.Errorf("invalid parser engine override")
+		}
+		if key == "pdf_force_scanned" {
+			if _, err := strconv.ParseBool(strings.TrimSpace(value)); err != nil {
+				return fmt.Errorf("pdf_force_scanned must be boolean")
+			}
+		}
 	}
 	for _, rule := range config.ParserEngineRules {
 		if strings.TrimSpace(rule.Engine) == "" {
@@ -426,6 +443,20 @@ func (*pdfParserEngine) Available() (bool, string) { return true, "" }
 func (*pdfParserEngine) Supports(contentType string) bool { return contentType == "application/pdf" }
 
 func (e *pdfParserEngine) Parse(ctx context.Context, request ParseRequest) (ParseResult, error) {
+	if forceScanned(request.EngineOptions) {
+		if e.scannedPDF == nil {
+			return ParseResult{}, ErrEmptyText
+		}
+		text, err := e.scannedPDF.Extract(ctx, request.Content)
+		if err != nil {
+			return ParseResult{}, fmt.Errorf("forced OCR scanned PDF: %w", err)
+		}
+		return ParseResult{Markdown: text, Metadata: map[string]string{
+			"parser_mode":       "ocr",
+			"image_source_type": "scanned_pdf",
+			"ocr_forced":        "true",
+		}}, nil
+	}
 	if pageProcessor, ok := e.scannedPDF.(PageAwareScannedPDFProcessor); ok {
 		pages, pageErr := pageProcessor.ExtractPages(ctx, request.Content)
 		if pageErr != nil {
@@ -463,6 +494,14 @@ func (e *pdfParserEngine) Parse(ctx context.Context, request ParseRequest) (Pars
 		return ParseResult{}, err
 	}
 	return ParseResult{Markdown: text, Metadata: map[string]string{"parser_mode": "text"}}, nil
+}
+
+func forceScanned(options map[string]string) bool {
+	if options == nil {
+		return false
+	}
+	value, err := strconv.ParseBool(strings.TrimSpace(options["pdf_force_scanned"]))
+	return err == nil && value
 }
 
 type imageParserEngine struct{ processor ImageProcessor }
