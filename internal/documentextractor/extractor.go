@@ -67,9 +67,16 @@ func NewWithOCRAndImages(root string, scannedPDF ScannedPDFProcessor, image Imag
 }
 
 func NewWithOCRAndImagesAndParser(root string, scannedPDF ScannedPDFProcessor, image ImageProcessor, engineName string, extras ...ParserEngine) *Extractor {
+	return NewWithOCRAndImagesAndParserWithPDFDependencies(root, scannedPDF, image, engineName, PDFParserDependencies{ScannedPDF: scannedPDF}, extras...)
+}
+
+func NewWithOCRAndImagesAndParserWithPDFDependencies(root string, scannedPDF ScannedPDFProcessor, image ImageProcessor, engineName string, pdfDeps PDFParserDependencies, extras ...ParserEngine) *Extractor {
+	if pdfDeps.ScannedPDF == nil {
+		pdfDeps.ScannedPDF = scannedPDF
+	}
 	return &Extractor{
 		root:       root,
-		registry:   NewDefaultParserRegistryWithExtras(scannedPDF, image, extras...),
+		registry:   NewDefaultParserRegistryWithPDFDependencies(pdfDeps, image, extras...),
 		engineName: strings.TrimSpace(engineName),
 	}
 }

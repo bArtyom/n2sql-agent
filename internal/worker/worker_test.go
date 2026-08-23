@@ -158,6 +158,39 @@ func (imageEnricherStub) EnrichImage(context.Context, documentextractor.ImageAss
 	return documentextractor.ImageEnrichment{Caption: "一张展示部署流程的流程图"}, nil
 }
 
+type pdfParseResultExtractorStub struct{}
+
+func (pdfParseResultExtractorStub) Extract(context.Context, string, string) (string, error) {
+	return "[Page 1]\n扫描页正文", nil
+}
+
+func (pdfParseResultExtractorStub) ExtractResult(context.Context, string, string) (documentextractor.ParseResult, error) {
+	return documentextractor.ParseResult{
+		Markdown: "[Page 1]\n扫描页正文",
+		Images: []documentextractor.ImageAsset{{
+			Filename: "page-1-figure-1.png",
+			MIMEType: "image/png",
+			Data:     []byte("figure"),
+			Page:     1,
+			Source:   "paddleocr_vl",
+		}},
+		Metadata: map[string]string{
+			"parser":       "pdf",
+			"parser_mode":  "layout",
+			"figure_count": "1",
+		},
+	}, nil
+}
+
+type imageOCRAndCaptionEnricherStub struct{}
+
+func (imageOCRAndCaptionEnricherStub) EnrichImage(context.Context, documentextractor.ImageAsset) (documentextractor.ImageEnrichment, error) {
+	return documentextractor.ImageEnrichment{
+		OCRText: "图中标注：Worker",
+		Caption: "一张展示 Worker 调度流程的架构图",
+	}, nil
+}
+
 func (s *chunkStoreStub) Replace(_ context.Context, _ int64, chunks []string, embeddings [][]float32) error {
 	s.chunks, s.embeddings = chunks, embeddings
 	return nil
@@ -385,6 +418,36 @@ func TestEmbeddingHierarchicalProcessorIndexesImageOCRAndCaptionChunks(t *testin
 	}
 	if len(chunks.imageVectors) != 1 || len(chunks.imageVectors[0]) == 0 {
 		t.Fatalf("image vectors = %#v", chunks.imageVectors)
+	}
+}
+
+func TestEmbeddingHierarchicalProcessorIndexesPDFLayoutFigureAsImageSubChunks(t *testing.T) {
+	chunks := &hierarchicalChunkStoreStub{}
+	assets := &parseResultStoreStub{}
+	processor := worker.NewEmbeddingHierarchicalChunkingProcessorWithImageEnricher(
+		pdfParseResultExtractorStub{},
+		fixedSplitter{chunks: []string{"parent"}},
+		fixedSplitter{chunks: []string{"child"}},
+		chunks,
+		matchingEmbedderStub{},
+		assets,
+		imageOCRAndCaptionEnricherStub{},
+	)
+
+	if err := processor(context.Background(), worker.Task{DocumentID: 12, OriginalFilename: "scan.pdf"}); err != nil {
+		t.Fatalf("processor error = %v", err)
+	}
+	if len(chunks.imageChunks) != 2 {
+		t.Fatalf("image chunks = %#v, want OCR and caption chunks", chunks.imageChunks)
+	}
+	if chunks.imageChunks[0].Kind != documentchunk.ChunkKindImageOCR || chunks.imageChunks[1].Kind != documentchunk.ChunkKindImageCaption {
+		t.Fatalf("image chunk kinds = %#v", chunks.imageChunks)
+	}
+	if chunks.imageChunks[0].ImageInfo.Page != 1 {
+		t.Fatalf("image references = %#v", chunks.imageChunks)
+	}
+	if assets.documentID != 12 || assets.result.Metadata["parser_mode"] != "layout" {
+		t.Fatalf("saved PDF parse result = %#v", assets)
 	}
 }
 

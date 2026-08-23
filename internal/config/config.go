@@ -17,6 +17,7 @@ const (
 	defaultWorkerPollInterval          = 2 * time.Second
 	defaultOCRPrompt                   = "请只转写图片中清晰可见的文字，保留原有段落和表格结构，不要解释或补充内容。"
 	defaultOCRRendererBinary           = "pdftoppm"
+	defaultPDFImageBinary              = "pdfimages"
 	defaultOCRRenderDPI                = 150
 	defaultOCRMaxPages                 = 20
 	defaultOCRConcurrency              = 1
@@ -55,6 +56,7 @@ type Config struct {
 	OCRPrompt                   string
 	ImageCaptionPrompt          string
 	OCRRendererBinary           string
+	PDFImageBinary              string
 	OCRTextRendererBinary       string
 	OCRRenderDPI                int
 	OCRMaxPages                 int
@@ -120,6 +122,7 @@ func Load() Config {
 		OCRPrompt:                   valueOrDefault("OCR_PROMPT", defaultOCRPrompt),
 		ImageCaptionPrompt:          strings.TrimSpace(os.Getenv("IMAGE_CAPTION_PROMPT")),
 		OCRRendererBinary:           valueOrDefault("OCR_RENDERER_BIN", defaultOCRRendererBinary),
+		PDFImageBinary:              valueOrDefault("PDF_IMAGE_BIN", defaultPDFImageBinary),
 		OCRTextRendererBinary:       valueOrDefault("OCR_TEXT_BIN", "pdftotext"),
 		OCRRenderDPI:                positiveIntEnv("OCR_RENDER_DPI", defaultOCRRenderDPI),
 		OCRMaxPages:                 positiveIntEnv("OCR_MAX_PAGES", defaultOCRMaxPages),

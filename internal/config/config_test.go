@@ -35,6 +35,7 @@ func TestLoadReadsOCRSettings(t *testing.T) {
 	t.Setenv("OCR_MODEL", "vision-model")
 	t.Setenv("OCR_PROMPT", "read the page")
 	t.Setenv("OCR_RENDERER_BIN", "/usr/local/bin/pdftoppm")
+	t.Setenv("PDF_IMAGE_BIN", "/usr/local/bin/pdfimages")
 	t.Setenv("OCR_RENDER_DPI", "180")
 	t.Setenv("OCR_MAX_PAGES", "7")
 	t.Setenv("OCR_CONCURRENCY", "3")
@@ -43,7 +44,7 @@ func TestLoadReadsOCRSettings(t *testing.T) {
 	if cfg.OCRModel != "vision-model" || cfg.OCRPrompt != "read the page" {
 		t.Fatalf("OCR model/prompt = %q/%q", cfg.OCRModel, cfg.OCRPrompt)
 	}
-	if cfg.OCRRendererBinary != "/usr/local/bin/pdftoppm" || cfg.OCRRenderDPI != 180 || cfg.OCRMaxPages != 7 || cfg.OCRConcurrency != 3 {
+	if cfg.OCRRendererBinary != "/usr/local/bin/pdftoppm" || cfg.PDFImageBinary != "/usr/local/bin/pdfimages" || cfg.OCRRenderDPI != 180 || cfg.OCRMaxPages != 7 || cfg.OCRConcurrency != 3 {
 		t.Fatalf("OCR settings = %#v", cfg)
 	}
 }

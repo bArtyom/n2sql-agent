@@ -106,17 +106,34 @@ func main() {
 		parserExtras = append(parserExtras, cloudParser)
 		log.Printf("WeKnora Cloud parser enabled: endpoint=%s", cfg.WeKnoraCloudParserURL)
 	}
-	extractor := documentextractor.NewWithOCRAndImagesAndParser(cfg.UploadDir, nil, nil, cfg.DocumentParserEngine, parserExtras...)
+	var pdfDeps documentextractor.PDFParserDependencies
+	pdfImages := documentocr.NewPDFImageExtractor(cfg.PDFImageBinary)
+	if pdfImages.Available() {
+		pdfDeps.EmbeddedImages = pdfImages
+		log.Printf("embedded PDF image extraction enabled: binary=%s", cfg.PDFImageBinary)
+	}
+	var scannedPDF *documentocr.Service
+	var imageProcessor documentextractor.ImageProcessor
 	var imageEnricher worker.ImageEnricher
-	if cfg.OCRModel != "" {
-		ocrService := modelruntime.NewOCRService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv, cfg.OCRModel, cfg.OCRPrompt)
-		imageEnricher = modelruntime.NewImageEnricherService(ocrService, cfg.ImageCaptionPrompt)
+	if cfg.OCRModel != "" || cfg.DocumentParserPaddleURL != "" || pdfDeps.EmbeddedImages != nil {
+		var ocrProvider documentocr.Provider
+		var ocrService *modelruntime.OCRService
+		if cfg.OCRModel != "" {
+			ocrService = modelruntime.NewOCRService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv, cfg.OCRModel, cfg.OCRPrompt)
+			ocrProvider = ocrService
+			imageEnricher = modelruntime.NewImageEnricherService(ocrService, cfg.ImageCaptionPrompt)
+		}
 		pageRenderer := documentocr.NewPDFToImageRenderer(cfg.OCRRendererBinary, cfg.OCRRenderDPI, cfg.OCRMaxPages)
 		pageText := documentocr.NewPDFToTextPageExtractor(cfg.OCRTextRendererBinary)
-		scannedPDF := documentocr.NewServiceWithPageText(pageRenderer, ocrService, pageText, cfg.OCRMaxPages, cfg.OCRConcurrency)
-		extractor = documentextractor.NewWithOCRAndImagesAndParser(cfg.UploadDir, scannedPDF, scannedPDF, cfg.DocumentParserEngine, parserExtras...)
-		log.Printf("scanned PDF OCR enabled: model=%s renderer=%s max_pages=%d concurrency=%d", cfg.OCRModel, cfg.OCRRendererBinary, cfg.OCRMaxPages, cfg.OCRConcurrency)
+		pageCounter := documentocr.NewPDFInfoPageCounter("")
+		scannedPDF = documentocr.NewServiceWithPageTextAndCounter(pageRenderer, ocrProvider, pageText, pageCounter, cfg.OCRMaxPages, cfg.OCRConcurrency)
+		pdfDeps.ScannedPDF = scannedPDF
+		imageProcessor = scannedPDF
+		if cfg.OCRModel != "" {
+			log.Printf("scanned PDF OCR enabled: model=%s renderer=%s max_pages=%d concurrency=%d", cfg.OCRModel, cfg.OCRRendererBinary, cfg.OCRMaxPages, cfg.OCRConcurrency)
+		}
 	}
+	extractor := documentextractor.NewWithOCRAndImagesAndParserWithPDFDependencies(cfg.UploadDir, scannedPDF, imageProcessor, cfg.DocumentParserEngine, pdfDeps, parserExtras...)
 	metricsRegistry := metrics.New()
 	agentStreamHub := agentstream.NewHub()
 	checkpointFiles, err := agentrun.NewToolResultFileStore(cfg.AgentCheckpointDir, cfg.AgentCheckpointFileTTL)
