@@ -66,13 +66,13 @@ func main() {
 	rerankService := modelruntime.NewRerankService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
 	queryRewriteService := modelruntime.NewQueryRewriteService(chatService)
 	followUpService := followup.NewModelService(chatService, cfg.AgentTimeout)
-	extractor := documentextractor.New(cfg.UploadDir)
+	extractor := documentextractor.NewWithOCRAndImagesAndParser(cfg.UploadDir, nil, nil, cfg.DocumentParserEngine)
 	if cfg.OCRModel != "" {
 		ocrService := modelruntime.NewOCRService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv, cfg.OCRModel, cfg.OCRPrompt)
 		pageRenderer := documentocr.NewPDFToImageRenderer(cfg.OCRRendererBinary, cfg.OCRRenderDPI, cfg.OCRMaxPages)
 		pageText := documentocr.NewPDFToTextPageExtractor(cfg.OCRTextRendererBinary)
 		scannedPDF := documentocr.NewServiceWithPageText(pageRenderer, ocrService, pageText, cfg.OCRMaxPages, cfg.OCRConcurrency)
-		extractor = documentextractor.NewWithOCRAndImages(cfg.UploadDir, scannedPDF, scannedPDF)
+		extractor = documentextractor.NewWithOCRAndImagesAndParser(cfg.UploadDir, scannedPDF, scannedPDF, cfg.DocumentParserEngine)
 		log.Printf("scanned PDF OCR enabled: model=%s renderer=%s max_pages=%d concurrency=%d", cfg.OCRModel, cfg.OCRRendererBinary, cfg.OCRMaxPages, cfg.OCRConcurrency)
 	}
 	metricsRegistry := metrics.New()

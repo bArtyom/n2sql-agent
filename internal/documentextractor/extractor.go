@@ -49,8 +49,9 @@ type PageAwareScannedPDFProcessor interface {
 }
 
 type Extractor struct {
-	root     string
-	registry *ParserRegistry
+	root       string
+	registry   *ParserRegistry
+	engineName string
 }
 
 func New(root string) *Extractor {
@@ -63,6 +64,14 @@ func NewWithOCR(root string, scannedPDF ScannedPDFProcessor) *Extractor {
 
 func NewWithOCRAndImages(root string, scannedPDF ScannedPDFProcessor, image ImageProcessor) *Extractor {
 	return &Extractor{root: root, registry: NewDefaultParserRegistry(scannedPDF, image)}
+}
+
+func NewWithOCRAndImagesAndParser(root string, scannedPDF ScannedPDFProcessor, image ImageProcessor, engineName string) *Extractor {
+	return &Extractor{
+		root:       root,
+		registry:   NewDefaultParserRegistry(scannedPDF, image),
+		engineName: strings.TrimSpace(engineName),
+	}
 }
 
 func NewWithParserRegistry(root string, registry *ParserRegistry) *Extractor {
@@ -100,7 +109,12 @@ func (e *Extractor) ExtractResult(ctx context.Context, storagePath, contentType 
 	if int64(len(content)) > maxExtractedTextBytes {
 		return ParseResult{}, fmt.Errorf("extracted text is too large")
 	}
-	return e.registry.Parse(ctx, ParseRequest{Content: content, ContentType: contentType, Filename: filepath.Base(normalizedPath)})
+	return e.registry.Parse(ctx, ParseRequest{
+		Content:     content,
+		ContentType: contentType,
+		Filename:    filepath.Base(normalizedPath),
+		EngineName:  e.engineName,
+	})
 }
 
 func supportedContentType(contentType string) bool {

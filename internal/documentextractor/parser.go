@@ -19,6 +19,7 @@ type ParseRequest struct {
 	Content     []byte
 	ContentType string
 	Filename    string
+	EngineName  string
 }
 
 // ImageAsset describes an image discovered during parsing. Data is kept in
@@ -57,11 +58,23 @@ func NewParserRegistry(engines ...ParserEngine) *ParserRegistry {
 }
 
 func (r *ParserRegistry) Select(contentType string) (ParserEngine, error) {
+	return r.SelectNamed("", contentType)
+}
+
+// SelectNamed selects a parser by name when requested. An empty name keeps
+// the default MIME-based selection behavior.
+func (r *ParserRegistry) SelectNamed(name, contentType string) (ParserEngine, error) {
 	if r == nil {
 		return nil, ErrUnsupportedType
 	}
 	for _, engine := range r.engines {
-		if engine != nil && engine.Supports(contentType) {
+		if engine == nil {
+			continue
+		}
+		if strings.TrimSpace(name) != "" && !strings.EqualFold(engine.Name(), name) {
+			continue
+		}
+		if engine.Supports(contentType) {
 			return engine, nil
 		}
 	}
@@ -69,7 +82,7 @@ func (r *ParserRegistry) Select(contentType string) (ParserEngine, error) {
 }
 
 func (r *ParserRegistry) Parse(ctx context.Context, request ParseRequest) (ParseResult, error) {
-	engine, err := r.Select(request.ContentType)
+	engine, err := r.SelectNamed(request.EngineName, request.ContentType)
 	if err != nil {
 		return ParseResult{}, err
 	}

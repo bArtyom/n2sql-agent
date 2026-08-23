@@ -56,6 +56,7 @@ type Config struct {
 	OCRRenderDPI               int
 	OCRMaxPages                int
 	OCRConcurrency             int
+	DocumentParserEngine       string
 	AgentMaxSteps              int
 	AgentTimeout               time.Duration
 	AgentChildTimeout          time.Duration
@@ -110,6 +111,7 @@ func Load() Config {
 		OCRRenderDPI:               positiveIntEnv("OCR_RENDER_DPI", defaultOCRRenderDPI),
 		OCRMaxPages:                positiveIntEnv("OCR_MAX_PAGES", defaultOCRMaxPages),
 		OCRConcurrency:             positiveIntEnv("OCR_CONCURRENCY", defaultOCRConcurrency),
+		DocumentParserEngine:       strings.TrimSpace(os.Getenv("DOCUMENT_PARSER_ENGINE")),
 		AgentMaxSteps:              positiveIntEnv("AGENT_MAX_STEPS", defaultAgentMaxSteps),
 		AgentTimeout:               time.Duration(positiveIntEnv("AGENT_TIMEOUT_MS", int(defaultAgentTimeout/time.Millisecond))) * time.Millisecond,
 		AgentChildTimeout:          durationEnv("AGENT_CHILD_TIMEOUT", defaultAgentChildTimeout),

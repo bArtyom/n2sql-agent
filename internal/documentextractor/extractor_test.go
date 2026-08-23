@@ -33,6 +33,20 @@ func (s *imageProcessorStub) ExtractImage(_ context.Context, mime string, image 
 	return "OCR image text", nil
 }
 
+type parserEngineStub struct {
+	name        string
+	contentType string
+	markdown    string
+}
+
+func (s parserEngineStub) Name() string { return s.name }
+
+func (s parserEngineStub) Supports(contentType string) bool { return contentType == s.contentType }
+
+func (s parserEngineStub) Parse(context.Context, documentextractor.ParseRequest) (documentextractor.ParseResult, error) {
+	return documentextractor.ParseResult{Markdown: s.markdown}, nil
+}
+
 func TestExtractorReadsTextAndMarkdown(t *testing.T) {
 	root := t.TempDir()
 	directory := filepath.Join(root, "documents")
@@ -69,6 +83,33 @@ func TestExtractorReturnsUnifiedParseResult(t *testing.T) {
 	}
 	if result.Markdown != "# Guide\ncontent" || result.Metadata["parser"] != "simple" || len(result.Images) != 0 {
 		t.Fatalf("parse result = %#v", result)
+	}
+}
+
+func TestParserRegistrySupportsExplicitEngineSelection(t *testing.T) {
+	registry := documentextractor.NewParserRegistry(
+		parserEngineStub{name: "first", contentType: "text/plain", markdown: "first"},
+		parserEngineStub{name: "second", contentType: "text/plain", markdown: "second"},
+	)
+
+	result, err := registry.Parse(context.Background(), documentextractor.ParseRequest{
+		Content:     []byte("hello"),
+		ContentType: "text/plain",
+		EngineName:  "second",
+	})
+	if err != nil {
+		t.Fatalf("parse with explicit engine: %v", err)
+	}
+	if result.Markdown != "second" || result.Metadata["parser"] != "second" {
+		t.Fatalf("unexpected explicit parser result: %#v", result)
+	}
+
+	if _, err := registry.Parse(context.Background(), documentextractor.ParseRequest{
+		Content:     []byte("hello"),
+		ContentType: "text/plain",
+		EngineName:  "missing",
+	}); !errors.Is(err, documentextractor.ErrUnsupportedType) {
+		t.Fatalf("expected unsupported engine error, got %v", err)
 	}
 }
 
