@@ -141,6 +141,32 @@ func (s *Service) RenderPages(ctx context.Context, pdf []byte, pageNumbers []int
 	return filtered, nil
 }
 
+// RenderPDFPages adapts rendered page images to the neutral extractor
+// contract used by the PDF parser.
+func (s *Service) RenderPDFPages(ctx context.Context, pdf []byte, pageNumbers []int) ([]documentextractor.PDFPage, error) {
+	pages, err := s.RenderPages(ctx, pdf, pageNumbers)
+	if err != nil {
+		return nil, err
+	}
+	converted := make([]documentextractor.PDFPage, 0, len(pages))
+	for _, page := range pages {
+		converted = append(converted, documentextractor.PDFPage{Number: page.Number, Image: page.Data})
+	}
+	return converted, nil
+}
+
+// OCRPage recognizes one already-rendered page. It is intentionally separate
+// from ExtractPages so the PDF parser can retry only sparse pages.
+func (s *Service) OCRPage(ctx context.Context, page documentextractor.PDFPage) (string, error) {
+	if s == nil || s.provider == nil || len(page.Image) == 0 {
+		return "", ErrNotConfigured
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return s.provider.Recognize(ctx, page.Image)
+}
+
 func (s *Service) Extract(ctx context.Context, pdf []byte) (string, error) {
 	pages, err := s.ExtractPages(ctx, pdf)
 	if err != nil {

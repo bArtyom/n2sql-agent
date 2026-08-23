@@ -4,7 +4,6 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -320,10 +319,22 @@ func NewDefaultParserRegistry(scannedPDF ScannedPDFProcessor, image ImageProcess
 }
 
 func NewDefaultParserRegistryWithExtras(scannedPDF ScannedPDFProcessor, image ImageProcessor, extras ...ParserEngine) *ParserRegistry {
+	return NewDefaultParserRegistryWithPDFDependencies(PDFParserDependencies{ScannedPDF: scannedPDF}, image, extras...)
+}
+
+func NewDefaultParserRegistryWithPDFDependencies(deps PDFParserDependencies, image ImageProcessor, extras ...ParserEngine) *ParserRegistry {
+	if deps.Layout == nil {
+		for _, extra := range extras {
+			if layout, ok := extra.(PDFLayoutAnalyzer); ok {
+				deps.Layout = layout
+				break
+			}
+		}
+	}
 	engines := []ParserEngine{
 		&simpleParserEngine{},
 		&officeParserEngine{},
-		&pdfParserEngine{scannedPDF: scannedPDF},
+		newPDFParserEngine(deps),
 		&imageParserEngine{processor: image},
 	}
 	engines = append(engines, extras...)
@@ -459,54 +470,6 @@ func imageMIMEType(filename string) string {
 	default:
 		return ""
 	}
-}
-
-type pdfParserEngine struct{ scannedPDF ScannedPDFProcessor }
-
-func (*pdfParserEngine) Name() string { return "pdf" }
-
-func (*pdfParserEngine) Description() string { return "PDF text and scanned-page parser" }
-
-func (*pdfParserEngine) Available() (bool, string) { return true, "" }
-
-func (*pdfParserEngine) Supports(contentType string) bool { return contentType == "application/pdf" }
-
-func (e *pdfParserEngine) Parse(ctx context.Context, request ParseRequest) (ParseResult, error) {
-	if forceScanned(request.EngineOptions) {
-		if e.scannedPDF == nil {
-			return ParseResult{}, ErrEmptyText
-		}
-		text, err := e.scannedPDF.Extract(ctx, request.Content)
-		if err != nil {
-			return ParseResult{}, fmt.Errorf("forced OCR scanned PDF: %w", err)
-		}
-		return ParseResult{Markdown: text, Metadata: map[string]string{
-			"parser_mode":       "ocr",
-			"image_source_type": "scanned_pdf",
-			"ocr_forced":        "true",
-		}}, nil
-	}
-	text, err := extractPDFText(ctx, request.Content)
-	if err == nil && strings.TrimSpace(text) == "" {
-		err = ErrEmptyText
-	}
-	if errors.Is(err, ErrEmptyText) && e.scannedPDF != nil {
-		text, err = e.scannedPDF.Extract(ctx, request.Content)
-		if err != nil {
-			return ParseResult{}, fmt.Errorf("OCR scanned PDF: %w", err)
-		}
-		return ParseResult{Markdown: text, Metadata: map[string]string{
-			"parser_mode":       "ocr",
-			"image_source_type": "scanned_pdf",
-		}}, nil
-	}
-	if err != nil {
-		return ParseResult{}, err
-	}
-	return ParseResult{Markdown: text, Metadata: map[string]string{
-		"parser_mode": "native_pdf",
-		"text_source": "embedded_text",
-	}}, nil
 }
 
 func forceScanned(options map[string]string) bool {

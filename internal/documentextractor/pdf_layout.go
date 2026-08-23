@@ -39,6 +39,14 @@ type PDFPageInspector interface {
 	InspectPages(context.Context, []byte) ([]PDFPage, error)
 }
 
+type PDFPageRenderer interface {
+	RenderPDFPages(context.Context, []byte, []int) ([]PDFPage, error)
+}
+
+type PDFPageOCR interface {
+	OCRPage(context.Context, PDFPage) (string, error)
+}
+
 type PDFEmbeddedImageExtractor interface {
 	ExtractPageImages(context.Context, []byte, int) ([]ImageAsset, error)
 }
