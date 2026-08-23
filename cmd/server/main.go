@@ -70,7 +70,8 @@ func main() {
 	if cfg.OCRModel != "" {
 		ocrService := modelruntime.NewOCRService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv, cfg.OCRModel, cfg.OCRPrompt)
 		pageRenderer := documentocr.NewPDFToImageRenderer(cfg.OCRRendererBinary, cfg.OCRRenderDPI, cfg.OCRMaxPages)
-		scannedPDF := documentocr.NewService(pageRenderer, ocrService, cfg.OCRMaxPages, cfg.OCRConcurrency)
+		pageText := documentocr.NewPDFToTextPageExtractor(cfg.OCRTextRendererBinary)
+		scannedPDF := documentocr.NewServiceWithPageText(pageRenderer, ocrService, pageText, cfg.OCRMaxPages, cfg.OCRConcurrency)
 		extractor = documentextractor.NewWithOCRAndImages(cfg.UploadDir, scannedPDF, scannedPDF)
 		log.Printf("scanned PDF OCR enabled: model=%s renderer=%s max_pages=%d concurrency=%d", cfg.OCRModel, cfg.OCRRendererBinary, cfg.OCRMaxPages, cfg.OCRConcurrency)
 	}

@@ -37,6 +37,17 @@ type ImageProcessor interface {
 	ExtractImage(context.Context, string, []byte) (string, error)
 }
 
+type PDFPage struct {
+	Number int
+	Text   string
+	Image  []byte
+	OCR    bool
+}
+
+type PageAwareScannedPDFProcessor interface {
+	ExtractPages(context.Context, []byte) ([]PDFPage, error)
+}
+
 type Extractor struct {
 	root     string
 	registry *ParserRegistry

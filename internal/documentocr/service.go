@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 )
 
 const (
@@ -32,6 +34,10 @@ type PageRenderer interface {
 	Render(context.Context, []byte) ([]PageImage, error)
 }
 
+type PageTextExtractor interface {
+	ExtractPageText(context.Context, []byte, int) (string, error)
+}
+
 // Provider recognizes one page image as text.
 type Provider interface {
 	Recognize(context.Context, []byte) (string, error)
@@ -41,11 +47,20 @@ type Provider interface {
 type Service struct {
 	renderer    PageRenderer
 	provider    Provider
+	pageText    PageTextExtractor
 	maxPages    int
 	concurrency int
 }
 
 func NewService(renderer PageRenderer, provider Provider, maxPages, concurrency int) *Service {
+	return newService(renderer, provider, nil, maxPages, concurrency)
+}
+
+func NewServiceWithPageText(renderer PageRenderer, provider Provider, pageText PageTextExtractor, maxPages, concurrency int) *Service {
+	return newService(renderer, provider, pageText, maxPages, concurrency)
+}
+
+func newService(renderer PageRenderer, provider Provider, pageText PageTextExtractor, maxPages, concurrency int) *Service {
 	if maxPages <= 0 {
 		maxPages = defaultMaxPages
 	}
@@ -55,25 +70,43 @@ func NewService(renderer PageRenderer, provider Provider, maxPages, concurrency 
 	return &Service{
 		renderer:    renderer,
 		provider:    provider,
+		pageText:    pageText,
 		maxPages:    maxPages,
 		concurrency: concurrency,
 	}
 }
 
 func (s *Service) Extract(ctx context.Context, pdf []byte) (string, error) {
+	pages, err := s.ExtractPages(ctx, pdf)
+	if err != nil {
+		return "", err
+	}
+	blocks := make([]string, 0, len(pages))
+	for _, page := range pages {
+		if strings.TrimSpace(page.Text) != "" {
+			blocks = append(blocks, fmt.Sprintf("[Page %d]\n%s", page.Number, strings.TrimSpace(page.Text)))
+		}
+	}
+	if len(blocks) == 0 {
+		return "", ErrNoText
+	}
+	return strings.Join(blocks, "\n\n"), nil
+}
+
+func (s *Service) ExtractPages(ctx context.Context, pdf []byte) ([]documentextractor.PDFPage, error) {
 	if s == nil || s.renderer == nil || s.provider == nil {
-		return "", ErrNotConfigured
+		return nil, ErrNotConfigured
 	}
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return nil, err
 	}
 
 	pages, err := s.renderer.Render(ctx, pdf)
 	if err != nil {
-		return "", fmt.Errorf("render PDF pages: %w", err)
+		return nil, fmt.Errorf("render PDF pages: %w", err)
 	}
 	if len(pages) == 0 {
-		return "", ErrNoText
+		return nil, ErrNoText
 	}
 	pages = append([]PageImage(nil), pages...)
 	for index := range pages {
@@ -88,7 +121,7 @@ func (s *Service) Extract(ctx context.Context, pdf []byte) (string, error) {
 		pages = pages[:s.maxPages]
 	}
 
-	texts := make([]string, len(pages))
+	results := make([]documentextractor.PDFPage, len(pages))
 	semaphore := make(chan struct{}, s.concurrency)
 	var wait sync.WaitGroup
 	var firstErr error
@@ -96,45 +129,43 @@ func (s *Service) Extract(ctx context.Context, pdf []byte) (string, error) {
 
 	for index, page := range pages {
 		if err := ctx.Err(); err != nil {
-			return "", err
+			return nil, err
 		}
 		select {
 		case semaphore <- struct{}{}:
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return nil, ctx.Err()
 		}
 		wait.Add(1)
 		go func(index int, page PageImage) {
 			defer wait.Done()
 			defer func() { <-semaphore }()
-			text, err := s.provider.Recognize(ctx, page.Data)
-			if err != nil {
-				errMu.Lock()
-				if firstErr == nil {
-					firstErr = fmt.Errorf("OCR page %d: %w", page.Number, err)
-				}
-				errMu.Unlock()
-				return
+			text := ""
+			usedOCR := false
+			if s.pageText != nil {
+				text, _ = s.pageText.ExtractPageText(ctx, pdf, page.Number)
 			}
-			texts[index] = strings.TrimSpace(text)
+			if strings.TrimSpace(text) == "" {
+				var err error
+				text, err = s.provider.Recognize(ctx, page.Data)
+				if err != nil {
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("OCR page %d: %w", page.Number, err)
+					}
+					errMu.Unlock()
+					return
+				}
+				usedOCR = true
+			}
+			results[index] = documentextractor.PDFPage{Number: page.Number, Text: strings.TrimSpace(text), Image: page.Data, OCR: usedOCR}
 		}(index, page)
 	}
 	wait.Wait()
 	if firstErr != nil {
-		return "", firstErr
+		return nil, firstErr
 	}
-
-	blocks := make([]string, 0, len(texts))
-	for index, text := range texts {
-		if text == "" {
-			continue
-		}
-		blocks = append(blocks, fmt.Sprintf("[Page %d]\n%s", pages[index].Number, text))
-	}
-	if len(blocks) == 0 {
-		return "", ErrNoText
-	}
-	return strings.Join(blocks, "\n\n"), nil
+	return results, nil
 }
 
 func (s *Service) ExtractImage(ctx context.Context, mimeType string, image []byte) (string, error) {

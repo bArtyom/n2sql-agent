@@ -223,6 +223,25 @@ func (*pdfParserEngine) Name() string { return "pdf" }
 func (*pdfParserEngine) Supports(contentType string) bool { return contentType == "application/pdf" }
 
 func (e *pdfParserEngine) Parse(ctx context.Context, request ParseRequest) (ParseResult, error) {
+	if pageProcessor, ok := e.scannedPDF.(PageAwareScannedPDFProcessor); ok {
+		pages, pageErr := pageProcessor.ExtractPages(ctx, request.Content)
+		if pageErr != nil {
+			return ParseResult{}, pageErr
+		}
+		blocks := make([]string, 0, len(pages))
+		images := make([]ImageAsset, 0)
+		for _, page := range pages {
+			if strings.TrimSpace(page.Text) != "" {
+				blocks = append(blocks, fmt.Sprintf("[Page %d]\n%s", page.Number, strings.TrimSpace(page.Text)))
+			}
+			if page.OCR && len(page.Image) > 0 {
+				images = append(images, ImageAsset{Filename: fmt.Sprintf("page-%d.jpg", page.Number), MIMEType: "image/jpeg", Data: append([]byte(nil), page.Image...), Page: page.Number, Source: "scanned_pdf"})
+			}
+		}
+		if len(blocks) > 0 {
+			return ParseResult{Markdown: strings.Join(blocks, "\n\n"), Images: images, Metadata: map[string]string{"parser_mode": "mixed_pdf", "image_source_type": "scanned_pdf"}}, nil
+		}
+	}
 	text, err := extractPDFText(ctx, request.Content)
 	if err == nil && strings.TrimSpace(text) == "" {
 		err = ErrEmptyText

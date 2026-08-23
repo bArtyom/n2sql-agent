@@ -52,6 +52,7 @@ type Config struct {
 	OCRModel                   string
 	OCRPrompt                  string
 	OCRRendererBinary          string
+	OCRTextRendererBinary      string
 	OCRRenderDPI               int
 	OCRMaxPages                int
 	OCRConcurrency             int
@@ -105,6 +106,7 @@ func Load() Config {
 		OCRModel:                   strings.TrimSpace(os.Getenv("OCR_MODEL")),
 		OCRPrompt:                  valueOrDefault("OCR_PROMPT", defaultOCRPrompt),
 		OCRRendererBinary:          valueOrDefault("OCR_RENDERER_BIN", defaultOCRRendererBinary),
+		OCRTextRendererBinary:      valueOrDefault("OCR_TEXT_BIN", "pdftotext"),
 		OCRRenderDPI:               positiveIntEnv("OCR_RENDER_DPI", defaultOCRRenderDPI),
 		OCRMaxPages:                positiveIntEnv("OCR_MAX_PAGES", defaultOCRMaxPages),
 		OCRConcurrency:             positiveIntEnv("OCR_CONCURRENCY", defaultOCRConcurrency),

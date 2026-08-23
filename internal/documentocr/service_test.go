@@ -22,6 +22,15 @@ func (recognizerStub) Recognize(_ context.Context, image []byte) (string, error)
 	return string(image), nil
 }
 
+type pageTextStub struct{}
+
+func (pageTextStub) ExtractPageText(_ context.Context, _ []byte, page int) (string, error) {
+	if page == 1 {
+		return "text layer page", nil
+	}
+	return "", nil
+}
+
 func TestServiceRecognizesPagesInDocumentOrder(t *testing.T) {
 	service := documentocr.NewService(rendererStub{pages: []documentocr.PageImage{
 		{Number: 2, Data: []byte("page two")},
@@ -59,5 +68,20 @@ func TestServiceLimitsRenderedPages(t *testing.T) {
 	}
 	if strings.Contains(text, "three") {
 		t.Fatalf("Extract() included page beyond max: %q", text)
+	}
+}
+
+func TestServiceOCRsOnlyPagesWithoutTextLayer(t *testing.T) {
+	service := documentocr.NewServiceWithPageText(rendererStub{pages: []documentocr.PageImage{
+		{Number: 1, Data: []byte("image page one")},
+		{Number: 2, Data: []byte("image page two")},
+	}}, recognizerStub{}, pageTextStub{}, 10, 1)
+
+	pages, err := service.ExtractPages(context.Background(), []byte("pdf"))
+	if err != nil {
+		t.Fatalf("ExtractPages() error = %v", err)
+	}
+	if len(pages) != 2 || pages[0].Text != "text layer page" || pages[0].OCR || pages[1].Text != "image page two" || !pages[1].OCR {
+		t.Fatalf("page extraction = %#v", pages)
 	}
 }
