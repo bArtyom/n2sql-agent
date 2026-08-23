@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
+	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 )
@@ -39,6 +41,10 @@ func (s *OCRService) Recognize(ctx context.Context, image []byte) (string, error
 }
 
 func (s *OCRService) RecognizeWithMIME(ctx context.Context, mimeType string, image []byte) (string, error) {
+	return s.recognizeWithPrompt(ctx, mimeType, image, s.prompt)
+}
+
+func (s *OCRService) recognizeWithPrompt(ctx context.Context, mimeType string, image []byte, prompt string) (string, error) {
 	if s == nil || s.ocrer == nil {
 		return "", ErrOCRModelNotConfigured
 	}
@@ -58,7 +64,7 @@ func (s *OCRService) RecognizeWithMIME(ctx context.Context, mimeType string, ima
 	}
 	response, err := s.ocrer.OCR(ctx, provider.BaseURL, apiKey, modelclient.OCRRequest{
 		Model:    s.model,
-		Prompt:   s.prompt,
+		Prompt:   prompt,
 		MIMEType: mimeType,
 		Image:    image,
 	})
@@ -66,4 +72,39 @@ func (s *OCRService) RecognizeWithMIME(ctx context.Context, mimeType string, ima
 		return "", fmt.Errorf("OCR image: %w", err)
 	}
 	return response.Text, nil
+}
+
+// ImageEnricherService adapts the configured vision model to the worker's
+// optional image-enrichment hook. OCR and caption are intentionally separate
+// outputs so retrieval can match either visible text or visual meaning.
+// Captioning is opt-in; an empty prompt avoids a second model request.
+type ImageEnricherService struct {
+	ocr           *OCRService
+	captionPrompt string
+}
+
+func NewImageEnricherService(ocr *OCRService, captionPrompt string) *ImageEnricherService {
+	return &ImageEnricherService{ocr: ocr, captionPrompt: captionPrompt}
+}
+
+func (s *ImageEnricherService) EnrichImage(ctx context.Context, asset documentextractor.ImageAsset) (documentextractor.ImageEnrichment, error) {
+	if s == nil || s.ocr == nil {
+		return documentextractor.ImageEnrichment{}, ErrOCRModelNotConfigured
+	}
+	result := documentextractor.ImageEnrichment{OCRText: asset.OCRText, Caption: asset.Caption}
+	if result.OCRText == "" {
+		text, err := s.ocr.RecognizeWithMIME(ctx, asset.MIMEType, asset.Data)
+		if err != nil {
+			return documentextractor.ImageEnrichment{}, err
+		}
+		result.OCRText = text
+	}
+	if result.Caption == "" && strings.TrimSpace(s.captionPrompt) != "" {
+		caption, err := s.ocr.recognizeWithPrompt(ctx, asset.MIMEType, asset.Data, s.captionPrompt)
+		if err != nil {
+			return documentextractor.ImageEnrichment{}, fmt.Errorf("caption image: %w", err)
+		}
+		result.Caption = caption
+	}
+	return result, nil
 }

@@ -96,6 +96,17 @@ type ChunkingDiagnosticsStore interface {
 type HierarchicalChunkStore interface {
 	ReplaceHierarchical(context.Context, int64, []documentchunk.ParentChunk, []documentchunk.ChildChunk, [][]float32) error
 }
+
+type ImageChunkStore interface {
+	ReplaceImageChunks(context.Context, int64, []documentchunk.ImageChunk, [][]float32) error
+}
+
+// ImageEnricher is optional. A parser may already provide OCR text; an
+// enricher can add OCR/caption results for embedded images without making the
+// normal document indexing path depend on a vision model being configured.
+type ImageEnricher interface {
+	EnrichImage(context.Context, documentextractor.ImageAsset) (documentextractor.ImageEnrichment, error)
+}
 type Embedder interface {
 	Embed(context.Context, []string) (modelclient.EmbeddingResponse, error)
 }
@@ -165,6 +176,10 @@ func NewEmbeddingHierarchicalChunkingProcessor(extractor TextExtractor, parentSp
 }
 
 func NewEmbeddingHierarchicalChunkingProcessorWithParseResultStore(extractor TextExtractor, parentSplitter, childSplitter TextSplitter, chunks HierarchicalChunkStore, embedder Embedder, parseResultStore ParseResultStore) Processor {
+	return NewEmbeddingHierarchicalChunkingProcessorWithImageEnricher(extractor, parentSplitter, childSplitter, chunks, embedder, parseResultStore, nil)
+}
+
+func NewEmbeddingHierarchicalChunkingProcessorWithImageEnricher(extractor TextExtractor, parentSplitter, childSplitter TextSplitter, chunks HierarchicalChunkStore, embedder Embedder, parseResultStore ParseResultStore, imageEnricher ImageEnricher) Processor {
 	return func(ctx context.Context, task Task) error {
 		text, parsed, err := extractDocument(ctx, extractor, task)
 		if err != nil {
@@ -210,9 +225,79 @@ func NewEmbeddingHierarchicalChunkingProcessorWithParseResultStore(extractor Tex
 		if err := saveParseResult(ctx, parseResultStore, task, parsed); err != nil {
 			return err
 		}
+		if err := indexImageChunks(ctx, chunks, embedder, task, parents, parsed, imageEnricher); err != nil {
+			slog.WarnContext(ctx, "image-derived chunks were not indexed", "document_id", task.DocumentID, "error", err)
+		}
 		saveDiagnostics(ctx, chunks, parentSplitterForTask, task, text)
 		return nil
 	}
+}
+
+func indexImageChunks(ctx context.Context, owner any, embedder Embedder, task Task, parents []documentchunk.ParentChunk, parsed *documentextractor.ParseResult, enricher ImageEnricher) error {
+	store, ok := owner.(ImageChunkStore)
+	if !ok || store == nil || parsed == nil || len(parsed.Images) == 0 {
+		return nil
+	}
+	chunks := make([]documentchunk.ImageChunk, 0, len(parsed.Images)*2)
+	texts := make([]string, 0, cap(chunks))
+	for index, asset := range parsed.Images {
+		if enricher != nil && (strings.TrimSpace(asset.OCRText) == "" || strings.TrimSpace(asset.Caption) == "") {
+			enrichment, err := enricher.EnrichImage(ctx, asset)
+			if err != nil {
+				slog.WarnContext(ctx, "image enrichment failed", "document_id", task.DocumentID, "asset_index", index, "error", err)
+			} else {
+				if strings.TrimSpace(asset.OCRText) == "" {
+					asset.OCRText = enrichment.OCRText
+				}
+				if strings.TrimSpace(asset.Caption) == "" {
+					asset.Caption = enrichment.Caption
+				}
+			}
+		}
+		parentPosition := imageParentPosition(parents, asset.Page)
+		headingPath := parents[parentPosition].HeadingPath
+		info := documentchunk.ImageInfo{AssetIndex: index, Filename: asset.Filename, Page: asset.Page, Source: asset.Source}
+		if content := strings.TrimSpace(asset.OCRText); content != "" {
+			chunks = append(chunks, documentchunk.ImageChunk{Kind: documentchunk.ChunkKindImageOCR, ParentPosition: parentPosition, Content: content, HeadingPath: headingPath, ImageInfo: info})
+			texts = append(texts, imageEmbeddingContent(task.OriginalFilename, headingPath, "图片文字", content))
+		}
+		if content := strings.TrimSpace(asset.Caption); content != "" {
+			chunks = append(chunks, documentchunk.ImageChunk{Kind: documentchunk.ChunkKindImageCaption, ParentPosition: parentPosition, Content: content, HeadingPath: headingPath, ImageInfo: info})
+			texts = append(texts, imageEmbeddingContent(task.OriginalFilename, headingPath, "图片描述", content))
+		}
+	}
+	if len(chunks) == 0 {
+		return nil
+	}
+	embeddings, err := embedChunks(ctx, embedder, texts)
+	if err != nil {
+		return fmt.Errorf("embed image chunks: %w", err)
+	}
+	return store.ReplaceImageChunks(ctx, task.DocumentID, chunks, embeddings)
+}
+
+func imageParentPosition(parents []documentchunk.ParentChunk, page int) int {
+	if len(parents) == 0 {
+		return 0
+	}
+	if page > 0 {
+		marker := fmt.Sprintf("[Page %d]", page)
+		for index, parent := range parents {
+			if strings.Contains(parent.Content, marker) {
+				return index
+			}
+		}
+	}
+	return 0
+}
+
+func imageEmbeddingContent(filename, headingPath, label, content string) string {
+	parts := []string{strings.TrimSpace(filename)}
+	if headingPath = strings.TrimSpace(headingPath); headingPath != "" {
+		parts = append(parts, headingPath)
+	}
+	parts = append(parts, label, strings.TrimSpace(content))
+	return strings.Join(parts, "\n\n")
 }
 
 func saveDiagnostics(ctx context.Context, chunks any, splitter TextSplitter, task Task, text string) {

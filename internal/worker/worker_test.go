@@ -135,6 +135,8 @@ type hierarchicalChunkStoreStub struct {
 	parents      []documentchunk.ParentChunk
 	children     []documentchunk.ChildChunk
 	embeddings   [][]float32
+	imageChunks  []documentchunk.ImageChunk
+	imageVectors [][]float32
 	replacements int
 }
 
@@ -142,6 +144,18 @@ func (s *hierarchicalChunkStoreStub) ReplaceHierarchical(_ context.Context, _ in
 	s.replacements++
 	s.parents, s.children, s.embeddings = parents, children, embeddings
 	return nil
+}
+
+func (s *hierarchicalChunkStoreStub) ReplaceImageChunks(_ context.Context, _ int64, chunks []documentchunk.ImageChunk, embeddings [][]float32) error {
+	s.imageChunks = chunks
+	s.imageVectors = embeddings
+	return nil
+}
+
+type imageEnricherStub struct{}
+
+func (imageEnricherStub) EnrichImage(context.Context, documentextractor.ImageAsset) (documentextractor.ImageEnrichment, error) {
+	return documentextractor.ImageEnrichment{Caption: "一张展示部署流程的流程图"}, nil
 }
 
 func (s *chunkStoreStub) Replace(_ context.Context, _ int64, chunks []string, embeddings [][]float32) error {
@@ -344,6 +358,33 @@ func TestEmbeddingHierarchicalProcessorPersistsParseResult(t *testing.T) {
 	}
 	if assets.documentID != 9 || len(assets.result.Images) != 1 || assets.result.Metadata["parser"] != "office" {
 		t.Fatalf("saved parse result = %#v", assets)
+	}
+}
+
+func TestEmbeddingHierarchicalProcessorIndexesImageOCRAndCaptionChunks(t *testing.T) {
+	chunks := &hierarchicalChunkStoreStub{}
+	assets := &parseResultStoreStub{}
+	processor := worker.NewEmbeddingHierarchicalChunkingProcessorWithImageEnricher(
+		richExtractorStub{},
+		fixedSplitter{chunks: []string{"parent"}},
+		fixedSplitter{chunks: []string{"child"}},
+		chunks,
+		matchingEmbedderStub{},
+		assets,
+		imageEnricherStub{},
+	)
+
+	if err := processor(context.Background(), worker.Task{DocumentID: 9, OriginalFilename: "guide.docx"}); err != nil {
+		t.Fatalf("processor error = %v", err)
+	}
+	if len(chunks.imageChunks) != 1 || chunks.imageChunks[0].Kind != documentchunk.ChunkKindImageCaption {
+		t.Fatalf("image chunks = %#v, want one caption chunk", chunks.imageChunks)
+	}
+	if chunks.imageChunks[0].Content != "一张展示部署流程的流程图" || chunks.imageChunks[0].ImageInfo.AssetIndex != 0 {
+		t.Fatalf("image chunk = %#v", chunks.imageChunks[0])
+	}
+	if len(chunks.imageVectors) != 1 || len(chunks.imageVectors[0]) == 0 {
+		t.Fatalf("image vectors = %#v", chunks.imageVectors)
 	}
 }
 

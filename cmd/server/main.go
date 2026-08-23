@@ -107,8 +107,10 @@ func main() {
 		log.Printf("WeKnora Cloud parser enabled: endpoint=%s", cfg.WeKnoraCloudParserURL)
 	}
 	extractor := documentextractor.NewWithOCRAndImagesAndParser(cfg.UploadDir, nil, nil, cfg.DocumentParserEngine, parserExtras...)
+	var imageEnricher worker.ImageEnricher
 	if cfg.OCRModel != "" {
 		ocrService := modelruntime.NewOCRService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv, cfg.OCRModel, cfg.OCRPrompt)
+		imageEnricher = modelruntime.NewImageEnricherService(ocrService, cfg.ImageCaptionPrompt)
 		pageRenderer := documentocr.NewPDFToImageRenderer(cfg.OCRRendererBinary, cfg.OCRRenderDPI, cfg.OCRMaxPages)
 		pageText := documentocr.NewPDFToTextPageExtractor(cfg.OCRTextRendererBinary)
 		scannedPDF := documentocr.NewServiceWithPageText(pageRenderer, ocrService, pageText, cfg.OCRMaxPages, cfg.OCRConcurrency)
@@ -151,7 +153,7 @@ func main() {
 	knowledgeBaseService := knowledgebase.NewServiceWithInvalidator(knowledgeBaseStore, fileStore, searchService)
 	parentSplitter := documentchunk.NewAdaptiveSplitter(3000, 300)
 	childSplitter := documentchunk.NewAdaptiveSplitter(1000, 150)
-	processor := worker.NewEmbeddingHierarchicalChunkingProcessorWithParseResultStore(extractor, parentSplitter, childSplitter, chunkStore, embeddingService, documentService)
+	processor := worker.NewEmbeddingHierarchicalChunkingProcessorWithImageEnricher(extractor, parentSplitter, childSplitter, chunkStore, embeddingService, documentService, imageEnricher)
 	parserRegistry := extractor.ParserRegistry()
 	answerService := rag.NewService(searchService, chatService)
 	evaluationStore, err := evaluationrun.NewPostgresStore(db)

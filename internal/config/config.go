@@ -53,6 +53,7 @@ type Config struct {
 	PprofAddress                string
 	OCRModel                    string
 	OCRPrompt                   string
+	ImageCaptionPrompt          string
 	OCRRendererBinary           string
 	OCRTextRendererBinary       string
 	OCRRenderDPI                int
@@ -117,6 +118,7 @@ func Load() Config {
 		PprofAddress:                strings.TrimSpace(os.Getenv("PPROF_ADDRESS")),
 		OCRModel:                    strings.TrimSpace(os.Getenv("OCR_MODEL")),
 		OCRPrompt:                   valueOrDefault("OCR_PROMPT", defaultOCRPrompt),
+		ImageCaptionPrompt:          strings.TrimSpace(os.Getenv("IMAGE_CAPTION_PROMPT")),
 		OCRRendererBinary:           valueOrDefault("OCR_RENDERER_BIN", defaultOCRRendererBinary),
 		OCRTextRendererBinary:       valueOrDefault("OCR_TEXT_BIN", "pdftotext"),
 		OCRRenderDPI:                positiveIntEnv("OCR_RENDER_DPI", defaultOCRRenderDPI),
