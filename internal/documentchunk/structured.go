@@ -12,6 +12,7 @@ import (
 type SplitStrategy string
 
 const (
+	StrategyAuto      SplitStrategy = "auto"
 	StrategyHeading   SplitStrategy = "heading"
 	StrategyHeuristic SplitStrategy = "heuristic"
 	StrategyRecursive SplitStrategy = "recursive"
@@ -52,6 +53,7 @@ type StrategyRejection struct {
 
 type AdaptiveSplitter struct {
 	recursive *Splitter
+	strategy  SplitStrategy
 }
 
 type StructuredPart struct {
@@ -78,7 +80,38 @@ func (p StructuredPart) EmbeddingContent(documentTitle string) string {
 }
 
 func NewAdaptiveSplitter(size, overlap int) *AdaptiveSplitter {
-	return &AdaptiveSplitter{recursive: NewSplitter(size, overlap)}
+	return NewAdaptiveSplitterWithStrategy(size, overlap, StrategyAuto)
+}
+
+func NewAdaptiveSplitterWithStrategy(size, overlap int, strategy SplitStrategy) *AdaptiveSplitter {
+	strategy = SplitStrategy(strings.ToLower(strings.TrimSpace(string(strategy))))
+	switch strategy {
+	case "", StrategyAuto, StrategyHeading, StrategyHeuristic, StrategyRecursive:
+	default:
+		strategy = StrategyAuto
+	}
+	return &AdaptiveSplitter{recursive: NewSplitter(size, overlap), strategy: strategy}
+}
+
+func (s *AdaptiveSplitter) Size() int {
+	if s == nil || s.recursive == nil {
+		return 0
+	}
+	return s.recursive.size
+}
+
+func (s *AdaptiveSplitter) Overlap() int {
+	if s == nil || s.recursive == nil {
+		return 0
+	}
+	return s.recursive.overlap
+}
+
+func (s *AdaptiveSplitter) Strategy() SplitStrategy {
+	if s == nil || s.strategy == "" {
+		return StrategyAuto
+	}
+	return s.strategy
 }
 
 // Split keeps the generic TextSplitter interface for callers that only need
@@ -131,6 +164,39 @@ func (s *AdaptiveSplitter) SplitDocumentPartsWithDiagnostics(filename, text stri
 		diagnostics.QualityPassed = true
 		return parts, true
 	}
+	if s.strategy == StrategyHeading {
+		sections, found := parseMarkdownSections(lines)
+		if found {
+			parts, accepted := try(StrategyHeading, s.renderSections(sections), len(sections))
+			if accepted {
+				return parts, finalizeDiagnostics(diagnostics, parts, s.recursive.size)
+			}
+		}
+		if len(diagnostics.StrategyRejections) == 0 {
+			diagnostics.StrategyRejections = append(diagnostics.StrategyRejections, StrategyRejection{Strategy: StrategyHeading, Reason: "no headings detected"})
+		}
+		diagnostics.Strategy = StrategyHeading
+		diagnostics.QualityIssues = []string{diagnostics.StrategyRejections[len(diagnostics.StrategyRejections)-1].Reason}
+		return nil, finalizeDiagnostics(diagnostics, nil, s.recursive.size)
+	}
+	if s.strategy == StrategyHeuristic {
+		sections, found := parseHeuristicSections(lines)
+		if found {
+			parts, accepted := try(StrategyHeuristic, s.renderSections(sections), len(sections))
+			if accepted {
+				return parts, finalizeDiagnostics(diagnostics, parts, s.recursive.size)
+			}
+		}
+		if len(diagnostics.StrategyRejections) == 0 {
+			diagnostics.StrategyRejections = append(diagnostics.StrategyRejections, StrategyRejection{Strategy: StrategyHeuristic, Reason: "no heuristic headings detected"})
+		}
+		diagnostics.Strategy = StrategyHeuristic
+		diagnostics.QualityIssues = []string{diagnostics.StrategyRejections[len(diagnostics.StrategyRejections)-1].Reason}
+		return nil, finalizeDiagnostics(diagnostics, nil, s.recursive.size)
+	}
+	if s.strategy == StrategyRecursive {
+		return s.recursiveParts(text, filename, diagnostics)
+	}
 	if sections, ok := parseMarkdownSections(lines); ok {
 		if parts, accepted := try(StrategyHeading, s.renderSections(sections), len(sections)); accepted {
 			return parts, finalizeDiagnostics(diagnostics, parts, s.recursive.size)
@@ -141,6 +207,10 @@ func (s *AdaptiveSplitter) SplitDocumentPartsWithDiagnostics(filename, text stri
 			return parts, finalizeDiagnostics(diagnostics, parts, s.recursive.size)
 		}
 	}
+	return s.recursiveParts(text, filename, diagnostics)
+}
+
+func (s *AdaptiveSplitter) recursiveParts(text, filename string, diagnostics SplitDiagnostics) ([]StructuredPart, SplitDiagnostics) {
 	diagnostics.Strategy = StrategyRecursive
 	contentParts := s.splitContent(text)
 	parts := addVirtualPaths(filename, contentParts)

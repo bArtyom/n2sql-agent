@@ -63,6 +63,12 @@ func (oversizedProtectedBlockExtractor) Extract(context.Context, string, string)
 	return "```go\n" + strings.Repeat("x", 40) + "\n```", nil
 }
 
+type longTextExtractor struct{}
+
+func (longTextExtractor) Extract(context.Context, string, string) (string, error) {
+	return strings.Repeat("一段用于验证任务级分块配置的正文。", 20), nil
+}
+
 type richExtractorStub struct{}
 
 func (richExtractorStub) Extract(context.Context, string, string) (string, error) {
@@ -259,6 +265,37 @@ func TestEmbeddingHierarchicalProcessorEmbedsOnlyChildren(t *testing.T) {
 	}
 	if len(embedder.batches) != 1 || !reflect.DeepEqual(embedder.batches[0], []string{"child", "child"}) {
 		t.Fatalf("embedding input = %#v", embedder.batches)
+	}
+}
+
+func TestEmbeddingHierarchicalProcessorUsesTaskChunkingConfig(t *testing.T) {
+	store := &hierarchicalChunkStoreStub{}
+	processor := worker.NewEmbeddingHierarchicalChunkingProcessor(
+		longTextExtractor{},
+		documentchunk.NewAdaptiveSplitter(200, 0),
+		documentchunk.NewAdaptiveSplitter(100, 0),
+		store,
+		matchingEmbedderStub{},
+	)
+	task := worker.Task{
+		DocumentID: 4,
+		ProcessConfig: documentextractor.ProcessConfig{ChunkingConfig: &documentextractor.ChunkingConfig{
+			ParentChunkSize: 60,
+			ChildChunkSize:  20,
+			Strategy:        "recursive",
+		}},
+	}
+
+	if err := processor(context.Background(), task); err != nil {
+		t.Fatalf("processor error = %v", err)
+	}
+	if len(store.parents) < 2 || len(store.children) <= len(store.parents) {
+		t.Fatalf("parents=%d children=%d, want task config to create nested chunks", len(store.parents), len(store.children))
+	}
+	for _, parent := range store.parents {
+		if len([]rune(parent.Content)) > 60 {
+			t.Fatalf("parent chunk length=%d, want <= 60: %q", len([]rune(parent.Content)), parent.Content)
+		}
 	}
 }
 

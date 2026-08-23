@@ -8,11 +8,33 @@ import (
 )
 
 func TestValidateProcessConfigAllowsParserOverrides(t *testing.T) {
-	config := &documentextractor.ProcessConfig{ParserEngineRules: []documentextractor.ParserEngineRule{
-		{FileTypes: []string{"pdf", "application/pdf"}, Engine: "mineru"},
-	}}
+	config := &documentextractor.ProcessConfig{
+		ParserEngineRules: []documentextractor.ParserEngineRule{
+			{FileTypes: []string{"pdf", "application/pdf"}, Engine: "mineru"},
+		},
+		ChunkingConfig: &documentextractor.ChunkingConfig{
+			ChunkSize:       600,
+			ChunkOverlap:    80,
+			ParentChunkSize: 1800,
+			ChildChunkSize:  600,
+		},
+	}
 	if err := documentextractor.ValidateProcessConfig(config); err != nil {
 		t.Fatalf("ValidateProcessConfig() error = %v", err)
+	}
+}
+
+func TestValidateProcessConfigRejectsInvalidChunkingConfig(t *testing.T) {
+	cases := []*documentextractor.ProcessConfig{
+		{ChunkingConfig: &documentextractor.ChunkingConfig{ChunkSize: 31}},
+		{ChunkingConfig: &documentextractor.ChunkingConfig{ChunkSize: 100, ChunkOverlap: 100}},
+		{ChunkingConfig: &documentextractor.ChunkingConfig{ParentChunkSize: 400, ChildChunkSize: 800}},
+		{ChunkingConfig: &documentextractor.ChunkingConfig{Strategy: "unknown"}},
+	}
+	for index, config := range cases {
+		if err := documentextractor.ValidateProcessConfig(config); err == nil {
+			t.Fatalf("case %d: ValidateProcessConfig() error = nil", index)
+		}
 	}
 }
 

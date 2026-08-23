@@ -36,12 +36,29 @@ type ParserEngineRule struct {
 // exact configuration selected when the upload was accepted.
 type ProcessConfig struct {
 	ParserEngineRules []ParserEngineRule `json:"parser_engine_rules,omitempty"`
+	ChunkingConfig    *ChunkingConfig    `json:"chunking_config,omitempty"`
+}
+
+// ChunkingConfig mirrors the batch-level fields used by WeKnora while keeping
+// the current project’s two-level parent/child index as the execution model.
+// ChunkSize and ChunkOverlap apply to the indexed child chunks; explicit
+// parent/child sizes override the defaults independently.
+type ChunkingConfig struct {
+	ChunkSize       int    `json:"chunk_size,omitempty"`
+	ChunkOverlap    int    `json:"chunk_overlap,omitempty"`
+	ParentChunkSize int    `json:"parent_chunk_size,omitempty"`
+	ChildChunkSize  int    `json:"child_chunk_size,omitempty"`
+	Strategy        string `json:"strategy,omitempty"`
 }
 
 const (
 	maxProcessConfigRules     = 32
 	maxProcessConfigFileTypes = 32
 	maxProcessConfigValueSize = 100
+	minChunkTarget            = 32
+	maxChunkTarget            = 100000
+	defaultParentChunkSize    = 3000
+	defaultChildChunkSize     = 1000
 )
 
 // ValidateProcessConfig validates the small, parser-owned portion of the
@@ -67,7 +84,56 @@ func ValidateProcessConfig(config *ProcessConfig) error {
 			}
 		}
 	}
+	if err := validateChunkingConfig(config.ChunkingConfig); err != nil {
+		return err
+	}
 	return nil
+}
+
+func validateChunkingConfig(config *ChunkingConfig) error {
+	if config == nil {
+		return nil
+	}
+	if config.ChunkSize != 0 && !validChunkTarget(config.ChunkSize) {
+		return fmt.Errorf("invalid chunk size")
+	}
+	if config.ParentChunkSize != 0 && !validChunkTarget(config.ParentChunkSize) {
+		return fmt.Errorf("invalid parent chunk size")
+	}
+	if config.ChildChunkSize != 0 && !validChunkTarget(config.ChildChunkSize) {
+		return fmt.Errorf("invalid child chunk size")
+	}
+	if config.ChunkOverlap < 0 || (config.ChunkSize == 0 && config.ChunkOverlap != 0) {
+		return fmt.Errorf("invalid chunk overlap")
+	}
+	if config.ChunkSize != 0 && config.ChunkOverlap >= config.ChunkSize {
+		return fmt.Errorf("chunk overlap must be smaller than chunk size")
+	}
+	strategy := strings.ToLower(strings.TrimSpace(config.Strategy))
+	switch strategy {
+	case "", "auto", "heading", "heuristic", "recursive":
+	default:
+		return fmt.Errorf("invalid chunking strategy")
+	}
+	parentSize := config.ParentChunkSize
+	if parentSize == 0 {
+		parentSize = defaultParentChunkSize
+	}
+	childSize := config.ChildChunkSize
+	if childSize == 0 {
+		childSize = config.ChunkSize
+	}
+	if childSize == 0 {
+		childSize = defaultChildChunkSize
+	}
+	if parentSize < childSize {
+		return fmt.Errorf("parent chunk size must be at least child chunk size")
+	}
+	return nil
+}
+
+func validChunkTarget(value int) bool {
+	return value >= minChunkTarget && value <= maxChunkTarget
 }
 
 func ResolveParserEngine(rules []ParserEngineRule, contentType, filename string) string {

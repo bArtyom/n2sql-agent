@@ -78,7 +78,7 @@ func TestDocumentUploadPassesProcessConfigToUploader(t *testing.T) {
 func TestDocumentUploadRejectsUnknownProcessConfigField(t *testing.T) {
 	endpoint := handler.NewDocumentUpload(&documentUploaderStub{})
 	body, contentType := multipartBodyWithFields(t, "notes.txt", []byte("hello"), map[string]string{
-		"process_config": `{"chunking_config":{"chunk_size":100}}`,
+		"process_config": `{"chunking_config":{"unknown":100}}`,
 	})
 	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/4/documents", body)
 	request.Header.Set("Content-Type", contentType)

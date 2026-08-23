@@ -101,7 +101,7 @@ func NewChunkingProcessor(extractor TextExtractor, splitter TextSplitter, chunks
 		if err != nil {
 			return err
 		}
-		parts, qualityErr := splitDocumentWithQuality(splitter, task, text)
+		parts, qualityErr := splitDocumentWithQuality(taskSplitter(splitter, task, false), task, text)
 		if qualityErr != nil {
 			saveDiagnostics(ctx, chunks, splitter, task, text)
 			return qualityErr
@@ -127,6 +127,7 @@ func NewEmbeddingChunkingProcessor(extractor TextExtractor, splitter TextSplitte
 		if err != nil {
 			return err
 		}
+		splitter = taskSplitter(splitter, task, false)
 		parts, qualityErr := splitDocumentWithQuality(splitter, task, text)
 		if qualityErr != nil {
 			saveDiagnostics(ctx, chunks, splitter, task, text)
@@ -164,9 +165,11 @@ func NewEmbeddingHierarchicalChunkingProcessorWithParseResultStore(extractor Tex
 		if err != nil {
 			return err
 		}
-		parentParts, qualityErr := splitDocumentWithQuality(parentSplitter, task, text)
+		parentSplitterForTask := taskSplitter(parentSplitter, task, true)
+		childSplitterForTask := taskSplitter(childSplitter, task, false)
+		parentParts, qualityErr := splitDocumentWithQuality(parentSplitterForTask, task, text)
 		if qualityErr != nil {
-			saveDiagnostics(ctx, chunks, parentSplitter, task, text)
+			saveDiagnostics(ctx, chunks, parentSplitterForTask, task, text)
 			return qualityErr
 		}
 		if len(parentParts) == 0 {
@@ -176,9 +179,9 @@ func NewEmbeddingHierarchicalChunkingProcessorWithParseResultStore(extractor Tex
 		children := make([]documentchunk.ChildChunk, 0)
 		for parentPosition, parentContent := range parentParts {
 			parents[parentPosition] = documentchunk.ParentChunk{Position: parentPosition, Content: parentContent.Content, HeadingPath: parentContent.HeadingPath}
-			childParts, qualityErr := splitDocumentWithQuality(childSplitter, task, parentContent.Content)
+			childParts, qualityErr := splitDocumentWithQuality(childSplitterForTask, task, parentContent.Content)
 			if qualityErr != nil {
-				saveDiagnostics(ctx, chunks, childSplitter, task, parentContent.Content)
+				saveDiagnostics(ctx, chunks, childSplitterForTask, task, parentContent.Content)
 				return qualityErr
 			}
 			for _, childContent := range childParts {
@@ -202,7 +205,7 @@ func NewEmbeddingHierarchicalChunkingProcessorWithParseResultStore(extractor Tex
 		if err := saveParseResult(ctx, parseResultStore, task, parsed); err != nil {
 			return err
 		}
-		saveDiagnostics(ctx, chunks, parentSplitter, task, text)
+		saveDiagnostics(ctx, chunks, parentSplitterForTask, task, text)
 		return nil
 	}
 }
@@ -220,6 +223,35 @@ func saveDiagnostics(ctx context.Context, chunks any, splitter TextSplitter, tas
 	if err := store.SaveChunkingDiagnostics(ctx, task.DocumentID, diagnostics); err != nil {
 		slog.WarnContext(ctx, "save document chunking diagnostics failed", "document_id", task.DocumentID, "error", err)
 	}
+}
+
+func taskSplitter(defaultSplitter TextSplitter, task Task, parent bool) TextSplitter {
+	adaptive, ok := defaultSplitter.(*documentchunk.AdaptiveSplitter)
+	if !ok || adaptive == nil || task.ProcessConfig.ChunkingConfig == nil {
+		return defaultSplitter
+	}
+	config := task.ProcessConfig.ChunkingConfig
+	size := adaptive.Size()
+	overlap := adaptive.Overlap()
+	strategy := adaptive.Strategy()
+	if parent {
+		if config.ParentChunkSize > 0 {
+			size = config.ParentChunkSize
+		}
+	} else {
+		if config.ChildChunkSize > 0 {
+			size = config.ChildChunkSize
+		} else if config.ChunkSize > 0 {
+			size = config.ChunkSize
+		}
+		if config.ChunkOverlap > 0 {
+			overlap = config.ChunkOverlap
+		}
+	}
+	if strings.TrimSpace(config.Strategy) != "" {
+		strategy = documentchunk.SplitStrategy(strings.ToLower(strings.TrimSpace(config.Strategy)))
+	}
+	return documentchunk.NewAdaptiveSplitterWithStrategy(size, overlap, strategy)
 }
 
 func splitDocument(splitter TextSplitter, task Task, text string) []documentchunk.StructuredPart {

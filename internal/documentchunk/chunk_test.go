@@ -145,6 +145,17 @@ func TestAdaptiveSplitterReportsDiagnostics(t *testing.T) {
 	}
 }
 
+func TestAdaptiveSplitterCanPinRecursiveStrategy(t *testing.T) {
+	splitter := documentchunk.NewAdaptiveSplitterWithStrategy(200, 0, documentchunk.StrategyRecursive)
+	parts, diagnostics := splitter.SplitDocumentPartsWithDiagnostics("guide.md", "# 标题\n\n正文一。\n\n## 子标题\n\n正文二。")
+	if diagnostics.Strategy != documentchunk.StrategyRecursive {
+		t.Fatalf("strategy = %q, want recursive", diagnostics.Strategy)
+	}
+	if len(parts) != 1 || parts[0].HeadingPathKind != documentchunk.HeadingPathVirtual {
+		t.Fatalf("recursive pinned parts = %#v, want one virtual-path part", parts)
+	}
+}
+
 func TestAdaptiveSplitterFallsBackWhenHeadingCreatesTinyChunks(t *testing.T) {
 	splitter := documentchunk.NewAdaptiveSplitter(120, 0)
 	text := "# 文档\n\n" +
