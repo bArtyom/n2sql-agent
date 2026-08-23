@@ -66,13 +66,28 @@ func main() {
 	rerankService := modelruntime.NewRerankService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
 	queryRewriteService := modelruntime.NewQueryRewriteService(chatService)
 	followUpService := followup.NewModelService(chatService, cfg.AgentTimeout)
-	extractor := documentextractor.NewWithOCRAndImagesAndParser(cfg.UploadDir, nil, nil, cfg.DocumentParserEngine)
+	var parserExtras []documentextractor.ParserEngine
+	if cfg.DocumentParserRemoteURL != "" {
+		remoteParser, parserErr := documentextractor.NewHTTPParserEngine(
+			cfg.DocumentParserRemoteEngine,
+			cfg.DocumentParserRemoteURL,
+			[]string{"text/plain", "text/markdown", "text/html", "application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.openxmlformats-officedocument.presentationml.presentation", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "image/png", "image/jpeg", "image/webp"},
+			cfg.DocumentParserAllowedHosts,
+			&http.Client{Timeout: cfg.DocumentParserRemoteTimeout},
+		)
+		if parserErr != nil {
+			log.Fatalf("configure remote document parser: %v", parserErr)
+		}
+		parserExtras = append(parserExtras, remoteParser)
+		log.Printf("remote document parser enabled: engine=%s endpoint=%s", cfg.DocumentParserRemoteEngine, cfg.DocumentParserRemoteURL)
+	}
+	extractor := documentextractor.NewWithOCRAndImagesAndParser(cfg.UploadDir, nil, nil, cfg.DocumentParserEngine, parserExtras...)
 	if cfg.OCRModel != "" {
 		ocrService := modelruntime.NewOCRService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv, cfg.OCRModel, cfg.OCRPrompt)
 		pageRenderer := documentocr.NewPDFToImageRenderer(cfg.OCRRendererBinary, cfg.OCRRenderDPI, cfg.OCRMaxPages)
 		pageText := documentocr.NewPDFToTextPageExtractor(cfg.OCRTextRendererBinary)
 		scannedPDF := documentocr.NewServiceWithPageText(pageRenderer, ocrService, pageText, cfg.OCRMaxPages, cfg.OCRConcurrency)
-		extractor = documentextractor.NewWithOCRAndImagesAndParser(cfg.UploadDir, scannedPDF, scannedPDF, cfg.DocumentParserEngine)
+		extractor = documentextractor.NewWithOCRAndImagesAndParser(cfg.UploadDir, scannedPDF, scannedPDF, cfg.DocumentParserEngine, parserExtras...)
 		log.Printf("scanned PDF OCR enabled: model=%s renderer=%s max_pages=%d concurrency=%d", cfg.OCRModel, cfg.OCRRendererBinary, cfg.OCRMaxPages, cfg.OCRConcurrency)
 	}
 	metricsRegistry := metrics.New()

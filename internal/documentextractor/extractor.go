@@ -66,10 +66,10 @@ func NewWithOCRAndImages(root string, scannedPDF ScannedPDFProcessor, image Imag
 	return &Extractor{root: root, registry: NewDefaultParserRegistry(scannedPDF, image)}
 }
 
-func NewWithOCRAndImagesAndParser(root string, scannedPDF ScannedPDFProcessor, image ImageProcessor, engineName string) *Extractor {
+func NewWithOCRAndImagesAndParser(root string, scannedPDF ScannedPDFProcessor, image ImageProcessor, engineName string, extras ...ParserEngine) *Extractor {
 	return &Extractor{
 		root:       root,
-		registry:   NewDefaultParserRegistry(scannedPDF, image),
+		registry:   NewDefaultParserRegistryWithExtras(scannedPDF, image, extras...),
 		engineName: strings.TrimSpace(engineName),
 	}
 }
@@ -87,6 +87,16 @@ func (e *Extractor) Extract(ctx context.Context, storagePath, contentType string
 }
 
 func (e *Extractor) ExtractResult(ctx context.Context, storagePath, contentType string) (ParseResult, error) {
+	return e.extractResult(ctx, storagePath, contentType, e.engineName)
+}
+
+// ExtractResultWithEngine resolves the same source file with an explicit
+// engine selected by the knowledge-base parser rules.
+func (e *Extractor) ExtractResultWithEngine(ctx context.Context, storagePath, contentType, engineName string) (ParseResult, error) {
+	return e.extractResult(ctx, storagePath, contentType, strings.TrimSpace(engineName))
+}
+
+func (e *Extractor) extractResult(ctx context.Context, storagePath, contentType, engineName string) (ParseResult, error) {
 	if err := ctx.Err(); err != nil {
 		return ParseResult{}, err
 	}
@@ -113,7 +123,7 @@ func (e *Extractor) ExtractResult(ctx context.Context, storagePath, contentType 
 		Content:     content,
 		ContentType: contentType,
 		Filename:    filepath.Base(normalizedPath),
-		EngineName:  e.engineName,
+		EngineName:  engineName,
 	})
 }
 

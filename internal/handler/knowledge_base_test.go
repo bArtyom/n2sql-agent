@@ -21,6 +21,18 @@ type knowledgeBaseStoreStub struct {
 	nextItemID int64
 }
 
+type parserRulesStoreStub struct {
+	knowledgeBaseStoreStub
+	updatedID    int64
+	updatedRules []knowledgebase.ParserEngineRule
+}
+
+func (s *parserRulesStoreStub) UpdateParserEngineRules(_ context.Context, id int64, rules []knowledgebase.ParserEngineRule) (knowledgebase.KnowledgeBase, error) {
+	s.updatedID = id
+	s.updatedRules = rules
+	return knowledgebase.KnowledgeBase{ID: id, Name: "资料库", ParserEngineRules: rules}, nil
+}
+
 func (s *knowledgeBaseStoreStub) Create(_ context.Context, input knowledgebase.CreateInput) (knowledgebase.KnowledgeBase, error) {
 	if s.createErr != nil {
 		return knowledgebase.KnowledgeBase{}, s.createErr
@@ -52,6 +64,34 @@ func TestKnowledgeBasesCreatesKnowledgeBase(t *testing.T) {
 	}
 	if body := response.Body.String(); !strings.Contains(body, `"id":1`) || !strings.Contains(body, `"name":"Go 学习资料"`) {
 		t.Fatalf("response body = %q", body)
+	}
+}
+
+func TestKnowledgeBasesUpdatesParserEngineRules(t *testing.T) {
+	store := &parserRulesStoreStub{}
+	endpoint := handler.NewKnowledgeBases(store)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPatch, "/api/knowledge-bases/7", strings.NewReader(`{"parser_engine_rules":[{"file_types":["pdf"],"engine":"mineru"},{"file_types":["docx"],"engine":"office"}]}`))
+	request.SetPathValue("id", "7")
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || store.updatedID != 7 || len(store.updatedRules) != 2 {
+		t.Fatalf("status=%d body=%q rules=%#v", response.Code, response.Body.String(), store.updatedRules)
+	}
+}
+
+func TestKnowledgeBasesRejectsInvalidParserEngineRules(t *testing.T) {
+	store := &parserRulesStoreStub{}
+	endpoint := handler.NewKnowledgeBases(store)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPatch, "/api/knowledge-bases/7", strings.NewReader(`{"parser_engine_rules":[{"file_types":[],"engine":"mineru"}]}`))
+	request.SetPathValue("id", "7")
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
 	}
 }
 

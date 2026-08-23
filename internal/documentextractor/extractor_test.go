@@ -113,6 +113,22 @@ func TestParserRegistrySupportsExplicitEngineSelection(t *testing.T) {
 	}
 }
 
+func TestResolveParserEngineMatchesExtensionAndMIMEInRuleOrder(t *testing.T) {
+	rules := []documentextractor.ParserEngineRule{
+		{FileTypes: []string{"pdf"}, Engine: "mineru"},
+		{FileTypes: []string{"application/pdf"}, Engine: "builtin"},
+	}
+	if got := documentextractor.ResolveParserEngine(rules, "application/pdf", "report.pdf"); got != "mineru" {
+		t.Fatalf("extension rule engine = %q, want mineru", got)
+	}
+	if got := documentextractor.ResolveParserEngine(rules[1:], "application/pdf", ""); got != "builtin" {
+		t.Fatalf("MIME rule engine = %q, want builtin", got)
+	}
+	if got := documentextractor.ResolveParserEngine(rules, "text/plain", "notes.txt"); got != "" {
+		t.Fatalf("unmatched rule engine = %q, want empty", got)
+	}
+}
+
 func TestExtractorReadsDOCXHeadingsAndParagraphs(t *testing.T) {
 	root := t.TempDir()
 	directory := filepath.Join(root, "documents")

@@ -3,9 +3,11 @@ package knowledgebase
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 
+	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -15,21 +17,29 @@ var (
 	ErrProcessing = errors.New("knowledge base has documents in processing")
 )
 
+type ParserEngineRule = documentextractor.ParserEngineRule
+
 type KnowledgeBase struct {
-	ID          int64  `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
+	ID                int64                                `json:"id"`
+	Name              string                               `json:"name"`
+	Description       string                               `json:"description"`
+	ParserEngineRules []documentextractor.ParserEngineRule `json:"parserEngineRules,omitempty"`
 }
 
 type CreateInput struct {
-	Name        string
-	Description string
+	Name              string
+	Description       string
+	ParserEngineRules []documentextractor.ParserEngineRule
 }
 
 type Store interface {
 	Create(context.Context, CreateInput) (KnowledgeBase, error)
 	List(context.Context) ([]KnowledgeBase, error)
 	Delete(context.Context, int64) error
+}
+
+type ParserRulesStore interface {
+	UpdateParserEngineRules(context.Context, int64, []documentextractor.ParserEngineRule) (KnowledgeBase, error)
 }
 
 // FileDeleteStore is an optional extension used by the lifecycle service to
@@ -44,13 +54,18 @@ func NewPostgresStore(db *sql.DB) *PostgresStore { return &PostgresStore{db: db}
 
 func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (KnowledgeBase, error) {
 	var knowledgeBase KnowledgeBase
-	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO knowledge_bases (administrator_id, name, description)
-		SELECT administrator_id, $1, $2 FROM system_settings WHERE id = 1
-		RETURNING id, name, description`, input.Name, input.Description).Scan(
+	rules, err := json.Marshal(input.ParserEngineRules)
+	if err != nil {
+		return KnowledgeBase{}, fmt.Errorf("encode parser engine rules: %w", err)
+	}
+	err = s.db.QueryRowContext(ctx, `
+		INSERT INTO knowledge_bases (administrator_id, name, description, parser_engine_rules)
+		SELECT administrator_id, $1, $2, $3::jsonb FROM system_settings WHERE id = 1
+		RETURNING id, name, description, parser_engine_rules`, input.Name, input.Description, rules).Scan(
 		&knowledgeBase.ID,
 		&knowledgeBase.Name,
 		&knowledgeBase.Description,
+		&rules,
 	)
 	if err != nil {
 		var pgError *pgconn.PgError
@@ -59,12 +74,15 @@ func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Knowledg
 		}
 		return KnowledgeBase{}, fmt.Errorf("create knowledge base: %w", err)
 	}
+	if err := json.Unmarshal(rules, &knowledgeBase.ParserEngineRules); err != nil {
+		return KnowledgeBase{}, fmt.Errorf("decode parser engine rules: %w", err)
+	}
 	return knowledgeBase, nil
 }
 
 func (s *PostgresStore) List(ctx context.Context) ([]KnowledgeBase, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, description
+		SELECT id, name, description, parser_engine_rules
 		FROM knowledge_bases
 		WHERE administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
 		ORDER BY id`)
@@ -76,8 +94,14 @@ func (s *PostgresStore) List(ctx context.Context) ([]KnowledgeBase, error) {
 	knowledgeBases := make([]KnowledgeBase, 0)
 	for rows.Next() {
 		var knowledgeBase KnowledgeBase
-		if err := rows.Scan(&knowledgeBase.ID, &knowledgeBase.Name, &knowledgeBase.Description); err != nil {
+		var rules []byte
+		if err := rows.Scan(&knowledgeBase.ID, &knowledgeBase.Name, &knowledgeBase.Description, &rules); err != nil {
 			return nil, fmt.Errorf("scan knowledge base: %w", err)
+		}
+		if len(rules) > 0 {
+			if err := json.Unmarshal(rules, &knowledgeBase.ParserEngineRules); err != nil {
+				return nil, fmt.Errorf("decode knowledge base parser engine rules: %w", err)
+			}
 		}
 		knowledgeBases = append(knowledgeBases, knowledgeBase)
 	}
@@ -85,6 +109,33 @@ func (s *PostgresStore) List(ctx context.Context) ([]KnowledgeBase, error) {
 		return nil, fmt.Errorf("iterate knowledge bases: %w", err)
 	}
 	return knowledgeBases, nil
+}
+
+func (s *PostgresStore) UpdateParserEngineRules(ctx context.Context, id int64, rules []documentextractor.ParserEngineRule) (KnowledgeBase, error) {
+	encoded, err := json.Marshal(rules)
+	if err != nil {
+		return KnowledgeBase{}, fmt.Errorf("encode parser engine rules: %w", err)
+	}
+	var knowledgeBase KnowledgeBase
+	var stored []byte
+	err = s.db.QueryRowContext(ctx, `
+		UPDATE knowledge_bases
+		SET parser_engine_rules = $2::jsonb
+		WHERE id = $1
+		  AND administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
+		RETURNING id, name, description, parser_engine_rules`, id, encoded).Scan(
+		&knowledgeBase.ID, &knowledgeBase.Name, &knowledgeBase.Description, &stored,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return KnowledgeBase{}, ErrNotFound
+	}
+	if err != nil {
+		return KnowledgeBase{}, fmt.Errorf("update parser engine rules: %w", err)
+	}
+	if err := json.Unmarshal(stored, &knowledgeBase.ParserEngineRules); err != nil {
+		return KnowledgeBase{}, fmt.Errorf("decode updated parser engine rules: %w", err)
+	}
+	return knowledgeBase, nil
 }
 
 func (s *PostgresStore) Delete(ctx context.Context, id int64) error {

@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -32,6 +33,7 @@ type Task struct {
 	StoragePath      string
 	OriginalFilename string
 	ContentType      string
+	ParserEngine     string
 }
 
 type Store interface {
@@ -62,6 +64,10 @@ type TextExtractor interface {
 
 type ParseResultExtractor interface {
 	ExtractResult(context.Context, string, string) (documentextractor.ParseResult, error)
+}
+
+type TaskParserExtractor interface {
+	ExtractResultWithEngine(context.Context, string, string, string) (documentextractor.ParseResult, error)
 }
 
 type ParseResultStore interface {
@@ -309,6 +315,13 @@ func NewTextExtractionProcessor(extractor TextExtractor) Processor {
 }
 
 func extractDocument(ctx context.Context, extractor TextExtractor, task Task) (string, *documentextractor.ParseResult, error) {
+	if selected, ok := extractor.(TaskParserExtractor); ok && task.ParserEngine != "" {
+		result, err := selected.ExtractResultWithEngine(ctx, task.StoragePath, task.ContentType, task.ParserEngine)
+		if err != nil {
+			return "", nil, err
+		}
+		return result.Markdown, &result, nil
+	}
 	if rich, ok := extractor.(ParseResultExtractor); ok {
 		result, err := rich.ExtractResult(ctx, task.StoragePath, task.ContentType)
 		if err != nil {
@@ -519,6 +532,7 @@ func NewPostgresStore(db *sql.DB) *PostgresStore { return &PostgresStore{db: db}
 
 func (s *PostgresStore) ClaimNext(ctx context.Context) (Task, error) {
 	var task Task
+	var parserRules []byte
 	err := s.db.QueryRowContext(ctx, `
 		WITH next_task AS (
 			SELECT id
@@ -533,17 +547,26 @@ func (s *PostgresStore) ClaimNext(ctx context.Context) (Task, error) {
 		SET status = 'processing', attempt_count = attempt_count + 1,
 			started_at = CURRENT_TIMESTAMP, completed_at = NULL, error_message = NULL,
 			next_attempt_at = CURRENT_TIMESTAMP
-		FROM next_task, documents AS document
+		FROM next_task
+		JOIN documents AS document ON true
+		JOIN knowledge_bases AS knowledge_base ON knowledge_base.id = document.knowledge_base_id
 		WHERE task.id = next_task.id
 		  AND document.id = task.document_id
-			RETURNING task.id, document.id, document.knowledge_base_id, task.attempt_count, document.storage_path, document.original_filename, document.content_type`).Scan(
-		&task.ID, &task.DocumentID, &task.KnowledgeBaseID, &task.AttemptCount, &task.StoragePath, &task.OriginalFilename, &task.ContentType,
+			RETURNING task.id, document.id, document.knowledge_base_id, task.attempt_count, document.storage_path, document.original_filename, document.content_type, knowledge_base.parser_engine_rules`).Scan(
+		&task.ID, &task.DocumentID, &task.KnowledgeBaseID, &task.AttemptCount, &task.StoragePath, &task.OriginalFilename, &task.ContentType, &parserRules,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, ErrNoTask
 	}
 	if err != nil {
 		return Task{}, fmt.Errorf("claim next document processing task: %w", err)
+	}
+	if len(parserRules) > 0 {
+		var rules []documentextractor.ParserEngineRule
+		if err := json.Unmarshal(parserRules, &rules); err != nil {
+			return Task{}, fmt.Errorf("decode parser engine rules: %w", err)
+		}
+		task.ParserEngine = documentextractor.ResolveParserEngine(rules, task.ContentType, task.OriginalFilename)
 	}
 	return task, nil
 }

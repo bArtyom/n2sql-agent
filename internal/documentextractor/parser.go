@@ -22,6 +22,32 @@ type ParseRequest struct {
 	EngineName  string
 }
 
+// ParserEngineRule maps one or more file types to a parser engine. File types
+// may be extensions ("pdf", ".docx") or MIME types. Rules are resolved in
+// order, so the first matching rule wins, matching WeKnora's per-file-type
+// parser configuration.
+type ParserEngineRule struct {
+	FileTypes []string `json:"file_types"`
+	Engine    string   `json:"engine"`
+}
+
+func ResolveParserEngine(rules []ParserEngineRule, contentType, filename string) string {
+	contentType = strings.ToLower(strings.TrimSpace(contentType))
+	extension := strings.ToLower(strings.TrimPrefix(filepath.Ext(filename), "."))
+	for _, rule := range rules {
+		for _, fileType := range rule.FileTypes {
+			fileType = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(fileType), "."))
+			if fileType == "" {
+				continue
+			}
+			if fileType == contentType || fileType == extension {
+				return strings.TrimSpace(rule.Engine)
+			}
+		}
+	}
+	return ""
+}
+
 // ImageAsset describes an image discovered during parsing. Data is kept in
 // memory only for the current processing task; persistence is owned by the
 // document processing layer.
@@ -101,11 +127,19 @@ func (r *ParserRegistry) Parse(ctx context.Context, request ParseRequest) (Parse
 }
 
 func NewDefaultParserRegistry(scannedPDF ScannedPDFProcessor, image ImageProcessor) *ParserRegistry {
-	return NewParserRegistry(
+	return NewDefaultParserRegistryWithExtras(scannedPDF, image)
+}
+
+func NewDefaultParserRegistryWithExtras(scannedPDF ScannedPDFProcessor, image ImageProcessor, extras ...ParserEngine) *ParserRegistry {
+	engines := []ParserEngine{
 		&simpleParserEngine{},
 		&officeParserEngine{},
 		&pdfParserEngine{scannedPDF: scannedPDF},
 		&imageParserEngine{processor: image},
+	}
+	engines = append(engines, extras...)
+	return NewParserRegistry(
+		engines...,
 	)
 }
 

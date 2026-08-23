@@ -83,6 +83,7 @@ func New(dependencies Dependencies) http.Handler {
 		knowledgeBaseHandler := handler.NewKnowledgeBases(dependencies.KnowledgeBases)
 		mux.Handle("GET /api/knowledge-bases", knowledgeBaseHandler)
 		mux.Handle("POST /api/knowledge-bases", knowledgeBaseHandler)
+		mux.Handle("PATCH /api/knowledge-bases/{id}", knowledgeBaseHandler)
 		mux.Handle("DELETE /api/knowledge-bases/{id}", knowledgeBaseHandler)
 	}
 	if dependencies.Conversations != nil {

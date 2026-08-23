@@ -24,6 +24,8 @@ func NewKnowledgeBases(store knowledgebase.Store) http.Handler {
 			listKnowledgeBases(w, r, store)
 		case http.MethodPost:
 			createKnowledgeBase(w, r, store)
+		case http.MethodPatch:
+			updateKnowledgeBase(w, r, store)
 		case http.MethodDelete:
 			deleteKnowledgeBase(w, r, store)
 		default:
@@ -43,8 +45,9 @@ func listKnowledgeBases(w http.ResponseWriter, r *http.Request, store knowledgeb
 
 func createKnowledgeBase(w http.ResponseWriter, r *http.Request, store knowledgebase.Store) {
 	var request struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
+		Name              string                           `json:"name"`
+		Description       string                           `json:"description"`
+		ParserEngineRules []knowledgebase.ParserEngineRule `json:"parser_engine_rules,omitempty"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxKnowledgeBaseRequestBytes))
 	decoder.DisallowUnknownFields()
@@ -58,12 +61,12 @@ func createKnowledgeBase(w http.ResponseWriter, r *http.Request, store knowledge
 	}
 	request.Name = strings.TrimSpace(request.Name)
 	request.Description = strings.TrimSpace(request.Description)
-	if request.Name == "" || len(request.Name) > maxKnowledgeBaseNameBytes || len(request.Description) > maxKnowledgeBaseDescription {
+	if request.Name == "" || len(request.Name) > maxKnowledgeBaseNameBytes || len(request.Description) > maxKnowledgeBaseDescription || !validParserEngineRules(request.ParserEngineRules) {
 		http.Error(w, `{"error":"invalid knowledge base"}`, http.StatusBadRequest)
 		return
 	}
 
-	knowledgeBase, err := store.Create(r.Context(), knowledgebase.CreateInput{Name: request.Name, Description: request.Description})
+	knowledgeBase, err := store.Create(r.Context(), knowledgebase.CreateInput{Name: request.Name, Description: request.Description, ParserEngineRules: request.ParserEngineRules})
 	if errors.Is(err, knowledgebase.ErrConflict) {
 		http.Error(w, `{"error":"knowledge base already exists"}`, http.StatusConflict)
 		return
@@ -75,6 +78,59 @@ func createKnowledgeBase(w http.ResponseWriter, r *http.Request, store knowledge
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	writeJSON(w, knowledgeBase)
+}
+
+func updateKnowledgeBase(w http.ResponseWriter, r *http.Request, store knowledgebase.Store) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, `{"error":"invalid knowledge base ID"}`, http.StatusBadRequest)
+		return
+	}
+	rulesStore, ok := store.(knowledgebase.ParserRulesStore)
+	if !ok {
+		http.Error(w, `{"error":"parser engine rules are unavailable"}`, http.StatusNotImplemented)
+		return
+	}
+	var request struct {
+		ParserEngineRules []knowledgebase.ParserEngineRule `json:"parser_engine_rules"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxKnowledgeBaseRequestBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		writeKnowledgeBaseDecodeError(w, err)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF || !validParserEngineRules(request.ParserEngineRules) {
+		http.Error(w, `{"error":"invalid parser engine rules"}`, http.StatusBadRequest)
+		return
+	}
+	knowledgeBase, err := rulesStore.UpdateParserEngineRules(r.Context(), id, request.ParserEngineRules)
+	if errors.Is(err, knowledgebase.ErrNotFound) {
+		http.Error(w, `{"error":"knowledge base not found"}`, http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, `{"error":"unable to update parser engine rules"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, knowledgeBase)
+}
+
+func validParserEngineRules(rules []knowledgebase.ParserEngineRule) bool {
+	if len(rules) > 32 {
+		return false
+	}
+	for _, rule := range rules {
+		if strings.TrimSpace(rule.Engine) == "" || len(rule.FileTypes) == 0 || len(rule.FileTypes) > 32 {
+			return false
+		}
+		for _, fileType := range rule.FileTypes {
+			if value := strings.TrimSpace(fileType); value == "" || len(value) > 100 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func deleteKnowledgeBase(w http.ResponseWriter, r *http.Request, store knowledgebase.Store) {

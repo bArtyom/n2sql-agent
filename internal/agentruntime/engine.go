@@ -387,7 +387,6 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 					conversation = append(conversation, modelclient.ChatMessage{Role: "tool", ToolCallID: toolCall.ID, Content: toolContent})
 					continue
 				}
-				return addToolFailureWithEvents(result, toolCall.Function.Name, err, emitter)
 			}
 			if _, repeated := seenToolCalls[callKey]; repeated && !e.allowRepeatedToolCalls {
 				if _, warned := loopWarnings[callKey]; !warned {
@@ -430,7 +429,6 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 					conversation = append(conversation, modelclient.ChatMessage{Role: "tool", ToolCallID: toolCall.ID, Content: toolContent})
 					continue
 				}
-				return addToolFailureWithEvents(result, toolCall.Function.Name, err, emitter)
 			}
 			arguments := json.RawMessage(toolCall.Function.Arguments)
 			var toolResult agent.ToolResult
@@ -503,7 +501,6 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 					conversation = append(conversation, modelclient.ChatMessage{Role: "tool", ToolCallID: toolCall.ID, Content: toolContent})
 					continue
 				}
-				return addToolFailureWithEvents(result, toolCall.Function.Name, ErrInvalidToolResult, emitter)
 			}
 			toolResult = security.RedactToolResult(toolResult)
 			if err := result.Run.AddStep(agent.Step{

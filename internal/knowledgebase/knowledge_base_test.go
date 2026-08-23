@@ -72,8 +72,10 @@ type testRows struct {
 	index int
 }
 
-func (testRows) Columns() []string { return []string{"id", "name", "description"} }
-func (testRows) Close() error      { return nil }
+func (testRows) Columns() []string {
+	return []string{"id", "name", "description", "parser_engine_rules"}
+}
+func (testRows) Close() error { return nil }
 func (r *testRows) Next(destination []driver.Value) error {
 	if r.index == len(r.rows) {
 		return io.EOF
@@ -105,7 +107,7 @@ func newTestStore(t *testing.T, database *testDatabase) *PostgresStore {
 }
 
 func TestPostgresStoreCreatesKnowledgeBaseForLocalAdministrator(t *testing.T) {
-	database := &testDatabase{queryRows: [][]driver.Value{{int64(7), "Go 学习资料", "后端笔记"}}}
+	database := &testDatabase{queryRows: [][]driver.Value{{int64(7), "Go 学习资料", "后端笔记", []byte("[]")}}}
 	store := newTestStore(t, database)
 
 	knowledgeBase, err := store.Create(context.Background(), CreateInput{Name: "Go 学习资料", Description: "后端笔记"})
@@ -118,13 +120,13 @@ func TestPostgresStoreCreatesKnowledgeBaseForLocalAdministrator(t *testing.T) {
 	if !strings.Contains(database.query, "SELECT administrator_id") {
 		t.Fatalf("query must use the local administrator: %s", database.query)
 	}
-	if len(database.queryArgs) != 2 || database.queryArgs[0].Value != "Go 学习资料" {
+	if len(database.queryArgs) != 3 || database.queryArgs[0].Value != "Go 学习资料" {
 		t.Fatalf("query arguments = %#v", database.queryArgs)
 	}
 }
 
 func TestPostgresStoreListsKnowledgeBases(t *testing.T) {
-	database := &testDatabase{queryRows: [][]driver.Value{{int64(1), "Go 学习资料", ""}, {int64(2), "数据库笔记", "PostgreSQL"}}}
+	database := &testDatabase{queryRows: [][]driver.Value{{int64(1), "Go 学习资料", "", []byte("[]")}, {int64(2), "数据库笔记", "PostgreSQL", []byte("[]")}}}
 	store := newTestStore(t, database)
 
 	knowledgeBases, err := store.List(context.Background())
