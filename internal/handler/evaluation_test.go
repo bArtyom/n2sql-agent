@@ -49,7 +49,31 @@ func (evaluationReaderStub) Get(context.Context, int64, int64) (evaluationrun.Ru
 	}, nil
 }
 func (evaluationReaderStub) ListResults(context.Context, int64) ([]evaluationrun.CaseResult, error) {
-	return []evaluationrun.CaseResult{{RunID: 12, CaseID: 1, Question: "问题", GeneratedAnswer: "答案", RetrievedIDs: json.RawMessage(`[]`), RetrievalMetrics: json.RawMessage(`{}`), GenerationMetrics: json.RawMessage(`{}`)}}, nil
+	return []evaluationrun.CaseResult{
+		{
+			RunID:             12,
+			CaseID:            1,
+			Question:          "问题一",
+			ReferenceAnswer:   "标准答案一",
+			GeneratedAnswer:   "答案一",
+			ExpectedRelevant:  true,
+			RetrievedIDs:      json.RawMessage(`["1:0"]`),
+			RetrievalMetrics:  json.RawMessage(`{"precision":1,"recall":1,"ndcg3":1,"ndcg10":1,"mrr":1,"map":1}`),
+			GenerationMetrics: json.RawMessage(`{"bleu1":1,"bleu2":1,"bleu4":1,"rouge1":1,"rouge2":1,"rougel":1,"faithfulness":1,"answer_relevance":1,"citation_recall":1,"citation_precision":1}`),
+		},
+		{
+			RunID:             12,
+			CaseID:            2,
+			Question:          "问题二",
+			GeneratedAnswer:   "拒答",
+			ExpectedRelevant:  false,
+			Refused:           true,
+			CorrectRefusal:    true,
+			RetrievedIDs:      json.RawMessage(`[]`),
+			RetrievalMetrics:  json.RawMessage(`{}`),
+			GenerationMetrics: json.RawMessage(`{"bleu1":0,"bleu2":0,"bleu4":0,"rouge1":0,"rouge2":0,"rougel":0,"faithfulness":0,"answer_relevance":0,"citation_recall":0,"citation_precision":0}`),
+		},
+	}, nil
 }
 
 func TestEvaluationCreatesAndReadsWeKnoraSnapshot(t *testing.T) {
@@ -71,7 +95,11 @@ func TestEvaluationCreatesAndReadsWeKnoraSnapshot(t *testing.T) {
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"finished_cases":2`) ||
 		!strings.Contains(response.Body.String(), `"recall":1`) ||
 		!strings.Contains(response.Body.String(), `"refusal_rate":1`) ||
-		!strings.Contains(response.Body.String(), `"accuracy":1`) {
+		!strings.Contains(response.Body.String(), `"accuracy":1`) ||
+		!strings.Contains(response.Body.String(), `"retrieval_case_count":1`) ||
+		!strings.Contains(response.Body.String(), `"generation_case_count":1`) ||
+		!strings.Contains(response.Body.String(), `"quality_case_count":1`) ||
+		!strings.Contains(response.Body.String(), `"faithfulness":1`) {
 		t.Fatalf("get status=%d body=%s", response.Code, response.Body.String())
 	}
 }

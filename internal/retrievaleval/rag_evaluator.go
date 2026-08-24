@@ -170,19 +170,3 @@ func validateRAGCase(evaluationCase Case) error {
 	}
 	return validateChunkIDs(evaluationCase.ExpectedChunkIDs)
 }
-
-func addRetrievalMetrics(left, right RetrievalMetrics) RetrievalMetrics {
-	return RetrievalMetrics{Precision: left.Precision + right.Precision, Recall: left.Recall + right.Recall, NDCG3: left.NDCG3 + right.NDCG3, NDCG10: left.NDCG10 + right.NDCG10, MRR: left.MRR + right.MRR, MAP: left.MAP + right.MAP}
-}
-
-func divideRetrievalMetrics(value RetrievalMetrics, divisor float64) RetrievalMetrics {
-	return RetrievalMetrics{Precision: value.Precision / divisor, Recall: value.Recall / divisor, NDCG3: value.NDCG3 / divisor, NDCG10: value.NDCG10 / divisor, MRR: value.MRR / divisor, MAP: value.MAP / divisor}
-}
-
-func addGenerationMetrics(left, right GenerationMetrics) GenerationMetrics {
-	return GenerationMetrics{BLEU1: left.BLEU1 + right.BLEU1, BLEU2: left.BLEU2 + right.BLEU2, BLEU4: left.BLEU4 + right.BLEU4, ROUGE1: left.ROUGE1 + right.ROUGE1, ROUGE2: left.ROUGE2 + right.ROUGE2, ROUGEL: left.ROUGEL + right.ROUGEL, Faithfulness: left.Faithfulness + right.Faithfulness, AnswerRelevance: left.AnswerRelevance + right.AnswerRelevance, CitationRecall: left.CitationRecall + right.CitationRecall, CitationPrecision: left.CitationPrecision + right.CitationPrecision}
-}
-
-func divideGenerationMetrics(value GenerationMetrics, divisor float64) GenerationMetrics {
-	return GenerationMetrics{BLEU1: value.BLEU1 / divisor, BLEU2: value.BLEU2 / divisor, BLEU4: value.BLEU4 / divisor, ROUGE1: value.ROUGE1 / divisor, ROUGE2: value.ROUGE2 / divisor, ROUGEL: value.ROUGEL / divisor, Faithfulness: value.Faithfulness / divisor, AnswerRelevance: value.AnswerRelevance / divisor, CitationRecall: value.CitationRecall / divisor, CitationPrecision: value.CitationPrecision / divisor}
-}
