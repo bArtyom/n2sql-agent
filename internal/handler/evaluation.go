@@ -115,5 +115,26 @@ func getEvaluation(w http.ResponseWriter, r *http.Request, reader evaluationrun.
 		http.Error(w, `{"error":"unable to load evaluation results"}`, http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{"run_id": run.ID, "status": run.Status, "total_cases": run.TotalCases, "finished_cases": run.FinishedCases, "failed_cases": run.FailedCases, "attempt_count": run.AttemptCount, "dataset_version": run.DatasetVersion, "duration_ms": run.DurationMS, "prompt_tokens": run.PromptTokens, "completion_tokens": run.CompletionTokens, "total_tokens": run.TotalTokens, "estimated_cost_micros": run.EstimatedCostMicros, "error": run.ErrorMessage, "created_at": run.CreatedAt, "started_at": run.StartedAt, "finished_at": run.FinishedAt, "updated_at": run.UpdatedAt, "results": results})
+	refusalMetrics := evaluationRefusalMetrics(run)
+	writeJSON(w, map[string]any{"run_id": run.ID, "status": run.Status, "total_cases": run.TotalCases, "finished_cases": run.FinishedCases, "failed_cases": run.FailedCases, "attempt_count": run.AttemptCount, "dataset_version": run.DatasetVersion, "duration_ms": run.DurationMS, "prompt_tokens": run.PromptTokens, "completion_tokens": run.CompletionTokens, "total_tokens": run.TotalTokens, "estimated_cost_micros": run.EstimatedCostMicros, "expected_relevant_cases": run.ExpectedRelevantCases, "expected_irrelevant_cases": run.ExpectedIrrelevantCases, "correct_refusals": run.CorrectRefusals, "false_refusals": run.FalseRefusals, "unsupported_accepts": run.UnsupportedAccepts, "recall": refusalMetrics.recall, "refusal_rate": refusalMetrics.refusalRate, "accuracy": refusalMetrics.accuracy, "error": run.ErrorMessage, "created_at": run.CreatedAt, "started_at": run.StartedAt, "finished_at": run.FinishedAt, "updated_at": run.UpdatedAt, "results": results})
+}
+
+type evaluationRefusalMetricValues struct {
+	recall      float64
+	refusalRate float64
+	accuracy    float64
+}
+
+func evaluationRefusalMetrics(run evaluationrun.Run) evaluationRefusalMetricValues {
+	metrics := evaluationRefusalMetricValues{}
+	if run.ExpectedRelevantCases > 0 {
+		metrics.recall = float64(run.ExpectedRelevantCases-run.FalseRefusals) / float64(run.ExpectedRelevantCases)
+	}
+	if run.ExpectedIrrelevantCases > 0 {
+		metrics.refusalRate = float64(run.CorrectRefusals) / float64(run.ExpectedIrrelevantCases)
+	}
+	if run.TotalCases > 0 {
+		metrics.accuracy = float64(run.ExpectedRelevantCases-run.FalseRefusals+run.CorrectRefusals) / float64(run.TotalCases)
+	}
+	return metrics
 }

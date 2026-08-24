@@ -11,12 +11,16 @@ import (
 // The evaluator will populate it after the full RAG pipeline produces an
 // answer for a case.
 type GenerationMetrics struct {
-	BLEU1  float64 `json:"bleu1"`
-	BLEU2  float64 `json:"bleu2"`
-	BLEU4  float64 `json:"bleu4"`
-	ROUGE1 float64 `json:"rouge1"`
-	ROUGE2 float64 `json:"rouge2"`
-	ROUGEL float64 `json:"rougel"`
+	BLEU1             float64 `json:"bleu1"`
+	BLEU2             float64 `json:"bleu2"`
+	BLEU4             float64 `json:"bleu4"`
+	ROUGE1            float64 `json:"rouge1"`
+	ROUGE2            float64 `json:"rouge2"`
+	ROUGEL            float64 `json:"rougel"`
+	Faithfulness      float64 `json:"faithfulness,omitempty"`
+	AnswerRelevance   float64 `json:"answer_relevance,omitempty"`
+	CitationRecall    float64 `json:"citation_recall,omitempty"`
+	CitationPrecision float64 `json:"citation_precision,omitempty"`
 }
 
 // ScoreGeneration calculates the same six metric families used by WeKnora:

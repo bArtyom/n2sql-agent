@@ -20,6 +20,8 @@ type passageSearcherStub struct{}
 
 type ragAnswererStub struct{}
 
+type refusalAnswererStub struct{}
+
 func (explainableSearcherStub) Search(context.Context, int64, string, int) ([]retrieval.Result, error) {
 	return []retrieval.Result{
 		{DocumentID: 9, Position: 2, Distance: 0.2, MatchType: "hybrid", HeadingScore: 0.8},
@@ -39,8 +41,12 @@ func (passageSearcherStub) Search(context.Context, int64, string, int) ([]retrie
 func (ragAnswererStub) Answer(context.Context, int64, string, int) (rag.Response, error) {
 	return rag.Response{
 		Answer:  "PostgreSQL supports vector search.",
-		Sources: []retrieval.Result{{DocumentID: 1, Position: 0, Distance: 0.1}},
+		Sources: []retrieval.Result{{DocumentID: 1, Position: 0, Distance: 0.1, Content: "PostgreSQL supports vector search."}},
 	}, nil
+}
+
+func (refusalAnswererStub) Answer(context.Context, int64, string, int) (rag.Response, error) {
+	return rag.Response{Answer: "知识库中没有找到足够资料，暂时无法回答这个问题。"}, nil
 }
 
 func (s searcherStub) Search(_ context.Context, _ int64, query string, _ int) ([]retrieval.Result, error) {
@@ -187,11 +193,47 @@ func TestEvaluateRAGReturnsWeKnoraMetricGroups(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EvaluateRAG() error = %v", err)
 	}
-	if report.Total != 1 || report.Metric.RetrievalMetrics.Recall != 1 || report.Metric.GenerationMetrics.ROUGEL != 1 {
+	if report.Total != 1 || report.Metric.RetrievalMetrics.Recall != 1 || report.Metric.GenerationMetrics.ROUGEL != 1 ||
+		report.Metric.GenerationMetrics.Faithfulness != 1 || report.Metric.GenerationMetrics.AnswerRelevance != 1 ||
+		report.Metric.GenerationMetrics.CitationRecall != 1 || report.Metric.GenerationMetrics.CitationPrecision != 1 {
 		t.Fatalf("RAG report = %#v", report)
 	}
 	if report.Cases[0].Metrics.GenerationMetrics.BLEU4 != 1 {
 		t.Fatalf("case generation metrics = %#v", report.Cases[0].Metrics.GenerationMetrics)
+	}
+}
+
+func TestEvaluateRAGAggregatesQualityWithoutReferenceAnswer(t *testing.T) {
+	report, err := retrievaleval.EvaluateRAG(context.Background(), ragAnswererStub{}, []retrievaleval.Case{{
+		ID:               "rag-quality-only",
+		KnowledgeBaseID:  1,
+		Question:         "What database supports vector search?",
+		ExpectedRelevant: true,
+		ExpectedChunkIDs: []string{"1:0"},
+	}}, 5)
+	if err != nil {
+		t.Fatalf("EvaluateRAG() error = %v", err)
+	}
+	if report.Metric.GenerationMetrics.Faithfulness != 1 ||
+		report.Metric.GenerationMetrics.AnswerRelevance == 0 ||
+		report.Metric.GenerationMetrics.CitationRecall != 1 {
+		t.Fatalf("quality-only report = %#v, want quality metrics without reference answer", report.Metric.GenerationMetrics)
+	}
+}
+
+func TestEvaluateRAGTracksStrictRefusalMetrics(t *testing.T) {
+	report, err := retrievaleval.EvaluateRAG(context.Background(), refusalAnswererStub{}, []retrievaleval.Case{
+		{ID: "out", KnowledgeBaseID: 1, Question: "公司有班车吗？", ExpectedRelevant: false},
+		{ID: "in", KnowledgeBaseID: 1, Question: "年假怎么算？", ExpectedRelevant: true, ReferenceAnswer: "年假按照入职年限计算。"},
+	}, 5)
+	if err != nil {
+		t.Fatalf("EvaluateRAG() error = %v", err)
+	}
+	if report.CorrectRefusals != 1 || report.FalseRefusals != 1 || report.RefusalRate != 1 || report.Accuracy != 0.5 {
+		t.Fatalf("refusal report = %#v", report)
+	}
+	if !report.Cases[0].Refused || !report.Cases[0].CorrectRefusal || report.Cases[1].CorrectRefusal {
+		t.Fatalf("refusal cases = %#v", report.Cases)
 	}
 }
 

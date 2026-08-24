@@ -33,7 +33,20 @@ type evaluationReaderStub struct{}
 
 func (evaluationReaderStub) Get(context.Context, int64, int64) (evaluationrun.Run, error) {
 	now := time.Now()
-	return evaluationrun.Run{ID: 12, KnowledgeBaseID: 7, Status: evaluationrun.StatusSucceeded, TotalCases: 1, FinishedCases: 1, CreatedAt: now, UpdatedAt: now}, nil
+	return evaluationrun.Run{
+		ID:                      12,
+		KnowledgeBaseID:         7,
+		Status:                  evaluationrun.StatusSucceeded,
+		TotalCases:              2,
+		FinishedCases:           2,
+		ExpectedRelevantCases:   1,
+		ExpectedIrrelevantCases: 1,
+		CorrectRefusals:         1,
+		FalseRefusals:           0,
+		UnsupportedAccepts:      0,
+		CreatedAt:               now,
+		UpdatedAt:               now,
+	}, nil
 }
 func (evaluationReaderStub) ListResults(context.Context, int64) ([]evaluationrun.CaseResult, error) {
 	return []evaluationrun.CaseResult{{RunID: 12, CaseID: 1, Question: "问题", GeneratedAnswer: "答案", RetrievedIDs: json.RawMessage(`[]`), RetrievalMetrics: json.RawMessage(`{}`), GenerationMetrics: json.RawMessage(`{}`)}}, nil
@@ -55,7 +68,10 @@ func TestEvaluationCreatesAndReadsWeKnoraSnapshot(t *testing.T) {
 	request.SetPathValue("runID", "12")
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"finished_cases":1`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"finished_cases":2`) ||
+		!strings.Contains(response.Body.String(), `"recall":1`) ||
+		!strings.Contains(response.Body.String(), `"refusal_rate":1`) ||
+		!strings.Contains(response.Body.String(), `"accuracy":1`) {
 		t.Fatalf("get status=%d body=%s", response.Code, response.Body.String())
 	}
 }

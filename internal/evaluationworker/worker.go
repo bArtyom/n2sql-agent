@@ -45,7 +45,7 @@ func (SnapshotCaseProvider) Cases(_ context.Context, run evaluationrun.Run) ([]r
 			}
 			ids = append(ids, chunkID)
 		}
-		cases = append(cases, retrievaleval.Case{ID: strconv.FormatInt(pair.QID, 10), KnowledgeBaseID: run.KnowledgeBaseID, Question: pair.Question, ExpectedChunkIDs: ids, ReferenceAnswer: pair.Answer})
+		cases = append(cases, retrievaleval.Case{ID: strconv.FormatInt(pair.QID, 10), KnowledgeBaseID: run.KnowledgeBaseID, Question: pair.Question, ExpectedRelevant: len(ids) > 0, ExpectedChunkIDs: ids, ReferenceAnswer: pair.Answer})
 	}
 	return cases, nil
 }
@@ -126,6 +126,7 @@ func (w Worker) RunOnce(ctx context.Context) error {
 			ReferenceAnswer: evaluationCase.ReferenceAnswer, GeneratedAnswer: result.Answer,
 			RetrievedIDs: mustJSON(result.RetrievedIDs), RetrievalMetrics: mustJSON(result.Metrics.RetrievalMetrics),
 			GenerationMetrics: mustJSON(result.Metrics.GenerationMetrics), Status: status,
+			ExpectedRelevant: evaluationCase.ExpectedRelevant, Refused: result.Refused, CorrectRefusal: result.CorrectRefusal,
 			AttemptCount: attempts, DurationMS: finished.Sub(started).Milliseconds(),
 			StartedAt: &started, FinishedAt: &finished,
 		}

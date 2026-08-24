@@ -52,6 +52,11 @@ type Run struct {
 	TotalCases            int
 	FinishedCases         int
 	FailedCases           int
+	ExpectedRelevantCases int
+	ExpectedIrrelevantCases int
+	CorrectRefusals       int
+	FalseRefusals         int
+	UnsupportedAccepts    int
 	AttemptCount          int
 	LeaseToken            string
 	LeaseUntil            *time.Time
@@ -87,6 +92,9 @@ type CaseResult struct {
 	RetrievalMetrics    json.RawMessage
 	GenerationMetrics   json.RawMessage
 	ErrorMessage        string
+	ExpectedRelevant    bool
+	Refused             bool
+	CorrectRefusal      bool
 	Status              CaseStatus
 	AttemptCount        int
 	DurationMS          int64
@@ -149,11 +157,14 @@ func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Run, err
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id, knowledge_base_id, dataset_snapshot, config, status, total_cases,
 			dataset_version, knowledge_base_snapshot, model_config, finished_cases, failed_cases,
-			attempt_count, created_at, updated_at`,
+			expected_relevant_cases, expected_irrelevant_cases, correct_refusals, false_refusals,
+			unsupported_accepts, attempt_count, created_at, updated_at`,
 		input.KnowledgeBaseID, input.DatasetSnapshot, datasetVersion, knowledgeSnapshot, modelConfig, config, input.TotalCases).Scan(
 		&run.ID, &run.KnowledgeBaseID, &run.DatasetSnapshot, &run.Config, &run.Status,
 		&run.TotalCases, &run.DatasetVersion, &run.KnowledgeBaseSnapshot, &run.ModelConfig,
-		&run.FinishedCases, &run.FailedCases, &run.AttemptCount, &run.CreatedAt, &run.UpdatedAt)
+		&run.FinishedCases, &run.FailedCases, &run.ExpectedRelevantCases, &run.ExpectedIrrelevantCases,
+		&run.CorrectRefusals, &run.FalseRefusals, &run.UnsupportedAccepts, &run.AttemptCount,
+		&run.CreatedAt, &run.UpdatedAt)
 	if err != nil {
 		return Run{}, fmt.Errorf("create evaluation run: %w", err)
 	}
@@ -179,13 +190,15 @@ func (s *PostgresStore) ClaimNext(ctx context.Context) (Run, error) {
 		WHERE run.id = next_run.id
 		RETURNING run.id, run.knowledge_base_id, run.dataset_snapshot, run.config,
 			run.status, run.total_cases, run.dataset_version, run.knowledge_base_snapshot, run.model_config,
-			run.finished_cases, run.failed_cases, run.attempt_count,
+			run.finished_cases, run.failed_cases, run.expected_relevant_cases, run.expected_irrelevant_cases,
+			run.correct_refusals, run.false_refusals, run.unsupported_accepts, run.attempt_count,
 			run.lease_token, run.lease_until, run.created_at, run.started_at,
 			run.finished_at, run.updated_at, run.duration_ms, run.prompt_tokens,
 			run.completion_tokens, run.total_tokens, run.estimated_cost_micros`,
 	).Scan(&run.ID, &run.KnowledgeBaseID, &run.DatasetSnapshot, &run.Config, &run.Status,
 		&run.TotalCases, &run.DatasetVersion, &run.KnowledgeBaseSnapshot, &run.ModelConfig,
-		&run.FinishedCases, &run.FailedCases, &run.AttemptCount, &run.LeaseToken,
+		&run.FinishedCases, &run.FailedCases, &run.ExpectedRelevantCases, &run.ExpectedIrrelevantCases,
+		&run.CorrectRefusals, &run.FalseRefusals, &run.UnsupportedAccepts, &run.AttemptCount, &run.LeaseToken,
 		&run.LeaseUntil, &run.CreatedAt, &run.StartedAt, &run.FinishedAt, &run.UpdatedAt,
 		&run.DurationMS, &run.PromptTokens, &run.CompletionTokens, &run.TotalTokens, &run.EstimatedCostMicros)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -205,12 +218,14 @@ func (s *PostgresStore) Get(ctx context.Context, id, knowledgeBaseID int64) (Run
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, knowledge_base_id, dataset_snapshot, config, status, total_cases,
 			dataset_version, knowledge_base_snapshot, model_config, finished_cases, failed_cases,
-			attempt_count, COALESCE(error_message,''), created_at, started_at, finished_at, updated_at,
+			expected_relevant_cases, expected_irrelevant_cases, correct_refusals, false_refusals,
+			unsupported_accepts, attempt_count, COALESCE(error_message,''), created_at, started_at, finished_at, updated_at,
 			duration_ms, prompt_tokens, completion_tokens, total_tokens, estimated_cost_micros
 		FROM evaluation_runs WHERE id = $1 AND knowledge_base_id = $2`, id, knowledgeBaseID).Scan(
 		&run.ID, &run.KnowledgeBaseID, &run.DatasetSnapshot, &run.Config, &run.Status,
 		&run.TotalCases, &run.DatasetVersion, &run.KnowledgeBaseSnapshot, &run.ModelConfig,
-		&run.FinishedCases, &run.FailedCases, &run.AttemptCount, &run.ErrorMessage,
+		&run.FinishedCases, &run.FailedCases, &run.ExpectedRelevantCases, &run.ExpectedIrrelevantCases,
+		&run.CorrectRefusals, &run.FalseRefusals, &run.UnsupportedAccepts, &run.AttemptCount, &run.ErrorMessage,
 		&run.CreatedAt, &run.StartedAt, &run.FinishedAt, &run.UpdatedAt, &run.DurationMS,
 		&run.PromptTokens, &run.CompletionTokens, &run.TotalTokens, &run.EstimatedCostMicros)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -231,7 +246,7 @@ func (s *PostgresStore) ListResults(ctx context.Context, runID int64) ([]CaseRes
 			COALESCE(generated_answer,''), retrieved_ids, retrieval_metrics,
 			generation_metrics, COALESCE(error_message,''), status, attempt_count,
 			duration_ms, prompt_tokens, completion_tokens, total_tokens, estimated_cost_micros,
-			started_at, finished_at
+			started_at, finished_at, expected_relevant, refused, correct_refusal
 		FROM evaluation_case_results WHERE evaluation_run_id = $1 ORDER BY case_id`, runID)
 	if err != nil {
 		return nil, fmt.Errorf("list evaluation results: %w", err)
@@ -244,7 +259,8 @@ func (s *PostgresStore) ListResults(ctx context.Context, runID int64) ([]CaseRes
 			&result.GeneratedAnswer, &result.RetrievedIDs, &result.RetrievalMetrics,
 			&result.GenerationMetrics, &result.ErrorMessage, &result.Status, &result.AttemptCount,
 			&result.DurationMS, &result.PromptTokens, &result.CompletionTokens, &result.TotalTokens,
-			&result.EstimatedCostMicros, &result.StartedAt, &result.FinishedAt); err != nil {
+			&result.EstimatedCostMicros, &result.StartedAt, &result.FinishedAt, &result.ExpectedRelevant,
+			&result.Refused, &result.CorrectRefusal); err != nil {
 			return nil, fmt.Errorf("scan evaluation result: %w", err)
 		}
 		results = append(results, result)
@@ -298,14 +314,15 @@ func (s *PostgresStore) SaveCaseResult(ctx context.Context, result CaseResult) e
 			(evaluation_run_id, case_id, question, reference_answer, generated_answer,
 			 retrieved_ids, retrieval_metrics, generation_metrics, error_message, status,
 			 attempt_count, duration_ms, prompt_tokens, completion_tokens, total_tokens,
-			 estimated_cost_micros, started_at, finished_at)
+			 estimated_cost_micros, started_at, finished_at, expected_relevant, refused, correct_refusal)
 		VALUES ($1,$2,$3,NULLIF($4,''),NULLIF($5,''),$6,$7,$8,NULLIF($9,''),$10,
-			$11,$12,$13,$14,$15,$16,$17,$18)
+			$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
 		ON CONFLICT (evaluation_run_id, case_id) DO NOTHING
 		RETURNING true`, result.RunID, result.CaseID, result.Question, result.ReferenceAnswer,
 		result.GeneratedAnswer, result.RetrievedIDs, result.RetrievalMetrics, result.GenerationMetrics,
 		result.ErrorMessage, result.Status, result.AttemptCount, result.DurationMS, result.PromptTokens,
-		result.CompletionTokens, result.TotalTokens, result.EstimatedCostMicros, result.StartedAt, result.FinishedAt).Scan(&inserted)
+		result.CompletionTokens, result.TotalTokens, result.EstimatedCostMicros, result.StartedAt, result.FinishedAt,
+		result.ExpectedRelevant, result.Refused, result.CorrectRefusal).Scan(&inserted)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -315,11 +332,17 @@ func (s *PostgresStore) SaveCaseResult(ctx context.Context, result CaseResult) e
 	if inserted {
 		if _, err = tx.ExecContext(ctx, `UPDATE evaluation_runs SET finished_cases = finished_cases + 1,
 			failed_cases = failed_cases + CASE WHEN $2 = 'failed' THEN 1 ELSE 0 END,
+			expected_relevant_cases = expected_relevant_cases + CASE WHEN $8 THEN 1 ELSE 0 END,
+			expected_irrelevant_cases = expected_irrelevant_cases + CASE WHEN NOT $8 THEN 1 ELSE 0 END,
+			correct_refusals = correct_refusals + CASE WHEN $9 THEN 1 ELSE 0 END,
+			false_refusals = false_refusals + CASE WHEN $8 AND $10 THEN 1 ELSE 0 END,
+			unsupported_accepts = unsupported_accepts + CASE WHEN NOT $8 AND NOT $10 THEN 1 ELSE 0 END,
 			duration_ms = duration_ms + $3, prompt_tokens = prompt_tokens + $4,
 			completion_tokens = completion_tokens + $5, total_tokens = total_tokens + $6,
 			estimated_cost_micros = estimated_cost_micros + $7, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
 			result.RunID, result.Status, result.DurationMS, result.PromptTokens, result.CompletionTokens,
-			result.TotalTokens, result.EstimatedCostMicros); err != nil {
+			result.TotalTokens, result.EstimatedCostMicros, result.ExpectedRelevant, result.CorrectRefusal,
+			result.Refused); err != nil {
 			return fmt.Errorf("advance evaluation progress: %w", err)
 		}
 	}
