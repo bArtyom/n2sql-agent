@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
+	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
 type reasoningEffortContextKey struct{}
@@ -102,12 +104,14 @@ func (s *ChatService) ChatMessages(ctx context.Context, messages []modelclient.C
 	if err != nil {
 		return modelclient.ChatResponse{}, err
 	}
+	started := time.Now()
 	response, err := s.completer.Chat(ctx, provider.BaseURL, apiKey, modelclient.ChatRequest{
 		Model:               provider.ChatModel,
 		Messages:            messages,
 		MaxCompletionTokens: maxCompletionTokens(ctx),
 		Stream:              false,
 	})
+	observeModelCall(ctx, usage.ModelKindChat, provider.Name, provider.ChatModel, started, response.Usage, err)
 	if err != nil {
 		return modelclient.ChatResponse{}, &ChatCallError{Err: fmt.Errorf("complete chat: %w", err)}
 	}
@@ -123,6 +127,7 @@ func (s *ChatService) ChatMessagesWithToolsForModel(ctx context.Context, request
 	if err != nil {
 		return modelclient.ChatResponse{}, err
 	}
+	started := time.Now()
 	model, err := provider.ResolveChatModel(requestedModel)
 	if err != nil {
 		return modelclient.ChatResponse{}, err
@@ -138,6 +143,7 @@ func (s *ChatService) ChatMessagesWithToolsForModel(ctx context.Context, request
 	if err != nil {
 		return modelclient.ChatResponse{}, &ChatCallError{Err: fmt.Errorf("complete chat with tools: %w", err)}
 	}
+	observeModelCall(ctx, usage.ModelKindChat, provider.Name, model, started, response.Usage, err)
 	return response, nil
 }
 
@@ -176,17 +182,20 @@ func (s *ChatService) StreamMessages(ctx context.Context, messages []modelclient
 	if err != nil {
 		return err
 	}
+	started := time.Now()
 	if err := s.streamer.ChatStream(ctx, provider.BaseURL, apiKey, modelclient.ChatRequest{
 		Model:               provider.ChatModel,
 		Messages:            messages,
 		MaxCompletionTokens: maxCompletionTokens(ctx),
 		Stream:              true,
 	}, onDelta); err != nil {
+		observeModelCall(ctx, usage.ModelKindChat, provider.Name, provider.ChatModel, started, nil, err)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
 		return &ChatCallError{Err: fmt.Errorf("stream chat: %w", err)}
 	}
+	observeModelCall(ctx, usage.ModelKindChat, provider.Name, provider.ChatModel, started, nil, nil)
 	return nil
 }
 

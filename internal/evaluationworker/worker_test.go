@@ -3,6 +3,7 @@ package evaluationworker_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/bArtyom/n2sql-agent/internal/evaluationrun"
@@ -81,6 +82,31 @@ type countingAnswerer struct{ calls int }
 func (a *countingAnswerer) Answer(context.Context, int64, string, int) (rag.Response, error) {
 	a.calls++
 	return rag.Response{Answer: "生成答案", Sources: []retrieval.Result{{DocumentID: 1, Position: 0}}}, nil
+}
+
+type retryingAnswerer struct{ calls int }
+
+func (a *retryingAnswerer) Answer(context.Context, int64, string, int) (rag.Response, error) {
+	a.calls++
+	if a.calls == 1 {
+		return rag.Response{}, errors.New("temporary model failure")
+	}
+	return rag.Response{Answer: "恢复后的答案", Sources: []retrieval.Result{{DocumentID: 1, Position: 0}}}, nil
+}
+
+func TestRunOnceRetriesOneCaseAndPersistsAttemptTelemetry(t *testing.T) {
+	store := &storeStub{run: evaluationrun.Run{ID: 11, KnowledgeBaseID: 3, LeaseToken: "lease", Config: json.RawMessage(`{"max_case_attempts":2}`)}}
+	answerer := &retryingAnswerer{}
+	worker := evaluationworker.Worker{
+		Store: store, Cases: providerStub{cases: []retrievaleval.Case{{ID: "1", KnowledgeBaseID: 3, Question: "可重试问题", ExpectedChunkIDs: []string{"1:0"}}}},
+		Answerer: answerer, TopK: 5,
+	}
+	if err := worker.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+	if answerer.calls != 2 || len(store.results) != 1 || store.results[0].Status != evaluationrun.CaseStatusSucceeded || store.results[0].AttemptCount != 2 {
+		t.Fatalf("retry telemetry = calls=%d results=%#v", answerer.calls, store.results)
+	}
 }
 
 func TestRunOnceSkipsCasesAlreadyPersistedAfterLeaseRecovery(t *testing.T) {

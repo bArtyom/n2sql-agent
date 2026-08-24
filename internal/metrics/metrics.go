@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"sync/atomic"
 	"time"
+
+	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
 const (
@@ -44,32 +46,57 @@ type WorkerObservation struct {
 	Duration time.Duration
 }
 
+var _ usage.CallObserver = (*Registry)(nil)
+
 // Registry stores process-local metrics. A scrape or process restart does not
 // persist these values; a later Prometheus integration can provide retention.
 type Registry struct {
-	httpRequestsTotal       atomic.Uint64
-	httpRequests4xxTotal    atomic.Uint64
-	httpRequests5xxTotal    atomic.Uint64
-	httpDurationMSTotal     atomic.Uint64
-	agentRunsTotal          atomic.Uint64
-	agentRunsSucceeded      atomic.Uint64
-	agentRunsFailed         atomic.Uint64
-	agentRunsCanceled       atomic.Uint64
-	agentRunsTimeout        atomic.Uint64
-	agentStepsTotal         atomic.Uint64
-	agentToolCallsTotal     atomic.Uint64
-	agentToolFailuresTotal  atomic.Uint64
-	agentTokensTotal        atomic.Uint64
-	agentDurationMSTotal    atomic.Uint64
-	workerTasksStarted      atomic.Uint64
-	workerTasksSucceeded    atomic.Uint64
-	workerTasksFailed       atomic.Uint64
-	workerTasksCanceled     atomic.Uint64
-	workerClaimFailures     atomic.Uint64
-	workerStatusUpdateFails atomic.Uint64
-	workerRetries           atomic.Uint64
-	workerDeadLetters       atomic.Uint64
-	workerDurationMSTotal   atomic.Uint64
+	httpRequestsTotal          atomic.Uint64
+	httpRequests4xxTotal       atomic.Uint64
+	httpRequests5xxTotal       atomic.Uint64
+	httpDurationMSTotal        atomic.Uint64
+	agentRunsTotal             atomic.Uint64
+	agentRunsSucceeded         atomic.Uint64
+	agentRunsFailed            atomic.Uint64
+	agentRunsCanceled          atomic.Uint64
+	agentRunsTimeout           atomic.Uint64
+	agentStepsTotal            atomic.Uint64
+	agentToolCallsTotal        atomic.Uint64
+	agentToolFailuresTotal     atomic.Uint64
+	agentTokensTotal           atomic.Uint64
+	agentDurationMSTotal       atomic.Uint64
+	workerTasksStarted         atomic.Uint64
+	workerTasksSucceeded       atomic.Uint64
+	workerTasksFailed          atomic.Uint64
+	workerTasksCanceled        atomic.Uint64
+	workerClaimFailures        atomic.Uint64
+	workerStatusUpdateFails    atomic.Uint64
+	workerRetries              atomic.Uint64
+	workerDeadLetters          atomic.Uint64
+	workerDurationMSTotal      atomic.Uint64
+	modelCallsTotal            atomic.Uint64
+	modelFailuresTotal         atomic.Uint64
+	modelDurationMSTotal       atomic.Uint64
+	modelPromptTokensTotal     atomic.Uint64
+	modelCompletionTokensTotal atomic.Uint64
+	modelTokensTotal           atomic.Uint64
+}
+
+// ObserveModelCall keeps a low-cardinality process aggregate. Detailed
+// provider/model names belong in a trace or evaluation snapshot, not in
+// unbounded Prometheus labels.
+func (r *Registry) ObserveModelCall(observation usage.ModelCallObservation) {
+	if r == nil {
+		return
+	}
+	r.modelCallsTotal.Add(1)
+	if !observation.Success {
+		r.modelFailuresTotal.Add(1)
+	}
+	r.modelDurationMSTotal.Add(durationMilliseconds(observation.Duration))
+	r.modelPromptTokensTotal.Add(nonNegativeInt(observation.Usage.PromptTokens))
+	r.modelCompletionTokensTotal.Add(nonNegativeInt(observation.Usage.CompletionTokens))
+	r.modelTokensTotal.Add(nonNegativeInt(observation.Usage.EffectiveTotal()))
 }
 
 func New() *Registry { return &Registry{} }
@@ -182,6 +209,12 @@ func (r *Registry) write(w io.Writer) error {
 		{"worker_retries_total", r.workerRetries.Load()},
 		{"worker_dead_letters_total", r.workerDeadLetters.Load()},
 		{"worker_task_duration_ms_total", r.workerDurationMSTotal.Load()},
+		{"model_calls_total", r.modelCallsTotal.Load()},
+		{"model_failures_total", r.modelFailuresTotal.Load()},
+		{"model_call_duration_ms_total", r.modelDurationMSTotal.Load()},
+		{"model_prompt_tokens_total", r.modelPromptTokensTotal.Load()},
+		{"model_completion_tokens_total", r.modelCompletionTokensTotal.Load()},
+		{"model_tokens_total", r.modelTokensTotal.Load()},
 	}
 	for _, line := range lines {
 		if _, err := fmt.Fprintf(w, "%s %d\n", line.name, line.value); err != nil {
@@ -205,7 +238,7 @@ func (r *Registry) Middleware(next http.Handler) http.Handler {
 			}
 			r.ObserveHTTP(HTTPObservation{StatusCode: status, Duration: time.Since(started)})
 		}()
-		next.ServeHTTP(response, request)
+		next.ServeHTTP(response, request.WithContext(usage.WithCallObserver(request.Context(), r)))
 	})
 }
 

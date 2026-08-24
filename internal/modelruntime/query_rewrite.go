@@ -50,7 +50,9 @@ func (s *QueryRewriteService) Rewrite(ctx context.Context, query string, maxVari
 		return nil, fmt.Errorf("rewrite query with chat model: %w", err)
 	}
 	if observer := usage.ObserverFromContext(ctx); observer != nil && response.Usage != nil {
-		observer.ObserveChatTokens(*response.Usage)
+		if _, alreadyObserved := observer.(usage.CallObserver); !alreadyObserved {
+			observer.ObserveChatTokens(*response.Usage)
+		}
 	}
 	content := strings.TrimSpace(response.Message)
 	if len(content) > maxQueryRewriteBytes {

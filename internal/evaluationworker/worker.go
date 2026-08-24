@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/evaluationdataset"
 	"github.com/bArtyom/n2sql-agent/internal/evaluationrun"
 	"github.com/bArtyom/n2sql-agent/internal/rag"
 	"github.com/bArtyom/n2sql-agent/internal/retrievaleval"
+	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
 var ErrInvalidWorker = errors.New("invalid evaluation worker")
@@ -55,6 +57,12 @@ type Worker struct {
 	TopK     int
 }
 
+type evaluationConfig struct {
+	MaxCaseAttempts           int   `json:"max_case_attempts"`
+	PromptCostPer1KMicros     int64 `json:"prompt_cost_per_1k_micros"`
+	CompletionCostPer1KMicros int64 `json:"completion_cost_per_1k_micros"`
+}
+
 func (w Worker) RunOnce(ctx context.Context) error {
 	if ctx == nil || w.Store == nil || w.Cases == nil || w.Answerer == nil || w.TopK <= 0 {
 		return ErrInvalidWorker
@@ -73,6 +81,7 @@ func (w Worker) RunOnce(ctx context.Context) error {
 	if err != nil {
 		return w.fail(ctx, run, err)
 	}
+	config := decodeConfig(run.Config)
 	completed := make(map[int64]struct{})
 	if reader, ok := w.Store.(evaluationrun.Reader); ok {
 		results, readErr := reader.ListResults(ctx, run.ID)
@@ -88,16 +97,43 @@ func (w Worker) RunOnce(ctx context.Context) error {
 		if _, ok := completed[caseID]; ok {
 			continue
 		}
-		result, err := retrievaleval.EvaluateRAGCase(ctx, w.Answerer, evaluationCase, w.TopK)
-		if err != nil {
-			return w.fail(ctx, run, err)
+		maxAttempts := config.MaxCaseAttempts
+		if maxAttempts <= 0 {
+			maxAttempts = 2
 		}
-		if err := w.Store.SaveCaseResult(ctx, evaluationrun.CaseResult{
+		var result retrievaleval.RAGCaseResult
+		var caseErr error
+		var tracker *usage.CallTracker
+		attempts := 0
+		started := time.Now()
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			attempts = attempt
+			tracker = usage.NewCallTracker()
+			caseCtx := usage.WithObserver(ctx, tracker)
+			caseCtx = usage.WithCallObserver(caseCtx, tracker)
+			result, caseErr = retrievaleval.EvaluateRAGCase(caseCtx, w.Answerer, evaluationCase, w.TopK)
+			if caseErr == nil {
+				break
+			}
+		}
+		finished := time.Now()
+		status := evaluationrun.CaseStatusSucceeded
+		if caseErr != nil {
+			status = evaluationrun.CaseStatusFailed
+		}
+		caseResult := evaluationrun.CaseResult{
 			RunID: run.ID, CaseID: caseID, Question: evaluationCase.Question,
 			ReferenceAnswer: evaluationCase.ReferenceAnswer, GeneratedAnswer: result.Answer,
 			RetrievedIDs: mustJSON(result.RetrievedIDs), RetrievalMetrics: mustJSON(result.Metrics.RetrievalMetrics),
-			GenerationMetrics: mustJSON(result.Metrics.GenerationMetrics),
-		}); err != nil {
+			GenerationMetrics: mustJSON(result.Metrics.GenerationMetrics), Status: status,
+			AttemptCount: attempts, DurationMS: finished.Sub(started).Milliseconds(),
+			StartedAt: &started, FinishedAt: &finished,
+		}
+		if caseErr != nil {
+			caseResult.ErrorMessage = caseErr.Error()
+		}
+		caseResult.PromptTokens, caseResult.CompletionTokens, caseResult.TotalTokens, caseResult.EstimatedCostMicros = summarizeUsage(tracker, config)
+		if err := w.Store.SaveCaseResult(ctx, caseResult); err != nil {
 			return w.fail(ctx, run, err)
 		}
 	}
@@ -105,6 +141,39 @@ func (w Worker) RunOnce(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func decodeConfig(raw json.RawMessage) evaluationConfig {
+	var config evaluationConfig
+	if json.Unmarshal(raw, &config) != nil {
+		return evaluationConfig{}
+	}
+	if config.MaxCaseAttempts > 8 {
+		config.MaxCaseAttempts = 8
+	}
+	if config.MaxCaseAttempts < 0 {
+		config.MaxCaseAttempts = 0
+	}
+	if config.PromptCostPer1KMicros < 0 {
+		config.PromptCostPer1KMicros = 0
+	}
+	if config.CompletionCostPer1KMicros < 0 {
+		config.CompletionCostPer1KMicros = 0
+	}
+	return config
+}
+
+func summarizeUsage(tracker *usage.CallTracker, config evaluationConfig) (prompt, completion, total int, cost int64) {
+	if tracker == nil {
+		return
+	}
+	for _, snapshot := range tracker.ModelCallSnapshots() {
+		prompt += snapshot.PromptTokens
+		completion += snapshot.CompletionTokens
+		total += snapshot.TotalTokens
+	}
+	cost = (int64(prompt)*config.PromptCostPer1KMicros + int64(completion)*config.CompletionCostPer1KMicros) / 1000
+	return
 }
 
 func (w Worker) fail(ctx context.Context, run evaluationrun.Run, err error) error {

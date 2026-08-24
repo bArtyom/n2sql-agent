@@ -3,6 +3,7 @@ package usage
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 // TokenUsage contains provider-reported token counts for one model request.
@@ -26,6 +27,165 @@ func (u TokenUsage) EffectiveTotal() int {
 type Observer interface {
 	ObserveChatTokens(TokenUsage)
 	ObserveEmbeddingTokens(TokenUsage)
+}
+
+// ModelKind identifies a provider call without recording prompts, documents,
+// images, or credentials. Keeping this small and bounded makes it safe for
+// metrics labels and durable evaluation summaries.
+type ModelKind string
+
+const (
+	ModelKindChat      ModelKind = "chat"
+	ModelKindEmbedding ModelKind = "embedding"
+	ModelKindRerank    ModelKind = "rerank"
+	ModelKindOCR       ModelKind = "ocr"
+)
+
+// ModelCallObservation is the common operational record for one model call.
+// EstimatedCostMicros is supplied by the caller's configured price snapshot;
+// the runtime never invents provider prices.
+type ModelCallObservation struct {
+	Kind                ModelKind     `json:"kind"`
+	Provider            string        `json:"provider,omitempty"`
+	Model               string        `json:"model,omitempty"`
+	Duration            time.Duration `json:"-"`
+	Success             bool          `json:"success"`
+	ErrorClass          string        `json:"error_class,omitempty"`
+	Usage               TokenUsage    `json:"usage"`
+	EstimatedCostMicros int64         `json:"estimated_cost_micros,omitempty"`
+}
+
+// CallObserver is deliberately additive to Observer so existing AgentRun
+// usage observers remain source-compatible.
+type CallObserver interface {
+	ObserveModelCall(ModelCallObservation)
+}
+
+type callObserverContextKey struct{}
+
+func WithCallObserver(ctx context.Context, observer CallObserver) context.Context {
+	if ctx == nil || observer == nil {
+		return ctx
+	}
+	if existing := CallObserverFromContext(ctx); existing != nil {
+		observer = combinedCallObserver{first: existing, second: observer}
+	}
+	return context.WithValue(ctx, callObserverContextKey{}, observer)
+}
+
+func CallObserverFromContext(ctx context.Context) CallObserver {
+	if ctx == nil {
+		return nil
+	}
+	observer, _ := ctx.Value(callObserverContextKey{}).(CallObserver)
+	return observer
+}
+
+func ObserveModelCall(ctx context.Context, observation ModelCallObservation) {
+	if observer := CallObserverFromContext(ctx); observer != nil {
+		observer.ObserveModelCall(observation)
+	}
+}
+
+type combinedCallObserver struct {
+	first  CallObserver
+	second CallObserver
+}
+
+func (o combinedCallObserver) ObserveModelCall(observation ModelCallObservation) {
+	o.first.ObserveModelCall(observation)
+	o.second.ObserveModelCall(observation)
+}
+
+// ModelCallSnapshot is a bounded aggregate suitable for evaluation results
+// and operational dashboards.
+type ModelCallSnapshot struct {
+	Calls               int   `json:"calls"`
+	Failures            int   `json:"failures"`
+	DurationMS          int64 `json:"duration_ms"`
+	PromptTokens        int   `json:"prompt_tokens"`
+	CompletionTokens    int   `json:"completion_tokens"`
+	TotalTokens         int   `json:"total_tokens"`
+	EstimatedCostMicros int64 `json:"estimated_cost_micros"`
+}
+
+// CallTracker implements both token Observer and CallObserver. It is safe to
+// share across parallel retrieval or image tasks within one request/run.
+type CallTracker struct {
+	mu     sync.Mutex
+	byKind map[ModelKind]ModelCallSnapshot
+}
+
+func NewCallTracker() *CallTracker {
+	return &CallTracker{byKind: make(map[ModelKind]ModelCallSnapshot)}
+}
+
+func (t *CallTracker) ObserveChatTokens(value TokenUsage) {
+	if t != nil {
+		t.observeTokens(ModelKindChat, value)
+	}
+}
+
+func (t *CallTracker) ObserveEmbeddingTokens(value TokenUsage) {
+	if t != nil {
+		t.observeTokens(ModelKindEmbedding, value)
+	}
+}
+
+func (t *CallTracker) observeTokens(kind ModelKind, value TokenUsage) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	current := t.byKind[kind]
+	current.PromptTokens += nonNegative(value.PromptTokens)
+	current.CompletionTokens += nonNegative(value.CompletionTokens)
+	current.TotalTokens += nonNegative(value.EffectiveTotal())
+	t.byKind[kind] = current
+}
+
+func (t *CallTracker) ObserveModelCall(observation ModelCallObservation) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	current := t.byKind[observation.Kind]
+	current.Calls++
+	if !observation.Success {
+		current.Failures++
+	}
+	current.DurationMS += observation.Duration.Milliseconds()
+	current.PromptTokens += nonNegative(observation.Usage.PromptTokens)
+	current.CompletionTokens += nonNegative(observation.Usage.CompletionTokens)
+	total := observation.Usage.EffectiveTotal()
+	if total > 0 {
+		current.TotalTokens += total
+	}
+	if observation.EstimatedCostMicros > 0 {
+		current.EstimatedCostMicros += observation.EstimatedCostMicros
+	}
+	t.byKind[observation.Kind] = current
+}
+
+func (t *CallTracker) ModelCallSnapshot(kind ModelKind) ModelCallSnapshot {
+	if t == nil {
+		return ModelCallSnapshot{}
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.byKind[kind]
+}
+
+func (t *CallTracker) ModelCallSnapshots() map[ModelKind]ModelCallSnapshot {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	result := make(map[ModelKind]ModelCallSnapshot, len(t.byKind))
+	for kind, snapshot := range t.byKind {
+		result[kind] = snapshot
+	}
+	return result
 }
 
 // QueryRewriteObservation describes how one retrieval request used optional

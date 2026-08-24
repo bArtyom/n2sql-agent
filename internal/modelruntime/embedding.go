@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
+	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
 var (
@@ -63,7 +65,9 @@ func NewEmbeddingServiceWithLocalFallback(providers modelprovider.Store, embedde
 
 func (s *EmbeddingService) Embed(ctx context.Context, input []string) (modelclient.EmbeddingResponse, error) {
 	if s.localBaseURL != "" && s.localModel != "" {
+		started := time.Now()
 		response, err := s.embedder.Embed(ctx, s.localBaseURL, s.localAPIKey, modelclient.EmbeddingRequest{Model: s.localModel, Input: input})
+		observeModelCall(ctx, usage.ModelKindEmbedding, "local", s.localModel, started, response.Usage, err)
 		if err != nil {
 			return modelclient.EmbeddingResponse{}, &EmbeddingCallError{Err: fmt.Errorf("embed with local model: %w", err)}
 		}
@@ -82,10 +86,12 @@ func (s *EmbeddingService) Embed(ctx context.Context, input []string) (modelclie
 		return modelclient.EmbeddingResponse{}, ErrAPIKeyNotConfigured
 	}
 
+	started := time.Now()
 	response, err := s.embedder.Embed(ctx, provider.BaseURL, apiKey, modelclient.EmbeddingRequest{
 		Model: provider.EmbeddingModel,
 		Input: input,
 	})
+	observeModelCall(ctx, usage.ModelKindEmbedding, provider.Name, provider.EmbeddingModel, started, response.Usage, err)
 	if err != nil {
 		return modelclient.EmbeddingResponse{}, &EmbeddingCallError{Err: fmt.Errorf("embed input: %w", err)}
 	}

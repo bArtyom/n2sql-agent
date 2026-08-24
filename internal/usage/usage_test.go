@@ -3,6 +3,7 @@ package usage_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
@@ -18,6 +19,24 @@ func TestTokenUsageEffectiveTotalFallsBackToComponentCounts(t *testing.T) {
 	}
 	if got := (usage.TokenUsage{PromptTokens: -2, CompletionTokens: 3}).EffectiveTotal(); got != 3 {
 		t.Fatalf("EffectiveTotal() with negative input = %d, want 3", got)
+	}
+}
+
+func TestCallTrackerAggregatesBoundedModelObservations(t *testing.T) {
+	tracker := usage.NewCallTracker()
+	ctx := usage.WithCallObserver(context.Background(), tracker)
+	usage.ObserveModelCall(ctx, usage.ModelCallObservation{
+		Kind: usage.ModelKindChat, Model: "chat-model", Success: true,
+		Duration: 1500 * time.Millisecond,
+		Usage:    usage.TokenUsage{PromptTokens: 7, CompletionTokens: 3, TotalTokens: 10},
+	})
+	usage.ObserveModelCall(ctx, usage.ModelCallObservation{
+		Kind: usage.ModelKindChat, Model: "chat-model", Success: false,
+		Duration: 500 * time.Millisecond,
+	})
+	snapshot := tracker.ModelCallSnapshot(usage.ModelKindChat)
+	if snapshot.Calls != 2 || snapshot.Failures != 1 || snapshot.DurationMS != 2000 || snapshot.TotalTokens != 10 {
+		t.Fatalf("snapshot = %#v", snapshot)
 	}
 }
 

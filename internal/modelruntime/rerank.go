@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
@@ -51,17 +52,21 @@ func (s *RerankService) Rerank(ctx context.Context, query string, candidates []r
 	for index, candidate := range candidates {
 		documents[index] = candidate.Content
 	}
+	started := time.Now()
 	response, err := s.client.Rerank(ctx, provider.RerankBaseURL, apiKey, modelclient.RerankRequest{
 		Model:     provider.RerankModel,
 		Query:     query,
 		Documents: documents,
 		TopN:      topN,
 	})
+	observeModelCall(ctx, usage.ModelKindRerank, provider.Name, provider.RerankModel, started, response.Usage, err)
 	if err != nil {
 		return nil, fmt.Errorf("rerank candidates: %w", err)
 	}
 	if observer := usage.ObserverFromContext(ctx); observer != nil && response.Usage != nil {
-		observer.ObserveChatTokens(*response.Usage)
+		if _, alreadyObserved := observer.(usage.CallObserver); !alreadyObserved {
+			observer.ObserveChatTokens(*response.Usage)
+		}
 	}
 	results := make([]retrieval.Result, 0, len(response.Results))
 	for _, ranked := range response.Results {
