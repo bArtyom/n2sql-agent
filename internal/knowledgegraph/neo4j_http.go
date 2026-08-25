@@ -134,6 +134,22 @@ func (s *Neo4jHTTPStore) UpsertChunk(ctx context.Context, knowledgeBaseID int64,
 	chunkRef := ref.String()
 	statements := []cypherStatement{
 		{
+			Statement: `MATCH (node:KnowledgeEntity {knowledge_base_id: $knowledge_base_id})
+WITH node, [ref IN coalesce(node.chunks, []) WHERE ref <> $chunk_ref] AS remaining
+SET node.chunks = remaining
+WITH node WHERE size(node.chunks) = 0
+DETACH DELETE node`,
+			Parameters: map[string]any{"knowledge_base_id": knowledgeBaseID, "chunk_ref": chunkRef},
+		},
+		{
+			Statement: `MATCH ()-[edge:RELATES_TO {knowledge_base_id: $knowledge_base_id}]-()
+WITH edge, [ref IN coalesce(edge.chunks, []) WHERE ref <> $chunk_ref] AS remaining
+SET edge.chunks = remaining
+WITH edge WHERE size(edge.chunks) = 0
+DELETE edge`,
+			Parameters: map[string]any{"knowledge_base_id": knowledgeBaseID, "chunk_ref": chunkRef},
+		},
+		{
 			Statement: `UNWIND $entities AS entity
 MERGE (node:KnowledgeEntity {knowledge_base_id: $knowledge_base_id, name: entity.name})
 SET node.type = entity.type,
@@ -163,8 +179,9 @@ func (s *Neo4jHTTPStore) Search(ctx context.Context, knowledgeBaseID int64, enti
 		return SearchResult{}, nil
 	}
 	rows, err := s.execute(ctx, cypherStatement{
-		Statement: `MATCH (node:KnowledgeEntity {knowledge_base_id: $knowledge_base_id})-[edge:RELATES_TO]-(neighbor:KnowledgeEntity {knowledge_base_id: $knowledge_base_id})
+		Statement: `MATCH (node:KnowledgeEntity {knowledge_base_id: $knowledge_base_id})
 WHERE any(term IN $entities WHERE toLower(node.name) CONTAINS toLower(term))
+OPTIONAL MATCH (node)-[edge:RELATES_TO]-(neighbor:KnowledgeEntity {knowledge_base_id: $knowledge_base_id})
 RETURN node.name, node.type, node.attributes, node.chunks,
        edge.type, neighbor.name, neighbor.type, neighbor.attributes, neighbor.chunks
 LIMIT $limit`,
@@ -224,14 +241,24 @@ func (s *Neo4jHTTPStore) DeleteDocument(ctx context.Context, knowledgeBaseID, do
 	if s == nil || knowledgeBaseID <= 0 || documentID <= 0 {
 		return fmt.Errorf("invalid graph document")
 	}
-	_, err := s.execute(ctx, cypherStatement{
-		Statement: `MATCH (node:KnowledgeEntity {knowledge_base_id: $knowledge_base_id})
+	_, err := s.execute(ctx,
+		cypherStatement{
+			Statement: `MATCH ()-[edge:RELATES_TO {knowledge_base_id: $knowledge_base_id}]-()
+WITH edge, [ref IN coalesce(edge.chunks, []) WHERE NOT ref STARTS WITH $prefix] AS remaining
+SET edge.chunks = remaining
+WITH edge WHERE size(edge.chunks) = 0
+DELETE edge`,
+			Parameters: map[string]any{"knowledge_base_id": knowledgeBaseID, "prefix": strconv.FormatInt(documentID, 10) + ":"},
+		},
+		cypherStatement{
+			Statement: `MATCH (node:KnowledgeEntity {knowledge_base_id: $knowledge_base_id})
 WITH node, [ref IN coalesce(node.chunks, []) WHERE NOT ref STARTS WITH $prefix] AS remaining
 SET node.chunks = remaining
 WITH node WHERE size(remaining) = 0
 DETACH DELETE node`,
-		Parameters: map[string]any{"knowledge_base_id": knowledgeBaseID, "prefix": strconv.FormatInt(documentID, 10) + ":"},
-	})
+			Parameters: map[string]any{"knowledge_base_id": knowledgeBaseID, "prefix": strconv.FormatInt(documentID, 10) + ":"},
+		},
+	)
 	return err
 }
 

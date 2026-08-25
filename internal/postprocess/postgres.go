@@ -142,7 +142,7 @@ func (s *PostgresStore) EnqueueDocument(ctx context.Context, documentID int64, o
 	}
 	if options.EnableGraph {
 		chunkRows, chunkErr := s.db.QueryContext(ctx, `
-			SELECT d.knowledge_base_id, chunks.position
+			SELECT d.knowledge_base_id, COALESCE(d.current_version_id, 0), chunks.position
 			FROM documents AS d
 			JOIN document_chunks AS chunks ON chunks.document_id = d.id
 			WHERE d.id = $1 AND chunks.chunk_kind = 'text'
@@ -151,17 +151,17 @@ func (s *PostgresStore) EnqueueDocument(ctx context.Context, documentID int64, o
 			return fmt.Errorf("read document chunks for graph extraction: %w", chunkErr)
 		}
 		for chunkRows.Next() {
-			var chunkKnowledgeBaseID, position int64
-			if err := chunkRows.Scan(&chunkKnowledgeBaseID, &position); err != nil {
+			var chunkKnowledgeBaseID, versionID, position int64
+			if err := chunkRows.Scan(&chunkKnowledgeBaseID, &versionID, &position); err != nil {
 				chunkRows.Close()
 				return fmt.Errorf("scan document chunk for graph extraction: %w", err)
 			}
 			requests = append(requests, EnqueueRequest{
-				TaskKey: fmt.Sprintf("graph-extract:%d:%d", documentID, position),
+				TaskKey:         fmt.Sprintf("graph-extract:%d:%d:%d", documentID, versionID, position),
 				KnowledgeBaseID: chunkKnowledgeBaseID,
-				DocumentID: documentID,
-				ChunkPosition: int(position),
-				Kind: KindGraphExtract,
+				DocumentID:      documentID,
+				ChunkPosition:   int(position),
+				Kind:            KindGraphExtract,
 			})
 		}
 		if err := chunkRows.Err(); err != nil {

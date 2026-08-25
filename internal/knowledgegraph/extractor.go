@@ -40,15 +40,26 @@ func (e *Extractor) ExtractChunk(ctx context.Context, content string) (ChunkGrap
 }
 
 func (e *Extractor) ExtractQueryEntities(ctx context.Context, query string) ([]string, *modelclient.TokenUsage, error) {
-	graph, usage, err := e.ExtractChunk(ctx, queryPrompt(strings.TrimSpace(query)))
+	if e == nil || e.chat == nil {
+		return nil, nil, fmt.Errorf("graph extractor is unavailable")
+	}
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, nil, nil
+	}
+	response, err := e.chat.Chat(ctx, queryPrompt(query))
 	if err != nil {
-		return nil, usage, err
+		return nil, response.Usage, err
+	}
+	graph, err := ParseGraphResponse(response.Message)
+	if err != nil {
+		return nil, response.Usage, err
 	}
 	entities := make([]string, 0, len(graph.Entities))
 	for _, entity := range graph.Entities {
 		entities = append(entities, entity.Name)
 	}
-	return entities, usage, nil
+	return entities, response.Usage, nil
 }
 
 func graphPrompt(content string) string {
