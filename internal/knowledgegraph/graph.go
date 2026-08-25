@@ -1,6 +1,7 @@
 package knowledgegraph
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,6 +46,18 @@ type ChunkGraph struct {
 type ChunkRef struct {
 	DocumentID int64
 	Position   int
+}
+
+type SearchResult struct {
+	Nodes     []Entity
+	Relations []Relation
+	Chunks    []ChunkRef
+}
+
+type Store interface {
+	UpsertChunk(context.Context, int64, ChunkRef, ChunkGraph) error
+	Search(context.Context, int64, []string, []int64) (SearchResult, error)
+	DeleteDocument(context.Context, int64, int64) error
 }
 
 func (r ChunkRef) String() string {
