@@ -16,11 +16,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
 	"github.com/bArtyom/n2sql-agent/internal/documenttag"
+	"github.com/bArtyom/n2sql-agent/internal/ops"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/lib/pq"
 )
@@ -49,19 +51,33 @@ const (
 )
 
 type Document struct {
-	ID                  int64                          `json:"id"`
-	KnowledgeBaseID     int64                          `json:"knowledgeBaseId"`
-	OriginalFilename    string                         `json:"originalFilename"`
-	FolderPath          string                         `json:"folderPath"`
-	ContentType         string                         `json:"contentType"`
-	SizeBytes           int64                          `json:"sizeBytes"`
-	ContentSHA256       string                         `json:"contentSha256,omitempty"`
-	ProcessingStatus    string                         `json:"processingStatus"`
-	SummaryStatus       string                         `json:"summaryStatus,omitempty"`
-	SummaryIndexStatus  string                         `json:"summaryIndexStatus,omitempty"`
-	ChunkingDiagnostics documentchunk.SplitDiagnostics `json:"chunkingDiagnostics"`
-	ParserMetadata      map[string]string              `json:"parserMetadata,omitempty"`
-	Tags                []documenttag.Tag              `json:"tags,omitempty"`
+	ID                  int64                              `json:"id"`
+	CurrentVersionID    int64                              `json:"currentVersionId,omitempty"`
+	KnowledgeBaseID     int64                              `json:"knowledgeBaseId"`
+	OriginalFilename    string                             `json:"originalFilename"`
+	FolderPath          string                             `json:"folderPath"`
+	ContentType         string                             `json:"contentType"`
+	SizeBytes           int64                              `json:"sizeBytes"`
+	ContentSHA256       string                             `json:"contentSha256,omitempty"`
+	ProcessingStatus    string                             `json:"processingStatus"`
+	SummaryStatus       string                             `json:"summaryStatus,omitempty"`
+	SummaryIndexStatus  string                             `json:"summaryIndexStatus,omitempty"`
+	ChunkingDiagnostics documentchunk.SplitDiagnostics     `json:"chunkingDiagnostics"`
+	ParserMetadata      map[string]string                  `json:"parserMetadata,omitempty"`
+	ParserLayout        []documentextractor.PDFLayoutBlock `json:"parserLayout,omitempty"`
+	Tags                []documenttag.Tag                  `json:"tags,omitempty"`
+}
+
+type Version struct {
+	ID            int64           `json:"id"`
+	DocumentID    int64           `json:"documentId"`
+	VersionNo     int             `json:"versionNo"`
+	ContentSHA256 string          `json:"contentSha256,omitempty"`
+	ProcessConfig json.RawMessage `json:"processConfig"`
+	Status        string          `json:"status"`
+	Error         string          `json:"error,omitempty"`
+	CreatedAt     time.Time       `json:"createdAt"`
+	UpdatedAt     time.Time       `json:"updatedAt"`
 }
 
 // Summary is the cached, document-level summary generated on demand.
@@ -124,8 +140,19 @@ type CacheInvalidator interface {
 	ClearCache(int64)
 }
 
+// GraphInvalidator removes derived Neo4j references after the source document
+// has been deleted from PostgreSQL. It is optional so document management does
+// not depend on GraphRAG being enabled.
+type GraphInvalidator interface {
+	DeleteDocument(context.Context, int64, int64) error
+}
+
 type Reader interface {
 	List(context.Context, int64) ([]Document, error)
+}
+
+type VersionReader interface {
+	ListVersions(context.Context, int64, int64) ([]Version, error)
 }
 
 // TagReader applies a document-tag filter in the database query. It is kept
@@ -201,6 +228,9 @@ type AssetInfo struct {
 	Page             int    `json:"page,omitempty"`
 	Source           string `json:"source,omitempty"`
 	IsOriginal       bool   `json:"isOriginal,omitempty"`
+	Bounds           [4]int `json:"bounds,omitempty"`
+	BlockOrder       int    `json:"blockOrder,omitempty"`
+	SpanID           string `json:"spanId,omitempty"`
 	URL              string `json:"url"`
 }
 
@@ -347,15 +377,23 @@ type assetFileOpener interface {
 }
 
 type Service struct {
-	store       Store
-	files       FileStore
-	invalidator CacheInvalidator
+	store            Store
+	files            FileStore
+	invalidator      CacheInvalidator
+	graphInvalidator GraphInvalidator
 }
 
 func NewService(store Store, files FileStore) *Service { return &Service{store: store, files: files} }
 
 func NewServiceWithInvalidator(store Store, files FileStore, invalidator CacheInvalidator) *Service {
 	return &Service{store: store, files: files, invalidator: invalidator}
+}
+
+func (s *Service) SetGraphInvalidator(invalidator GraphInvalidator) {
+	if s == nil {
+		return
+	}
+	s.graphInvalidator = invalidator
 }
 
 func (s *Service) Upload(ctx context.Context, input UploadInput) (Document, error) {
@@ -376,6 +414,7 @@ func (s *Service) Upload(ctx context.Context, input UploadInput) (Document, erro
 	if err := documentextractor.ValidateProcessConfig(input.ProcessConfig); err != nil {
 		return Document{}, fmt.Errorf("%w: %v", ErrInvalidProcessConfig, err)
 	}
+	ops.TraceStage(ctx, "document_upload_started", "knowledge_base_id", input.KnowledgeBaseID)
 	tagIDs, err := documenttag.NormalizeIDs(input.TagIDs)
 	if err != nil {
 		return Document{}, err
@@ -682,6 +721,11 @@ func (s *Service) Delete(ctx context.Context, knowledgeBaseID, documentID int64)
 	if s.invalidator != nil {
 		s.invalidator.ClearCache(knowledgeBaseID)
 	}
+	if s.graphInvalidator != nil {
+		if err := s.graphInvalidator.DeleteDocument(context.WithoutCancel(ctx), knowledgeBaseID, documentID); err != nil {
+			slog.ErrorContext(ctx, "document_graph_cleanup_failed", "document_id", documentID, "knowledge_base_id", knowledgeBaseID, "error", err)
+		}
+	}
 	if err := s.files.Delete(context.WithoutCancel(ctx), storagePath); err != nil {
 		slog.ErrorContext(ctx, "document_file_cleanup_failed", "document_id", documentID, "knowledge_base_id", knowledgeBaseID, "error", err)
 	}
@@ -696,7 +740,7 @@ func (s *LocalFileStore) Save(ctx context.Context, extension string, content io.
 	if err := ctx.Err(); err != nil {
 		return "", 0, "", err
 	}
-	if extension != ".md" && extension != ".txt" && extension != ".html" && extension != ".pdf" && extension != ".docx" && extension != ".pptx" && extension != ".xlsx" && extension != ".png" && extension != ".jpg" && extension != ".webp" {
+	if extension != ".md" && extension != ".txt" && extension != ".html" && extension != ".pdf" && extension != ".docx" && extension != ".pptx" && extension != ".xlsx" && extension != ".xmind" && extension != ".png" && extension != ".jpg" && extension != ".webp" {
 		return "", 0, "", ErrUnsupportedFile
 	}
 	directory := filepath.Join(s.root, "documents")
@@ -830,7 +874,8 @@ func (s *PostgresStore) AssetMetadataByID(ctx context.Context, knowledgeBaseID, 
 
 func (s *PostgresStore) ListAssets(ctx context.Context, knowledgeBaseID, documentID int64) ([]AssetInfo, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT a.id, a.original_filename, a.content_type, a.size_bytes, a.page, a.source, a.is_original
+		SELECT a.id, a.original_filename, a.content_type, a.size_bytes, a.page, a.source, a.is_original,
+		       a.bounds, a.block_order, a.span_id
 		FROM document_assets AS a
 		JOIN documents AS d ON d.id = a.document_id
 		JOIN knowledge_bases AS kb ON kb.id = d.knowledge_base_id
@@ -844,8 +889,12 @@ func (s *PostgresStore) ListAssets(ctx context.Context, knowledgeBaseID, documen
 	assets := make([]AssetInfo, 0)
 	for rows.Next() {
 		var asset AssetInfo
-		if err := rows.Scan(&asset.ID, &asset.OriginalFilename, &asset.ContentType, &asset.SizeBytes, &asset.Page, &asset.Source, &asset.IsOriginal); err != nil {
+		var bounds []byte
+		if err := rows.Scan(&asset.ID, &asset.OriginalFilename, &asset.ContentType, &asset.SizeBytes, &asset.Page, &asset.Source, &asset.IsOriginal, &bounds, &asset.BlockOrder, &asset.SpanID); err != nil {
 			return nil, fmt.Errorf("scan document asset: %w", err)
+		}
+		if len(bounds) > 0 {
+			_ = json.Unmarshal(bounds, &asset.Bounds)
 		}
 		asset.URL = fmt.Sprintf("/api/knowledge-bases/%d/documents/%d/assets/%d", knowledgeBaseID, documentID, asset.ID)
 		assets = append(assets, asset)
@@ -876,6 +925,10 @@ func (s *PostgresStore) SaveParseResult(ctx context.Context, documentID int64, r
 	if err != nil {
 		return fmt.Errorf("encode parser metadata: %w", err)
 	}
+	layout, err := json.Marshal(result.Layout)
+	if err != nil {
+		return fmt.Errorf("encode parser layout: %w", err)
+	}
 	var originalPath, originalName, originalType string
 	var originalSize int64
 	if err := s.db.QueryRowContext(ctx, `SELECT storage_path, original_filename, content_type, size_bytes FROM documents WHERE id = $1`, documentID).Scan(&originalPath, &originalName, &originalType, &originalSize); err != nil {
@@ -888,9 +941,13 @@ func (s *PostgresStore) SaveParseResult(ctx context.Context, documentID int64, r
 	type storedAsset struct {
 		index                    int
 		name, path, mime, source string
+		ocrText, caption         string
 		page                     int
 		size                     int64
 		original                 bool
+		bounds                   [4]int
+		blockOrder               int
+		spanID                   string
 	}
 	stored := make([]storedAsset, 0, len(result.Images))
 	newPaths := make([]string, 0)
@@ -904,7 +961,7 @@ func (s *PostgresStore) SaveParseResult(ctx context.Context, documentID int64, r
 			cleanupNew()
 			return fmt.Errorf("invalid parser image asset at index %d", index)
 		}
-		asset := storedAsset{index: index, name: image.Filename, mime: image.MIMEType, source: image.Source, page: image.Page, size: int64(len(image.Data)), original: image.Original}
+		asset := storedAsset{index: index, name: image.Filename, mime: image.MIMEType, source: image.Source, ocrText: image.OCRText, caption: image.Caption, page: image.Page, size: int64(len(image.Data)), original: image.Original, bounds: image.Bounds, blockOrder: image.BlockOrder, spanID: image.SpanID}
 		if asset.name == "" {
 			asset.name = fmt.Sprintf("image-%d", index+1)
 		}
@@ -956,7 +1013,7 @@ func (s *PostgresStore) SaveParseResult(ctx context.Context, documentID int64, r
 		return fmt.Errorf("begin parser result transaction: %w", err)
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `UPDATE documents SET parser_metadata = $2::jsonb WHERE id = $1`, documentID, metadata); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE documents SET parser_metadata = $2::jsonb, parser_layout = $3::jsonb WHERE id = $1`, documentID, metadata, layout); err != nil {
 		cleanupNew()
 		return fmt.Errorf("save parser metadata: %w", err)
 	}
@@ -965,9 +1022,14 @@ func (s *PostgresStore) SaveParseResult(ctx context.Context, documentID int64, r
 		return fmt.Errorf("replace document assets: %w", err)
 	}
 	for _, asset := range stored {
+		bounds, err := json.Marshal(asset.bounds)
+		if err != nil {
+			cleanupNew()
+			return fmt.Errorf("encode document asset bounds: %w", err)
+		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO document_assets (document_id, asset_index, original_filename, storage_path, content_type, size_bytes, page, source, is_original)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, documentID, asset.index, asset.name, asset.path, asset.mime, asset.size, asset.page, asset.source, asset.original); err != nil {
+			INSERT INTO document_assets (document_id, asset_index, original_filename, storage_path, content_type, size_bytes, page, source, is_original, bounds, block_order, span_id, ocr_text, caption)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14)`, documentID, asset.index, asset.name, asset.path, asset.mime, asset.size, asset.page, asset.source, asset.original, bounds, asset.blockOrder, asset.spanID, asset.ocrText, asset.caption); err != nil {
 			cleanupNew()
 			return fmt.Errorf("insert document asset: %w", err)
 		}
@@ -1028,7 +1090,7 @@ func (s *PostgresStore) listWithScope(ctx context.Context, knowledgeBaseID int64
 	}
 	query := `
 		SELECT d.id, d.knowledge_base_id, d.original_filename, d.folder_path, d.content_type, d.size_bytes, d.content_sha256,
-		       d.chunking_diagnostics, d.parser_metadata, d.summary_status, d.summary_index_status,
+		       d.chunking_diagnostics, d.parser_metadata, d.parser_layout, d.summary_status, d.summary_index_status,
 		       COALESCE(task.status, 'pending') AS processing_status,
 		       COALESCE((
 				SELECT jsonb_agg(jsonb_build_object(
@@ -1063,11 +1125,11 @@ func scanDocuments(rows *sql.Rows) ([]Document, error) {
 	documents := make([]Document, 0)
 	for rows.Next() {
 		var document Document
-		var diagnostics, parserMetadata, tags []byte
+		var diagnostics, parserMetadata, parserLayout, tags []byte
 		if err := rows.Scan(
 			&document.ID, &document.KnowledgeBaseID, &document.OriginalFilename,
 			&document.FolderPath, &document.ContentType, &document.SizeBytes,
-			&document.ContentSHA256, &diagnostics, &parserMetadata,
+			&document.ContentSHA256, &diagnostics, &parserMetadata, &parserLayout,
 			&document.SummaryStatus, &document.SummaryIndexStatus, &document.ProcessingStatus, &tags,
 		); err != nil {
 			return nil, fmt.Errorf("scan document: %w", err)
@@ -1082,6 +1144,11 @@ func scanDocuments(rows *sql.Rows) ([]Document, error) {
 				return nil, fmt.Errorf("decode parser metadata: %w", err)
 			}
 		}
+		if len(parserLayout) > 0 {
+			if err := json.Unmarshal(parserLayout, &document.ParserLayout); err != nil {
+				return nil, fmt.Errorf("decode parser layout: %w", err)
+			}
+		}
 		if len(tags) > 0 {
 			if err := json.Unmarshal(tags, &document.Tags); err != nil {
 				return nil, fmt.Errorf("decode document tags: %w", err)
@@ -1093,6 +1160,38 @@ func scanDocuments(rows *sql.Rows) ([]Document, error) {
 		return nil, fmt.Errorf("iterate documents: %w", err)
 	}
 	return documents, nil
+}
+
+// ListVersions returns the durable indexing history for one document. The
+// same knowledge-base/admin predicate as document listing prevents a caller
+// from using a document ID to inspect another knowledge base.
+func (s *PostgresStore) ListVersions(ctx context.Context, knowledgeBaseID, documentID int64) ([]Version, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT version.id, version.document_id, version.version_no,
+		       version.content_sha256, version.process_config, version.status,
+		       COALESCE(version.error_message, ''), version.created_at, version.updated_at
+		FROM document_versions AS version
+		JOIN documents AS d ON d.id = version.document_id
+		JOIN knowledge_bases AS kb ON kb.id = d.knowledge_base_id
+		WHERE version.document_id = $1 AND d.knowledge_base_id = $2
+		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
+		ORDER BY version.version_no DESC`, documentID, knowledgeBaseID)
+	if err != nil {
+		return nil, fmt.Errorf("list document versions: %w", err)
+	}
+	defer rows.Close()
+	versions := make([]Version, 0)
+	for rows.Next() {
+		var version Version
+		if err := rows.Scan(&version.ID, &version.DocumentID, &version.VersionNo, &version.ContentSHA256, &version.ProcessConfig, &version.Status, &version.Error, &version.CreatedAt, &version.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan document version: %w", err)
+		}
+		versions = append(versions, version)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate document versions: %w", err)
+	}
+	return versions, nil
 }
 
 func (s *PostgresStore) ListFolderTree(ctx context.Context, knowledgeBaseID int64) (FolderTree, error) {
@@ -1186,18 +1285,30 @@ func (s *PostgresStore) Reprocess(ctx context.Context, knowledgeBaseID, document
 	if active {
 		return ErrDocumentProcessing
 	}
-	if _, err := s.db.ExecContext(ctx, `
-		INSERT INTO document_processing_tasks (document_id, process_config)
-		SELECT $1, CASE WHEN $2::boolean THEN $3::jsonb ELSE COALESCE(
-			(SELECT process_config FROM document_processing_tasks
-			 WHERE document_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1),
-			'{}'::jsonb
-		) END`, documentID, config != nil, processConfig); err != nil {
+	var versionID int64
+	if err := s.db.QueryRowContext(ctx, `
+		WITH new_version AS (
+			INSERT INTO document_versions (document_id, version_no, content_sha256, process_config, status)
+			SELECT d.id, COALESCE((SELECT MAX(version_no) FROM document_versions WHERE document_id = d.id), 0) + 1,
+			       d.content_sha256,
+			       CASE WHEN $2::boolean THEN $3::jsonb ELSE COALESCE(
+					(SELECT process_config FROM document_processing_tasks
+					 WHERE document_id = d.id ORDER BY created_at DESC, id DESC LIMIT 1), '{}'::jsonb)
+			       END, 'pending'
+			FROM documents AS d WHERE d.id = $1
+			RETURNING id, process_config
+		)
+		INSERT INTO document_processing_tasks (document_id, version_id, process_config, trace_id)
+		SELECT $1, id, process_config, $4 FROM new_version
+		RETURNING version_id`, documentID, config != nil, processConfig, ops.TraceID(ctx)).Scan(&versionID); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.ConstraintName == "document_processing_tasks_active_document_idx" {
 			return ErrDocumentProcessing
 		}
 		return fmt.Errorf("create document reprocess task: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE documents SET current_version_id = $2 WHERE id = $1`, documentID, versionID); err != nil {
+		return fmt.Errorf("set current document version: %w", err)
 	}
 	return nil
 }
@@ -1249,16 +1360,22 @@ func (s *PostgresStore) ReprocessMany(ctx context.Context, knowledgeBaseID int64
 		return 0, ErrDocumentProcessing
 	}
 	result, err := tx.ExecContext(ctx, `
-		INSERT INTO document_processing_tasks (document_id, process_config)
-		SELECT d.id, CASE WHEN $3::boolean THEN $4::jsonb ELSE COALESCE(
-			(SELECT previous.process_config FROM document_processing_tasks AS previous
-			 WHERE previous.document_id = d.id ORDER BY previous.created_at DESC, previous.id DESC LIMIT 1),
-			'{}'::jsonb
-		) END
-		FROM documents AS d
-		JOIN knowledge_bases AS kb ON kb.id = d.knowledge_base_id
-		WHERE d.knowledge_base_id = $1 AND d.id = ANY($2::bigint[])
-		  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)`, knowledgeBaseID, pq.Array(normalized), config != nil, processConfig)
+		WITH new_versions AS (
+			INSERT INTO document_versions (document_id, version_no, content_sha256, process_config, status)
+			SELECT d.id, COALESCE((SELECT MAX(version_no) FROM document_versions WHERE document_id = d.id), 0) + 1,
+			       d.content_sha256,
+			       CASE WHEN $3::boolean THEN $4::jsonb ELSE COALESCE(
+					(SELECT previous.process_config FROM document_processing_tasks AS previous
+					 WHERE previous.document_id = d.id ORDER BY previous.created_at DESC, previous.id DESC LIMIT 1), '{}'::jsonb)
+			       END, 'pending'
+			FROM documents AS d
+			JOIN knowledge_bases AS kb ON kb.id = d.knowledge_base_id
+			WHERE d.knowledge_base_id = $1 AND d.id = ANY($2::bigint[])
+			  AND kb.administrator_id = (SELECT administrator_id FROM system_settings WHERE id = 1)
+			RETURNING document_id, id, process_config
+		)
+		INSERT INTO document_processing_tasks (document_id, version_id, process_config, trace_id)
+		SELECT document_id, id, process_config, $5 FROM new_versions`, knowledgeBaseID, pq.Array(normalized), config != nil, processConfig, ops.TraceID(ctx))
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.ConstraintName == "document_processing_tasks_active_document_idx" {
@@ -1269,6 +1386,15 @@ func (s *PostgresStore) ReprocessMany(ctx context.Context, knowledgeBaseID int64
 	count, err := result.RowsAffected()
 	if err != nil {
 		return 0, fmt.Errorf("count batch reprocess tasks: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE documents AS d
+		SET current_version_id = (
+			SELECT version.id FROM document_versions AS version
+			WHERE version.document_id = d.id ORDER BY version.version_no DESC LIMIT 1
+		)
+		WHERE d.knowledge_base_id = $1 AND d.id = ANY($2::bigint[])`, knowledgeBaseID, pq.Array(normalized)); err != nil {
+		return 0, fmt.Errorf("set batch current document versions: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit batch reprocess: %w", err)
@@ -1435,20 +1561,34 @@ func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Document
 			return Document{}, fmt.Errorf("assign upload document tags: %w", err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO document_processing_tasks (document_id, process_config)
-		SELECT $1,
+	var versionID int64
+	if err := tx.QueryRowContext(ctx, `
+		INSERT INTO document_versions (document_id, version_no, content_sha256, process_config, status)
+		SELECT d.id, 1, d.content_sha256,
 		       CASE WHEN $2::boolean THEN $3::jsonb
-		            ELSE jsonb_build_object('parser_engine_rules', knowledge_base.parser_engine_rules)
-		       END
-		FROM knowledge_bases AS knowledge_base
-		WHERE knowledge_base.id = $4`, document.ID, input.ProcessConfig != nil, processConfig, input.KnowledgeBaseID); err != nil {
+		            ELSE jsonb_build_object('parser_engine_rules', kb.parser_engine_rules)
+		       END, 'pending'
+		FROM documents AS d
+		JOIN knowledge_bases AS kb ON kb.id = d.knowledge_base_id
+		WHERE d.id = $1 AND kb.id = $4
+		RETURNING id`, document.ID, input.ProcessConfig != nil, processConfig, input.KnowledgeBaseID).Scan(&versionID); err != nil {
+		return Document{}, fmt.Errorf("create document version: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE documents SET current_version_id = $2 WHERE id = $1`, document.ID, versionID); err != nil {
+		return Document{}, fmt.Errorf("set current document version: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO document_processing_tasks (document_id, version_id, process_config, trace_id)
+		SELECT $1, $2, v.process_config, $3
+		FROM document_versions AS v WHERE v.id = $2`, document.ID, versionID, ops.TraceID(ctx)); err != nil {
 		return Document{}, fmt.Errorf("create document processing task: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return Document{}, fmt.Errorf("commit document transaction: %w", err)
 	}
 	document.ProcessingStatus = "pending"
+	document.CurrentVersionID = versionID
+	ops.TraceStage(ctx, "document_uploaded", "document_id", document.ID, "size_bytes", document.SizeBytes)
 	return document, nil
 }
 
@@ -1522,6 +1662,8 @@ func extensionForContentType(contentType string) (string, bool) {
 		return ".pptx", true
 	case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
 		return ".xlsx", true
+	case "application/vnd.xmind.workbook", "application/xmind":
+		return ".xmind", true
 	case "image/png":
 		return ".png", true
 	case "image/jpeg":

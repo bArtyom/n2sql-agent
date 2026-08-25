@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,34 +21,94 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agentstream"
 	"github.com/bArtyom/n2sql-agent/internal/app"
 	"github.com/bArtyom/n2sql-agent/internal/auth"
+	"github.com/bArtyom/n2sql-agent/internal/blobstore"
 	"github.com/bArtyom/n2sql-agent/internal/config"
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/diagnostics"
+	"github.com/bArtyom/n2sql-agent/internal/docreader"
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
 	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
-	"github.com/bArtyom/n2sql-agent/internal/documentocr"
+	"github.com/bArtyom/n2sql-agent/internal/documentruntime"
 	"github.com/bArtyom/n2sql-agent/internal/documentsummary"
 	"github.com/bArtyom/n2sql-agent/internal/documenttag"
+	"github.com/bArtyom/n2sql-agent/internal/evaluationprepare"
 	"github.com/bArtyom/n2sql-agent/internal/evaluationrun"
 	"github.com/bArtyom/n2sql-agent/internal/evaluationworker"
 	"github.com/bArtyom/n2sql-agent/internal/followup"
 	"github.com/bArtyom/n2sql-agent/internal/handler"
 	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
+	"github.com/bArtyom/n2sql-agent/internal/knowledgegraph"
+	"github.com/bArtyom/n2sql-agent/internal/logging"
 	"github.com/bArtyom/n2sql-agent/internal/memory"
 	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
+	"github.com/bArtyom/n2sql-agent/internal/postprocess"
 	"github.com/bArtyom/n2sql-agent/internal/rag"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
+	"github.com/bArtyom/n2sql-agent/internal/usage"
 	"github.com/bArtyom/n2sql-agent/internal/worker"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
+type pendingCountReader interface {
+	PendingCount(context.Context) (int64, error)
+}
+
+func monitorQueueDepth(ctx context.Context, interval time.Duration, registry *metrics.Registry, warningThreshold int64, queues map[string]pendingCountReader) {
+	if registry == nil || len(queues) == 0 {
+		return
+	}
+	if interval <= 0 {
+		interval = time.Second
+	}
+	if warningThreshold <= 0 {
+		warningThreshold = 1000
+	}
+	sample := func() {
+		for name, reader := range queues {
+			if reader == nil {
+				continue
+			}
+			depth, err := reader.PendingCount(ctx)
+			if err != nil {
+				slog.WarnContext(ctx, "queue_depth_read_failed", "queue", name, "error", err)
+				continue
+			}
+			registry.ObserveQueueDepth(name, depth)
+			if depth >= warningThreshold {
+				slog.WarnContext(ctx, "queue_backlog_high", "queue", name, "depth", depth, "warning_threshold", warningThreshold)
+			}
+		}
+	}
+	sample()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sample()
+		}
+	}
+}
+
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	cfg := config.Load()
+	logger, closeLogger, err := logging.New(cfg.LogFilePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "configure structured logging: %v\n", err)
+		os.Exit(1)
+	}
+	defer closeLogger()
+	slog.SetDefault(logger)
+	// Route legacy stdlib log calls through the same JSON sinks while the
+	// remaining startup/shutdown paths are gradually migrated to slog.
+	log.SetFlags(0)
+	log.SetOutput(logging.StdlibWriter(logger))
 	db, err := sql.Open("pgx", cfg.DatabaseURL)
 	if err != nil {
 		log.Fatal(err)
@@ -58,7 +120,23 @@ func main() {
 	memoryStore := memory.NewPostgresStore(db)
 	authStore := auth.NewPostgresStore(db)
 	knowledgeBaseStore := knowledgebase.NewPostgresStore(db)
-	fileStore := document.NewLocalFileStore(cfg.UploadDir)
+	var objectStore blobstore.Store
+	if cfg.ObjectStorageEndpoint != "" {
+		objectStore, err = blobstore.NewS3CompatibleStore(cfg.ObjectStorageEndpoint, cfg.ObjectStorageRegion, cfg.ObjectStorageAccessKey, cfg.ObjectStorageSecretKey, cfg.ObjectStorageBucket, nil)
+		if err != nil {
+			log.Fatalf("configure S3-compatible object store: %v", err)
+		}
+		log.Printf("document object storage enabled: endpoint=%s bucket=%s", cfg.ObjectStorageEndpoint, cfg.ObjectStorageBucket)
+	} else {
+		objectStore, err = blobstore.NewLocalStore(cfg.UploadDir)
+	}
+	if err != nil {
+		log.Fatalf("configure object store: %v", err)
+	}
+	fileStore, err := document.NewBlobFileStore(objectStore)
+	if err != nil {
+		log.Fatalf("configure document file store: %v", err)
+	}
 	documentStore := document.NewPostgresStoreWithFileStore(db, fileStore)
 	modelClient := modelclient.NewHTTPClient(&http.Client{Timeout: cfg.ModelProviderTimeout}, cfg.ModelProviderAllowedHosts)
 	embeddingService := modelruntime.NewEmbeddingServiceWithLocalFallback(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv, cfg.LocalEmbeddingBaseURL, cfg.LocalEmbeddingModel, cfg.LocalEmbeddingAPIKey)
@@ -67,73 +145,48 @@ func main() {
 	rerankService := modelruntime.NewRerankService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
 	queryRewriteService := modelruntime.NewQueryRewriteService(chatService)
 	followUpService := followup.NewModelService(chatService, cfg.AgentTimeout)
-	var parserExtras []documentextractor.ParserEngine
-	if cfg.DocumentParserRemoteURL != "" {
-		remoteParser, parserErr := documentextractor.NewHTTPParserEngine(
-			cfg.DocumentParserRemoteEngine,
-			cfg.DocumentParserRemoteURL,
-			[]string{"text/plain", "text/markdown", "text/html", "application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.openxmlformats-officedocument.presentationml.presentation", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "image/png", "image/jpeg", "image/webp"},
-			cfg.DocumentParserAllowedHosts,
-			&http.Client{Timeout: cfg.DocumentParserRemoteTimeout},
+	var graphStore knowledgegraph.Store
+	var graphExtractor *knowledgegraph.Extractor
+	if cfg.Neo4jEnabled {
+		if strings.TrimSpace(cfg.Neo4jPassword) == "" {
+			log.Fatal("NEO4J_PASSWORD is required when NEO4J_ENABLE=true")
+		}
+		neo4jStore, neo4jErr := knowledgegraph.NewNeo4jHTTPStore(
+			cfg.Neo4jURI,
+			cfg.Neo4jUsername,
+			cfg.Neo4jPassword,
+			cfg.Neo4jDatabase,
+			&http.Client{Timeout: cfg.ModelProviderTimeout},
 		)
-		if parserErr != nil {
-			log.Fatalf("configure remote document parser: %v", parserErr)
+		if neo4jErr != nil {
+			log.Fatalf("configure Neo4j graph store: %v", neo4jErr)
 		}
-		parserExtras = append(parserExtras, remoteParser)
-		log.Printf("remote document parser enabled: engine=%s endpoint=%s", cfg.DocumentParserRemoteEngine, cfg.DocumentParserRemoteURL)
+		graphStore = neo4jStore
+		graphExtractor = knowledgegraph.NewExtractor(chatService)
+		log.Printf("knowledge graph enabled: endpoint=%s database=%s", cfg.Neo4jURI, cfg.Neo4jDatabase)
 	}
-	if cfg.DocumentParserMinerUURL != "" {
-		mineruParser, parserErr := documentextractor.NewMinerUParserEngine(cfg.DocumentParserMinerUURL, cfg.DocumentParserAllowedHosts, &http.Client{Timeout: cfg.DocumentParserRemoteTimeout})
-		if parserErr != nil {
-			log.Fatalf("configure MinerU parser: %v", parserErr)
+	var imageTaskEnricher worker.ImageTaskEnricher
+	parserRuntime, err := documentruntime.New(cfg, providerStore, modelClient)
+	if err != nil {
+		log.Fatalf("configure document parser runtime: %v", err)
+	}
+	if parserRuntime.OCRService != nil {
+		imageTaskEnricher = modelruntime.NewImageEnricherService(parserRuntime.OCRService, cfg.ImageCaptionPrompt)
+	}
+	var extractor worker.TextExtractor = parserRuntime.Extractor
+	if cfg.DocumentReaderGRPCURL != "" {
+		docReaderClient, clientErr := docreader.NewClientWithTimeout(context.Background(), cfg.DocumentReaderGRPCURL, docreader.DefaultLimits, cfg.DocumentReaderRetryAttempts, cfg.DocumentReaderTimeout)
+		if clientErr != nil {
+			log.Fatalf("configure DocReader client: %v", clientErr)
 		}
-		parserExtras = append(parserExtras, mineruParser)
-		log.Printf("MinerU parser enabled: endpoint=%s", cfg.DocumentParserMinerUURL)
-	}
-	if cfg.DocumentParserPaddleURL != "" {
-		paddleParser, parserErr := documentextractor.NewPaddleOCRVLParserEngine(cfg.DocumentParserPaddleURL, cfg.DocumentParserAllowedHosts, &http.Client{Timeout: cfg.DocumentParserRemoteTimeout})
-		if parserErr != nil {
-			log.Fatalf("configure PaddleOCR-VL parser: %v", parserErr)
+		defer docReaderClient.Close()
+		var localFallback *documentextractor.Extractor
+		if cfg.DocumentReaderFallbackLocal {
+			localFallback = parserRuntime.Extractor
 		}
-		parserExtras = append(parserExtras, paddleParser)
-		log.Printf("PaddleOCR-VL parser enabled: endpoint=%s", cfg.DocumentParserPaddleURL)
+		extractor = documentextractor.NewDocReaderExtractor(cfg.UploadDir, docReaderClient, localFallback, cfg.DocumentParserEngine)
+		log.Printf("standalone DocReader enabled: endpoint=%s fallback_local=%t", cfg.DocumentReaderGRPCURL, cfg.DocumentReaderFallbackLocal)
 	}
-	if cfg.WeKnoraCloudAppID != "" || cfg.WeKnoraCloudAPIKey != "" {
-		cloudParser, parserErr := documentextractor.NewWeKnoraCloudParserEngine(cfg.WeKnoraCloudParserURL, cfg.WeKnoraCloudAppID, cfg.WeKnoraCloudAPIKey, append(cfg.DocumentParserAllowedHosts, "weknora.weixin.qq.com"), &http.Client{Timeout: cfg.DocumentParserRemoteTimeout})
-		if parserErr != nil {
-			log.Fatalf("configure WeKnora Cloud parser: %v", parserErr)
-		}
-		parserExtras = append(parserExtras, cloudParser)
-		log.Printf("WeKnora Cloud parser enabled: endpoint=%s", cfg.WeKnoraCloudParserURL)
-	}
-	var pdfDeps documentextractor.PDFParserDependencies
-	pdfImages := documentocr.NewPDFImageExtractor(cfg.PDFImageBinary)
-	if pdfImages.Available() {
-		pdfDeps.EmbeddedImages = pdfImages
-		log.Printf("embedded PDF image extraction enabled: binary=%s", cfg.PDFImageBinary)
-	}
-	var scannedPDF *documentocr.Service
-	var imageProcessor documentextractor.ImageProcessor
-	var imageEnricher worker.ImageEnricher
-	if cfg.OCRModel != "" || cfg.DocumentParserPaddleURL != "" || pdfDeps.EmbeddedImages != nil {
-		var ocrProvider documentocr.Provider
-		var ocrService *modelruntime.OCRService
-		if cfg.OCRModel != "" {
-			ocrService = modelruntime.NewOCRService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv, cfg.OCRModel, cfg.OCRPrompt)
-			ocrProvider = ocrService
-			imageEnricher = modelruntime.NewImageEnricherService(ocrService, cfg.ImageCaptionPrompt)
-		}
-		pageRenderer := documentocr.NewPDFToImageRenderer(cfg.OCRRendererBinary, cfg.OCRRenderDPI, cfg.OCRMaxPages)
-		pageText := documentocr.NewPDFToTextPageExtractor(cfg.OCRTextRendererBinary)
-		pageCounter := documentocr.NewPDFInfoPageCounter("")
-		scannedPDF = documentocr.NewServiceWithPageTextAndCounter(pageRenderer, ocrProvider, pageText, pageCounter, cfg.OCRMaxPages, cfg.OCRConcurrency)
-		pdfDeps.ScannedPDF = scannedPDF
-		imageProcessor = scannedPDF
-		if cfg.OCRModel != "" {
-			log.Printf("scanned PDF OCR enabled: model=%s renderer=%s max_pages=%d concurrency=%d", cfg.OCRModel, cfg.OCRRendererBinary, cfg.OCRMaxPages, cfg.OCRConcurrency)
-		}
-	}
-	extractor := documentextractor.NewWithOCRAndImagesAndParserWithPDFDependencies(cfg.UploadDir, scannedPDF, imageProcessor, cfg.DocumentParserEngine, pdfDeps, parserExtras...)
 	metricsRegistry := metrics.New()
 	agentStreamHub := agentstream.NewHub()
 	checkpointFiles, err := agentrun.NewToolResultFileStore(cfg.AgentCheckpointDir, cfg.AgentCheckpointFileTTL)
@@ -165,13 +218,21 @@ func main() {
 		queryRewriteService,
 		retrieval.CacheConfig{MaxEntries: cfg.RetrievalCacheEntries, TTL: cfg.RetrievalCacheTTL},
 	)
+	if graphStore != nil {
+		searchService.SetGraphSearcher(knowledgegraph.NewRetriever(graphStore, graphExtractor, chunkStore))
+	}
 	documentService := document.NewServiceWithInvalidator(documentStore, fileStore, searchService)
+	if graphStore != nil {
+		documentService.SetGraphInvalidator(graphStore)
+	}
 	documentTagService := documenttag.NewService(documenttag.NewPostgresStore(db))
 	knowledgeBaseService := knowledgebase.NewServiceWithInvalidator(knowledgeBaseStore, fileStore, searchService)
 	parentSplitter := documentchunk.NewAdaptiveSplitter(3000, 300)
 	childSplitter := documentchunk.NewAdaptiveSplitter(1000, 150)
-	processor := worker.NewEmbeddingHierarchicalChunkingProcessorWithImageEnricher(extractor, parentSplitter, childSplitter, chunkStore, embeddingService, documentService, imageEnricher)
-	parserRegistry := extractor.ParserRegistry()
+	processor := worker.NewEmbeddingHierarchicalChunkingProcessorWithParseResultStore(extractor, parentSplitter, childSplitter, chunkStore, embeddingService, documentService)
+	postprocessStore := postprocess.NewPostgresStoreWithLease(db, cfg.PostprocessLease)
+	postprocessRunner := postprocess.NewRunner(postprocessStore, postprocess.RetryPolicy{MaxAttempts: cfg.PostprocessMaxAttempts, InitialDelay: time.Second, MaxDelay: time.Minute})
+	parserRegistry := parserRuntime.Registry
 	answerService := rag.NewService(searchService, chatService)
 	evaluationStore, err := evaluationrun.NewPostgresStore(db)
 	if err != nil {
@@ -189,7 +250,35 @@ func main() {
 		return chunkStore.ReplaceSummary(ctx, documentID, content, embeddings.Data[0].Vector)
 	})
 	documentSummaryAsync := documentsummary.NewAsyncService(documentSummaryService, 1)
-	documentSummaryAsync.Run(context.Background())
+	documentSummaryAsync.SetTaskEnqueuer(func(ctx context.Context, knowledgeBaseID, documentID int64, indexOnly bool) error {
+		kind := postprocess.KindDocumentSummary
+		key := fmt.Sprintf("document-summary:%d", documentID)
+		if indexOnly {
+			kind = postprocess.KindSummaryIndex
+			key = fmt.Sprintf("summary-index:%d", documentID)
+		}
+		return postprocessStore.Enqueue(ctx, postprocess.EnqueueRequest{TaskKey: key, KnowledgeBaseID: knowledgeBaseID, DocumentID: documentID, Kind: kind})
+	})
+	if err := postprocessRunner.Register(postprocess.KindDocumentSummary, worker.NewDocumentSummaryPostprocessHandler(documentSummaryService, documentService)); err != nil {
+		log.Fatal(err)
+	}
+	if err := postprocessRunner.Register(postprocess.KindSummaryIndex, worker.NewSummaryIndexPostprocessHandler(documentSummaryService)); err != nil {
+		log.Fatal(err)
+	}
+	if err := postprocessRunner.Register(postprocess.KindImageOCR, worker.NewImagePostprocessHandler(postprocessStore, documentService, chunkStore, embeddingService, imageTaskEnricher)); err != nil {
+		log.Fatal(err)
+	}
+	if err := postprocessRunner.Register(postprocess.KindImageCaption, worker.NewImagePostprocessHandler(postprocessStore, documentService, chunkStore, embeddingService, imageTaskEnricher)); err != nil {
+		log.Fatal(err)
+	}
+	if err := postprocessRunner.Register(postprocess.KindRecommendedQuery, worker.NewRecommendedQueryPostprocessHandler(followUpService)); err != nil {
+		log.Fatal(err)
+	}
+	if graphStore != nil {
+		if err := postprocessRunner.Register(postprocess.KindGraphExtract, worker.NewGraphPostprocessHandler(chunkStore, graphExtractor, graphStore)); err != nil {
+			log.Fatal(err)
+		}
+	}
 	go func() {
 		backfillContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
@@ -218,11 +307,39 @@ func main() {
 		if scheduled := documentSummaryAsync.Backfill(backfillContext, candidates); scheduled > 0 {
 			slog.InfoContext(backfillContext, "document_summary_backfill_scheduled", "count", scheduled)
 		}
+		if graphStore != nil {
+			graphScheduled := 0
+			for _, candidate := range candidates {
+				if !strings.EqualFold(candidate.ProcessingStatus, "succeeded") {
+					continue
+				}
+				if err := postprocessStore.EnqueueDocument(backfillContext, candidate.DocumentID, postprocess.DocumentOptions{EnableGraph: true}); err != nil {
+					slog.WarnContext(backfillContext, "graph_backfill_enqueue_failed", "document_id", candidate.DocumentID, "knowledge_base_id", candidate.KnowledgeBaseID, "error", err)
+					continue
+				}
+				graphScheduled++
+			}
+			if graphScheduled > 0 {
+				slog.InfoContext(backfillContext, "graph_backfill_scheduled", "count", graphScheduled)
+			}
+		}
 	}()
-	runner := worker.NewRunnerWithMetricsAndInvalidator(worker.NewPostgresStore(db), processor, metricsRegistry, searchService)
+	documentTaskStore := worker.NewPostgresStore(db)
+	runner := worker.NewRunnerWithMetricsAndInvalidator(documentTaskStore, processor, metricsRegistry, searchService)
 	runner.SetSuccessHook(func(ctx context.Context, task worker.Task) {
-		if err := documentSummaryAsync.PreGenerate(ctx, task.KnowledgeBaseID, task.DocumentID); err != nil {
-			slog.WarnContext(ctx, "document_summary_pregeneration_failed", "document_id", task.DocumentID, "knowledge_base_id", task.KnowledgeBaseID, "error", err)
+		if graphStore != nil {
+			if err := graphStore.DeleteDocument(ctx, task.KnowledgeBaseID, task.DocumentID); err != nil {
+				slog.WarnContext(ctx, "graph_document_cleanup_before_reindex_failed", "document_id", task.DocumentID, "knowledge_base_id", task.KnowledgeBaseID, "error", err)
+			}
+		}
+		if err := postprocessStore.EnqueueDocument(ctx, task.DocumentID, postprocess.DocumentOptions{
+			EnableSummary:         true,
+			EnableImageOCR:        imageTaskEnricher != nil,
+			EnableImageCaption:    imageTaskEnricher != nil && strings.TrimSpace(cfg.ImageCaptionPrompt) != "",
+			EnableRecommendations: true,
+			EnableGraph:           graphStore != nil,
+		}); err != nil {
+			slog.WarnContext(ctx, "document_postprocess_tasks_enqueue_failed", "document_id", task.DocumentID, "knowledge_base_id", task.KnowledgeBaseID, "error", err)
 		}
 	})
 	var historySummarizer agentservice.HistorySummarizer
@@ -249,13 +366,16 @@ func main() {
 	agentRunRunner, err := agentrun.NewRunnerWithEventSink(agentRunStore, agentRunExecutor, func(run agentrun.Run) func(agent.Event) error {
 		return func(event agent.Event) error {
 			if err := agentEventStore.Append(context.Background(), run, agentstream.Event{
-				Version:    agentstream.EventSchemaVersion,
-				ID:         event.ID,
-				RunID:      event.RunID,
-				Type:       string(event.Type),
-				StepNumber: event.StepNumber,
-				Data:       event.Data,
-				CreatedAt:  event.CreatedAt,
+				Version:     agentstream.EventSchemaVersion,
+				ID:          event.ID,
+				RunID:       event.RunID,
+				Type:        string(event.Type),
+				ToolCallID:  event.ToolCallID,
+				ExecutionID: event.ExecutionID,
+				TraceID:     event.TraceID,
+				StepNumber:  event.StepNumber,
+				Data:        event.Data,
+				CreatedAt:   event.CreatedAt,
 			}); err != nil {
 				return err
 			}
@@ -304,6 +424,7 @@ func main() {
 			AgentMaxHistoryBytes:    cfg.AgentMaxHistoryBytes,
 			FollowUpSuggestions:     followUpService,
 			DocumentSummary:         documentSummaryService,
+			PostprocessTasks:        postprocessStore,
 			EvaluationRuns:          evaluationStore,
 			EvaluationReader:        evaluationStore,
 			APIKeyEnvVar:            cfg.ModelProviderAPIKeyEnvVar,
@@ -312,6 +433,7 @@ func main() {
 	}
 	runContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	runContext = usage.WithCallObserver(runContext, metricsRegistry)
 	var pprofDone chan struct{}
 	if cfg.PprofAddress != "" {
 		pprofServer := &http.Server{Addr: cfg.PprofAddress, Handler: diagnostics.NewPprofHandler()}
@@ -327,6 +449,17 @@ func main() {
 	evaluationDone := make(chan struct{})
 	agentRunDone := make(chan struct{})
 	checkpointCleanupDone := make(chan struct{})
+	postprocessDone := make(chan struct{})
+	queueMonitorDone := make(chan struct{})
+	go func() {
+		defer close(queueMonitorDone)
+		monitorQueueDepth(runContext, cfg.WorkerPollInterval, metricsRegistry, int64(cfg.QueueBacklogWarningThreshold), map[string]pendingCountReader{
+			"document":    documentTaskStore,
+			"postprocess": postprocessStore,
+			"evaluation":  evaluationStore,
+			"agent":       agentRunStore,
+		})
+	}()
 	go func() {
 		defer close(checkpointCleanupDone)
 		ticker := time.NewTicker(cfg.AgentCheckpointCleanup)
@@ -361,13 +494,35 @@ func main() {
 	}()
 	go func() {
 		defer close(workerDone)
-		runner.Run(runContext, cfg.WorkerPollInterval, func(err error) {
-			slog.ErrorContext(runContext, "document_worker_loop_error", "error", err)
-		})
+		var workers sync.WaitGroup
+		for index := 0; index < cfg.DocumentWorkerConcurrency; index++ {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				runner.Run(runContext, cfg.WorkerPollInterval, func(err error) {
+					slog.ErrorContext(runContext, "document_worker_loop_error", "error", err)
+				})
+			}()
+		}
+		workers.Wait()
+	}()
+	go func() {
+		defer close(postprocessDone)
+		var workers sync.WaitGroup
+		for index := 0; index < cfg.PostprocessConcurrency; index++ {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				postprocessRunner.Run(runContext, cfg.WorkerPollInterval, func(err error) {
+					slog.ErrorContext(runContext, "document_postprocess_worker_loop_error", "error", err)
+				})
+			}()
+		}
+		workers.Wait()
 	}()
 	go func() {
 		defer close(evaluationDone)
-		evaluationWorker := evaluationworker.Worker{Store: evaluationStore, Cases: evaluationworker.SnapshotCaseProvider{}, Answerer: answerService, TopK: retrieval.DefaultResults}
+		evaluationWorker := evaluationworker.Worker{Store: evaluationStore, Cases: evaluationworker.SnapshotCaseProvider{}, Answerer: answerService, Preparer: evaluationprepare.Preparer{DB: db, Embedder: embeddingService}, TopK: retrieval.DefaultResults}
 		ticker := time.NewTicker(cfg.WorkerPollInterval)
 		defer ticker.Stop()
 		for {
@@ -386,9 +541,11 @@ func main() {
 	serveErr := app.RunServer(runContext, server, 0)
 	stop()
 	<-workerDone
+	<-postprocessDone
 	<-evaluationDone
 	<-agentRunDone
 	<-checkpointCleanupDone
+	<-queueMonitorDone
 	if pprofDone != nil {
 		<-pprofDone
 	}

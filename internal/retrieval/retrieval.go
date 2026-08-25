@@ -8,10 +8,13 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/bArtyom/n2sql-agent/internal/citation"
 	"github.com/bArtyom/n2sql-agent/internal/document"
 	"github.com/bArtyom/n2sql-agent/internal/documentchunk"
+	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 	"github.com/bArtyom/n2sql-agent/internal/documenttag"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
+	"github.com/bArtyom/n2sql-agent/internal/ops"
 	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
@@ -24,6 +27,7 @@ var (
 	ErrInvalidDocumentIDs        = errors.New("invalid document filter")
 	ErrInvalidFolderPath         = errors.New("invalid folder filter")
 	ErrInvalidTagIDs             = errors.New("invalid tag filter")
+	ErrInvalidMetadata           = errors.New("invalid metadata filter")
 	ErrDocumentFilterUnavailable = errors.New("document filter is unavailable")
 	ErrQueryRewriteUnavailable   = errors.New("query rewrite is unavailable")
 )
@@ -34,6 +38,7 @@ const (
 	DefaultPromptContextBytes = 32 << 10
 	MaxDocumentIDs            = 100
 	MaxQueryVariants          = 2
+	MaxMetadataFilters        = 32
 	MaxConcurrentQueries      = MaxQueryVariants + 1
 	DefaultMaxDistance        = 0.65
 	DefaultKeywordThreshold   = 0.10
@@ -127,6 +132,14 @@ type TaggedFolderFilteredKeywordSearcher interface {
 	SearchKeywordWithTags(context.Context, int64, string, int, []int64, string, bool, []int64) ([]Result, error)
 }
 
+type MetadataFilteredChunkSearcher interface {
+	SearchWithMetadata(context.Context, int64, []float32, int, []int64, string, bool, []int64, map[string]string) ([]Result, error)
+}
+
+type MetadataFilteredKeywordSearcher interface {
+	SearchKeywordWithMetadata(context.Context, int64, string, int, []int64, string, bool, []int64, map[string]string) ([]Result, error)
+}
+
 // NeighborSearcher is an optional store capability. Existing custom stores
 // continue to work; PostgreSQL stores can additionally provide nearby chunks.
 type NeighborSearcher interface {
@@ -139,6 +152,10 @@ type AssetURLSearcher interface {
 
 type AssetURLByIDSearcher interface {
 	AssetURLByID(context.Context, int64, int64, int64) (string, error)
+}
+
+type LayoutSearcher interface {
+	LayoutForChunk(context.Context, int64, int64, int, string) ([]documentextractor.PDFLayoutBlock, error)
 }
 
 type ParentSearcher interface {
@@ -163,6 +180,7 @@ type SearchOptions struct {
 	FolderRecursive  bool
 	QueryRewrite     bool
 	KeywordThreshold float64
+	Metadata         map[string]string
 }
 
 type FilteredSearcher interface {
@@ -178,6 +196,13 @@ type Reranker interface {
 // search queries. The original question is always searched as well.
 type QueryRewriter interface {
 	Rewrite(context.Context, string, int) ([]string, error)
+}
+
+// GraphSearcher is an optional recall sidecar. It returns the same chunk
+// shape as vector/keyword search so the existing fusion, context expansion,
+// reranking and citation pipeline remains the single owner of result quality.
+type GraphSearcher interface {
+	SearchGraph(context.Context, int64, string, int, []int64) ([]Result, error)
 }
 
 func ValidateMaxDistance(maxDistance float64) error {
@@ -229,9 +254,37 @@ func NormalizeTagIDs(tagIDs []int64) ([]int64, error) {
 	return normalized, nil
 }
 
+func NormalizeMetadata(metadata map[string]string) (map[string]string, error) {
+	if len(metadata) > MaxMetadataFilters {
+		return nil, ErrInvalidMetadata
+	}
+	if len(metadata) == 0 {
+		return nil, nil
+	}
+	result := make(map[string]string, len(metadata))
+	for key, value := range metadata {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || len(key) > 128 || len(value) > 512 {
+			return nil, ErrInvalidMetadata
+		}
+		result[key] = value
+	}
+	return result, nil
+}
+
 func (s *Service) SearchWithOptions(ctx context.Context, knowledgeBaseID int64, query string, limit int, options SearchOptions) ([]Result, error) {
+	ops.TraceStage(ctx, "retrieval_started", "knowledge_base_id", knowledgeBaseID, "limit", limit)
 	results, err := s.searchWithOptions(ctx, knowledgeBaseID, query, limit, options)
-	return s.attachAssetURLs(ctx, knowledgeBaseID, results), err
+	for index := range results {
+		if results[index].SourceKey == "" {
+			results[index].SourceKey = citation.SourceKey(results[index].DocumentID, results[index].Position, results[index].ChunkKind)
+		}
+	}
+	results = s.attachAssetURLs(ctx, knowledgeBaseID, results)
+	results = s.attachLayouts(ctx, knowledgeBaseID, results)
+	ops.TraceStage(ctx, "retrieval_completed", "knowledge_base_id", knowledgeBaseID, "results", len(results), "success", err == nil)
+	return results, err
 }
 
 // FilterByMaxDistance keeps only results close enough to the query. pgvector
@@ -256,7 +309,7 @@ func FilterByMaxDistanceWithStats(ctx context.Context, results []Result, maxDist
 		// Keyword-only results use KeywordScore, not a pgvector distance. A
 		// zero distance there means "not a vector result", so do not discard
 		// an exact lexical hit because of the semantic threshold.
-		if result.MatchType == "keyword" {
+		if result.MatchType == "keyword" || result.MatchType == "graph" {
 			filtered = append(filtered, result)
 			continue
 		}
@@ -274,6 +327,7 @@ type Service struct {
 	keyword  KeywordSearcher
 	reranker Reranker
 	rewriter QueryRewriter
+	graph    GraphSearcher
 	cache    *resultCache
 }
 
@@ -313,6 +367,19 @@ func newService(embedder Embedder, chunks ChunkSearcher, keyword KeywordSearcher
 func (s *Service) ClearCache(knowledgeBaseID int64) {
 	if s.cache != nil {
 		s.cache.clear(knowledgeBaseID)
+	}
+}
+
+// SetGraphSearcher enables the optional graph recall sidecar. Keeping this a
+// setter avoids widening all existing constructors and keeps tests/callers
+// that only need Hybrid RAG source-compatible.
+func (s *Service) SetGraphSearcher(graph GraphSearcher) {
+	if s == nil {
+		return
+	}
+	s.graph = graph
+	if s.cache != nil {
+		s.cache.clear(0)
 	}
 }
 
@@ -374,6 +441,24 @@ func (s *Service) attachAssetURLs(ctx context.Context, knowledgeBaseID int64, re
 	return results
 }
 
+func (s *Service) attachLayouts(ctx context.Context, knowledgeBaseID int64, results []Result) []Result {
+	searcher, ok := s.chunks.(LayoutSearcher)
+	if !ok || searcher == nil || knowledgeBaseID <= 0 {
+		return results
+	}
+	for index := range results {
+		kind := results[index].ChunkKind
+		if kind == "" {
+			kind = documentchunk.ChunkKindText
+		}
+		layout, err := searcher.LayoutForChunk(ctx, knowledgeBaseID, results[index].DocumentID, results[index].Position, kind)
+		if err == nil && len(layout) > 0 {
+			results[index].Layout = layout
+		}
+	}
+	return results
+}
+
 func isImageFilename(filename string) bool {
 	filename = strings.ToLower(strings.TrimSpace(filename))
 	return strings.HasSuffix(filename, ".png") || strings.HasSuffix(filename, ".jpg") || strings.HasSuffix(filename, ".jpeg") || strings.HasSuffix(filename, ".webp")
@@ -403,6 +488,11 @@ func (s *Service) searchWithOptions(ctx context.Context, knowledgeBaseID int64, 
 		return nil, err
 	}
 	options.TagIDs = tagIDs
+	metadata, err := NormalizeMetadata(options.Metadata)
+	if err != nil {
+		return nil, err
+	}
+	options.Metadata = metadata
 	var folderPath string
 	if options.FolderPath != nil {
 		folderPath, err = document.NormalizeFolderPath(*options.FolderPath)
@@ -415,7 +505,7 @@ func (s *Service) searchWithOptions(ctx context.Context, knowledgeBaseID int64, 
 		return nil, err
 	}
 	options.KeywordThreshold = effectiveKeywordThreshold(options.KeywordThreshold)
-	key := makeResultCacheKeyWithFolderAndTags(knowledgeBaseID, query, limit, documentIDs, tagIDs, options.QueryRewrite, options.KeywordThreshold, folderPath, options.FolderPath != nil, options.FolderPath != nil && options.FolderRecursive)
+	key := makeResultCacheKeyWithMetadata(knowledgeBaseID, query, limit, documentIDs, tagIDs, metadata, options.QueryRewrite, options.KeywordThreshold, folderPath, options.FolderPath != nil, options.FolderPath != nil && options.FolderRecursive)
 	if s.cache != nil {
 		if value, ok := s.cache.get(key); ok {
 			usage.ObserveQueryRewrite(ctx, value.rewriteState)
@@ -619,7 +709,7 @@ func (s *Service) searchUncached(ctx context.Context, knowledgeBaseID int64, que
 		waitGroup.Add(1)
 		go func() {
 			defer waitGroup.Done()
-			results, searchErr := s.searchOneQuery(queryContext, knowledgeBaseID, searchQuery, candidateLimit, documentIDs, options.FolderPath, options.FolderRecursive, options.KeywordThreshold, options.TagIDs)
+			results, searchErr := s.searchOneQuery(queryContext, knowledgeBaseID, searchQuery, candidateLimit, documentIDs, options.FolderPath, options.FolderRecursive, options.KeywordThreshold, options.TagIDs, options.Metadata)
 			if searchErr != nil {
 				firstErrOnce.Do(func() {
 					firstErr = searchErr
@@ -639,7 +729,9 @@ func (s *Service) searchUncached(ctx context.Context, knowledgeBaseID int64, que
 	for _, queryResult := range queryResults {
 		if queryResult.usage != nil {
 			if observer := usage.ObserverFromContext(ctx); observer != nil {
-				observer.ObserveEmbeddingTokens(*queryResult.usage)
+				if _, alreadyObserved := observer.(usage.CallObserver); !alreadyObserved {
+					observer.ObserveEmbeddingTokens(*queryResult.usage)
+				}
 			}
 		}
 		observation.VectorCandidates += queryResult.observation.VectorCandidates
@@ -648,6 +740,22 @@ func (s *Service) searchUncached(ctx context.Context, knowledgeBaseID int64, que
 		observation.KeywordRejected += queryResult.observation.KeywordRejected
 		observation.SummaryCandidates += queryResult.observation.SummaryCandidates
 		merged = mergeCandidateResults(merged, queryResult.results, MaxResults)
+	}
+	// Folder/tag/metadata filters are enforced by SQL-backed recallers. The
+	// graph sidecar currently understands document IDs only, so skip it for
+	// narrower scopes rather than leaking a graph hit from another folder/tag.
+	graphScopeAllowed := options.FolderPath == nil && len(options.TagIDs) == 0 && len(options.Metadata) == 0
+	if s.graph != nil && graphScopeAllowed {
+		graphResults, graphErr := s.graph.SearchGraph(ctx, knowledgeBaseID, query, candidateLimit, documentIDs)
+		if graphErr != nil {
+			// GraphRAG is an optional recall enhancement. A Neo4j/model
+			// failure must not discard the already available Hybrid RAG hits.
+			ops.TraceStage(ctx, "graph_retrieval_failed", "knowledge_base_id", knowledgeBaseID, "error", graphErr)
+		} else {
+			observation.GraphCandidates = len(graphResults)
+			merged = mergeCandidateResults(merged, graphResults, MaxResults)
+			ops.TraceStage(ctx, "graph_retrieval_completed", "knowledge_base_id", knowledgeBaseID, "results", len(graphResults))
+		}
 	}
 	observation.DeduplicatedCandidates = len(merged)
 	observation.FinalResults = min(len(merged), limit)
@@ -698,7 +806,7 @@ func folderPathValue(folderPath *string) string {
 	return *folderPath
 }
 
-func (s *Service) searchOneQuery(ctx context.Context, knowledgeBaseID int64, searchQuery string, candidateLimit int, documentIDs []int64, folderPath *string, folderRecursive bool, keywordThreshold float64, tagIDs []int64) (querySearchResult, error) {
+func (s *Service) searchOneQuery(ctx context.Context, knowledgeBaseID int64, searchQuery string, candidateLimit int, documentIDs []int64, folderPath *string, folderRecursive bool, keywordThreshold float64, tagIDs []int64, metadata map[string]string) (querySearchResult, error) {
 	response, embedErr := s.embedder.Embed(ctx, []string{searchQuery})
 	if embedErr != nil {
 		return querySearchResult{}, fmt.Errorf("embed search query: %w", embedErr)
@@ -708,7 +816,13 @@ func (s *Service) searchOneQuery(ctx context.Context, knowledgeBaseID int64, sea
 	}
 	var vectorResults []Result
 	var err error
-	if len(tagIDs) > 0 {
+	if len(metadata) > 0 {
+		filtered, ok := s.chunks.(MetadataFilteredChunkSearcher)
+		if !ok {
+			return querySearchResult{}, ErrDocumentFilterUnavailable
+		}
+		vectorResults, err = filtered.SearchWithMetadata(ctx, knowledgeBaseID, response.Data[0].Vector, candidateLimit, documentIDs, folderPathValue(folderPath), folderPath != nil && folderRecursive, tagIDs, metadata)
+	} else if len(tagIDs) > 0 {
 		filtered, ok := s.chunks.(TaggedFolderFilteredChunkSearcher)
 		if !ok {
 			return querySearchResult{}, ErrDocumentFilterUnavailable
@@ -736,7 +850,13 @@ func (s *Service) searchOneQuery(ctx context.Context, knowledgeBaseID int64, sea
 	queryResults := vectorResults
 	if s.keyword != nil {
 		var keywordResults []Result
-		if len(tagIDs) > 0 {
+		if len(metadata) > 0 {
+			filtered, ok := s.keyword.(MetadataFilteredKeywordSearcher)
+			if !ok {
+				return querySearchResult{}, ErrDocumentFilterUnavailable
+			}
+			keywordResults, err = filtered.SearchKeywordWithMetadata(ctx, knowledgeBaseID, searchQuery, candidateLimit, documentIDs, folderPathValue(folderPath), folderPath != nil && folderRecursive, tagIDs, metadata)
+		} else if len(tagIDs) > 0 {
 			filtered, ok := s.keyword.(TaggedFolderFilteredKeywordSearcher)
 			if !ok {
 				return querySearchResult{}, ErrDocumentFilterUnavailable

@@ -294,6 +294,7 @@ func (r *AgentRun) ObserveRetrieval(observation usage.RetrievalObservation) {
 	r.retrieval.KeywordAfterThreshold += nonNegative(observation.KeywordAfterThreshold)
 	r.retrieval.KeywordRejected += nonNegative(observation.KeywordRejected)
 	r.retrieval.SummaryCandidates += nonNegative(observation.SummaryCandidates)
+	r.retrieval.GraphCandidates += nonNegative(observation.GraphCandidates)
 	r.retrieval.DeduplicatedCandidates += nonNegative(observation.DeduplicatedCandidates)
 	r.retrieval.RerankBefore += nonNegative(observation.RerankBefore)
 	r.retrieval.RerankAfter += nonNegative(observation.RerankAfter)
