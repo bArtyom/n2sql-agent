@@ -71,6 +71,19 @@ func (s *PostgresStore) Register(ctx context.Context, email, password string) (U
 		}
 		return User{}, fmt.Errorf("create user: %w", err)
 	}
+	// Claim legacy knowledge bases only when they have no membership yet.
+	// This is the bootstrap path for databases that had no app user when the
+	// membership migration ran.
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO knowledge_base_members (knowledge_base_id, user_id, role)
+		SELECT kb.id, $1, 'owner'
+		FROM knowledge_bases AS kb
+		WHERE NOT EXISTS (
+			SELECT 1 FROM knowledge_base_members AS member
+			WHERE member.knowledge_base_id = kb.id
+		)`, user.ID); err != nil {
+		return User{}, fmt.Errorf("bootstrap knowledge base memberships: %w", err)
+	}
 	return user, nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/bArtyom/n2sql-agent/internal/access"
 	"github.com/bArtyom/n2sql-agent/internal/agentrun"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/agentstream"
@@ -63,6 +64,7 @@ type Dependencies struct {
 	MemoryProfile           memory.ProfileStore
 	APIKeyEnvVar            string
 	Auth                    auth.Store
+	Authorization           access.Store
 	SecureCookies           bool
 	Metrics                 *metrics.Registry
 }
@@ -158,6 +160,12 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("PATCH /api/knowledge-bases/{id}/tags/{tagID}", handler.NewDocumentTagItem(dependencies.Tags))
 		mux.Handle("DELETE /api/knowledge-bases/{id}/tags/{tagID}", handler.NewDocumentTagItem(dependencies.Tags))
 	}
+	if dependencies.Authorization != nil {
+		membersHandler := handler.NewKnowledgeBaseMembers(dependencies.Authorization)
+		mux.Handle("GET /api/knowledge-bases/{id}/members", membersHandler)
+		mux.Handle("PUT /api/knowledge-bases/{id}/members/{userID}", membersHandler)
+		mux.Handle("DELETE /api/knowledge-bases/{id}/members/{userID}", membersHandler)
+	}
 	if dependencies.ChunkReader != nil {
 		mux.Handle("GET /api/knowledge-bases/{id}/documents/{documentID}/chunks/{position}", handler.NewDocumentChunk(dependencies.ChunkReader))
 		mux.Handle("GET /api/knowledge-bases/{id}/documents/{documentID}/preview", handler.NewDocumentPreview(dependencies.ChunkReader))
@@ -218,6 +226,9 @@ func New(dependencies Dependencies) http.Handler {
 	var root http.Handler = mux
 	if dependencies.Auth != nil {
 		root = auth.Middleware(dependencies.Auth)(root)
+	}
+	if dependencies.Authorization != nil {
+		root = access.Middleware(dependencies.Authorization)(root)
 	}
 	return requestid.NewMiddleware(slog.Default(), registry.Middleware(root))
 }

@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bArtyom/n2sql-agent/internal/access"
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/agentrun"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
@@ -119,6 +120,7 @@ func main() {
 	conversationService := conversation.NewService(conversation.NewPostgresStore(db))
 	memoryStore := memory.NewPostgresStore(db)
 	authStore := auth.NewPostgresStore(db)
+	authorizationStore := access.NewPostgresStore(db)
 	knowledgeBaseStore := knowledgebase.NewPostgresStore(db)
 	var objectStore blobstore.Store
 	if cfg.ObjectStorageEndpoint != "" {
@@ -419,6 +421,7 @@ func main() {
 			Memories:                memoryStore,
 			MemoryProfile:           memoryStore,
 			Auth:                    authStore,
+			Authorization:           authorizationStore,
 			SecureCookies:           cfg.SecureCookies,
 			AgentMaxToolResultBytes: cfg.AgentMaxToolResultBytes,
 			AgentMaxHistoryBytes:    cfg.AgentMaxHistoryBytes,
