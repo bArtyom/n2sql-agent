@@ -132,8 +132,9 @@ func newLiveAnswerer(ctx context.Context) (agentservice.Answerer, func(), error)
 
 	providerStore := modelprovider.NewPostgresStore(db)
 	modelClient := modelclient.NewHTTPClient(&http.Client{Timeout: 10 * time.Second}, cfg.ModelProviderAllowedHosts)
-	embeddingService := modelruntime.NewEmbeddingService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
-	chatService := modelruntime.NewChatService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
+	breakerConfig := modelruntime.CircuitBreakerConfig{FailureLimit: cfg.ModelCircuitBreakerFailureThreshold, RecoveryAfter: cfg.ModelCircuitBreakerRecoveryTimeout}
+	embeddingService := modelruntime.NewEmbeddingService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv, breakerConfig)
+	chatService := modelruntime.NewChatService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv, breakerConfig)
 	searchService := retrieval.NewService(embeddingService, documentchunk.NewPostgresStore(db))
 	var historySummarizer agentservice.HistorySummarizer
 	if cfg.AgentHistorySummaryEnabled {

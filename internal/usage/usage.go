@@ -62,6 +62,24 @@ type CallObserver interface {
 	ObserveModelCall(ModelCallObservation)
 }
 
+const (
+	CircuitEventOpened   = "opened"
+	CircuitEventFallback = "fallback"
+)
+
+// CircuitBreakerObservation records bounded control-plane events. It carries
+// provider/capability for logs or traces, while aggregate metrics may ignore
+// those fields to avoid high-cardinality series.
+type CircuitBreakerObservation struct {
+	Provider   string `json:"provider,omitempty"`
+	Capability string `json:"capability,omitempty"`
+	Event      string `json:"event"`
+}
+
+type CircuitBreakerObserver interface {
+	ObserveCircuitBreaker(CircuitBreakerObservation)
+}
+
 type callObserverContextKey struct{}
 
 func WithCallObserver(ctx context.Context, observer CallObserver) context.Context {
@@ -88,6 +106,14 @@ func ObserveModelCall(ctx context.Context, observation ModelCallObservation) {
 	}
 }
 
+func ObserveCircuitBreaker(ctx context.Context, observation CircuitBreakerObservation) {
+	if observer := CallObserverFromContext(ctx); observer != nil {
+		if circuitObserver, ok := observer.(CircuitBreakerObserver); ok {
+			circuitObserver.ObserveCircuitBreaker(observation)
+		}
+	}
+}
+
 type combinedCallObserver struct {
 	first  CallObserver
 	second CallObserver
@@ -96,6 +122,15 @@ type combinedCallObserver struct {
 func (o combinedCallObserver) ObserveModelCall(observation ModelCallObservation) {
 	o.first.ObserveModelCall(observation)
 	o.second.ObserveModelCall(observation)
+}
+
+func (o combinedCallObserver) ObserveCircuitBreaker(observation CircuitBreakerObservation) {
+	if observer, ok := o.first.(CircuitBreakerObserver); ok {
+		observer.ObserveCircuitBreaker(observation)
+	}
+	if observer, ok := o.second.(CircuitBreakerObserver); ok {
+		observer.ObserveCircuitBreaker(observation)
+	}
 }
 
 // ModelCallSnapshot is a bounded aggregate suitable for evaluation results
@@ -208,6 +243,7 @@ type RetrievalObservation struct {
 	KeywordRejected        int  `json:"keyword_rejected"`
 	SummaryCandidates      int  `json:"summary_candidates"`
 	GraphCandidates        int  `json:"graph_candidates"`
+	ImageCandidates        int  `json:"image_candidates"`
 	DeduplicatedCandidates int  `json:"deduplicated_candidates"`
 	RerankBefore           int  `json:"rerank_before"`
 	RerankAfter            int  `json:"rerank_after"`
@@ -218,7 +254,7 @@ type RetrievalObservation struct {
 
 func (o RetrievalObservation) HasData() bool {
 	return o.VectorCandidates > 0 || o.KeywordCandidates > 0 || o.KeywordAfterThreshold > 0 || o.KeywordRejected > 0 ||
-		o.SummaryCandidates > 0 || o.GraphCandidates > 0 || o.DeduplicatedCandidates > 0 || o.RerankBefore > 0 || o.RerankAfter > 0 ||
+		o.SummaryCandidates > 0 || o.GraphCandidates > 0 || o.ImageCandidates > 0 || o.DeduplicatedCandidates > 0 || o.RerankBefore > 0 || o.RerankAfter > 0 ||
 		o.FinalResults > 0 || o.FinalFiltered > 0 || o.RerankFallback
 }
 
@@ -252,6 +288,7 @@ func (t *RetrievalTracker) ObserveRetrieval(observation RetrievalObservation) {
 	t.observation.KeywordRejected += nonNegative(observation.KeywordRejected)
 	t.observation.SummaryCandidates += nonNegative(observation.SummaryCandidates)
 	t.observation.GraphCandidates += nonNegative(observation.GraphCandidates)
+	t.observation.ImageCandidates += nonNegative(observation.ImageCandidates)
 	t.observation.DeduplicatedCandidates += nonNegative(observation.DeduplicatedCandidates)
 	t.observation.RerankBefore += nonNegative(observation.RerankBefore)
 	t.observation.RerankAfter += nonNegative(observation.RerankAfter)
@@ -419,6 +456,7 @@ func mergeRetrievalObservation(current, next RetrievalObservation) RetrievalObse
 	current.KeywordRejected += nonNegative(next.KeywordRejected)
 	current.SummaryCandidates += nonNegative(next.SummaryCandidates)
 	current.GraphCandidates += nonNegative(next.GraphCandidates)
+	current.ImageCandidates += nonNegative(next.ImageCandidates)
 	current.DeduplicatedCandidates += nonNegative(next.DeduplicatedCandidates)
 	current.RerankBefore += nonNegative(next.RerankBefore)
 	current.RerankAfter += nonNegative(next.RerankAfter)

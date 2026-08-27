@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/metrics"
+	"github.com/bArtyom/n2sql-agent/internal/ops"
+	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
 func TestRegistryExposesHTTPAgentAndWorkerMetrics(t *testing.T) {
@@ -98,5 +100,37 @@ func TestMiddlewareRecordsStatusAndPreservesFlusher(t *testing.T) {
 	registry.Handler().ServeHTTP(metricsResponse, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if !strings.Contains(metricsResponse.Body.String(), "http_requests_5xx_total 1\n") {
 		t.Fatalf("metrics body = %q, want 5xx counter", metricsResponse.Body.String())
+	}
+}
+
+func TestRegistryExposesBoundedModelFailureClassesAndQueueDepth(t *testing.T) {
+	registry := metrics.New()
+	for _, class := range []ops.FailureClass{ops.FailureTimeout, ops.FailureRateLimited, ops.FailureAuthentication, ops.FailureUnavailable, ops.FailureDependency, ops.FailureUnknown} {
+		registry.ObserveModelCall(usage.ModelCallObservation{Kind: usage.ModelKindChat, Success: false, ErrorClass: string(class)})
+	}
+	registry.ObserveQueueDepth("document", 12)
+	registry.ObserveQueueDepth("postprocess", -1)
+	registry.ObserveCircuitBreaker(usage.CircuitBreakerObservation{Event: usage.CircuitEventOpened})
+	registry.ObserveCircuitBreaker(usage.CircuitBreakerObservation{Event: usage.CircuitEventFallback})
+
+	response := httptest.NewRecorder()
+	registry.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := response.Body.String()
+	for _, line := range []string{
+		"model_failures_total 6",
+		"model_failures_timeout_total 1",
+		"model_failures_rate_limited_total 1",
+		"model_failures_authentication_total 1",
+		"model_failures_unavailable_total 1",
+		"model_failures_dependency_total 1",
+		"model_failures_unknown_total 1",
+		"document_queue_depth 12",
+		"postprocess_queue_depth 0",
+		"model_circuit_open_total 1",
+		"model_fallback_total 1",
+	} {
+		if !strings.Contains(body, line+"\n") {
+			t.Fatalf("metrics body = %q, want line %q", body, line)
+		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/bArtyom/n2sql-agent/internal/ops"
 	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
@@ -80,6 +81,20 @@ type Registry struct {
 	modelPromptTokensTotal     atomic.Uint64
 	modelCompletionTokensTotal atomic.Uint64
 	modelTokensTotal           atomic.Uint64
+	modelCanceledTotal         atomic.Uint64
+	modelTimeoutsTotal         atomic.Uint64
+	modelRateLimitedTotal      atomic.Uint64
+	modelAuthenticationTotal   atomic.Uint64
+	modelInvalidRequestTotal   atomic.Uint64
+	modelUnavailableTotal      atomic.Uint64
+	modelDependencyTotal       atomic.Uint64
+	modelUnknownFailureTotal   atomic.Uint64
+	modelCircuitOpenTotal      atomic.Uint64
+	modelFallbackTotal         atomic.Uint64
+	documentQueueDepth         atomic.Int64
+	postprocessQueueDepth      atomic.Int64
+	evaluationQueueDepth       atomic.Int64
+	agentQueueDepth            atomic.Int64
 }
 
 // ObserveModelCall keeps a low-cardinality process aggregate. Detailed
@@ -92,11 +107,41 @@ func (r *Registry) ObserveModelCall(observation usage.ModelCallObservation) {
 	r.modelCallsTotal.Add(1)
 	if !observation.Success {
 		r.modelFailuresTotal.Add(1)
+		switch ops.FailureClass(observation.ErrorClass) {
+		case ops.FailureCanceled:
+			r.modelCanceledTotal.Add(1)
+		case ops.FailureTimeout:
+			r.modelTimeoutsTotal.Add(1)
+		case ops.FailureRateLimited:
+			r.modelRateLimitedTotal.Add(1)
+		case ops.FailureAuthentication:
+			r.modelAuthenticationTotal.Add(1)
+		case ops.FailureInvalidRequest:
+			r.modelInvalidRequestTotal.Add(1)
+		case ops.FailureUnavailable:
+			r.modelUnavailableTotal.Add(1)
+		case ops.FailureDependency:
+			r.modelDependencyTotal.Add(1)
+		default:
+			r.modelUnknownFailureTotal.Add(1)
+		}
 	}
 	r.modelDurationMSTotal.Add(durationMilliseconds(observation.Duration))
 	r.modelPromptTokensTotal.Add(nonNegativeInt(observation.Usage.PromptTokens))
 	r.modelCompletionTokensTotal.Add(nonNegativeInt(observation.Usage.CompletionTokens))
 	r.modelTokensTotal.Add(nonNegativeInt(observation.Usage.EffectiveTotal()))
+}
+
+func (r *Registry) ObserveCircuitBreaker(observation usage.CircuitBreakerObservation) {
+	if r == nil {
+		return
+	}
+	switch observation.Event {
+	case usage.CircuitEventOpened:
+		r.modelCircuitOpenTotal.Add(1)
+	case usage.CircuitEventFallback:
+		r.modelFallbackTotal.Add(1)
+	}
 }
 
 func New() *Registry { return &Registry{} }
@@ -171,6 +216,27 @@ func (r *Registry) ObserveWorkerDuration(duration time.Duration) {
 	r.workerDurationMSTotal.Add(durationMilliseconds(duration))
 }
 
+// ObserveQueueDepth records a bounded queue gauge. Queue names are fixed so
+// operators can alert without creating unbounded metric labels.
+func (r *Registry) ObserveQueueDepth(queue string, depth int64) {
+	if r == nil {
+		return
+	}
+	if depth < 0 {
+		depth = 0
+	}
+	switch queue {
+	case "document":
+		r.documentQueueDepth.Store(depth)
+	case "postprocess":
+		r.postprocessQueueDepth.Store(depth)
+	case "evaluation":
+		r.evaluationQueueDepth.Store(depth)
+	case "agent":
+		r.agentQueueDepth.Store(depth)
+	}
+}
+
 func (r *Registry) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
@@ -211,10 +277,24 @@ func (r *Registry) write(w io.Writer) error {
 		{"worker_task_duration_ms_total", r.workerDurationMSTotal.Load()},
 		{"model_calls_total", r.modelCallsTotal.Load()},
 		{"model_failures_total", r.modelFailuresTotal.Load()},
+		{"model_failures_canceled_total", r.modelCanceledTotal.Load()},
+		{"model_failures_timeout_total", r.modelTimeoutsTotal.Load()},
+		{"model_failures_rate_limited_total", r.modelRateLimitedTotal.Load()},
+		{"model_failures_authentication_total", r.modelAuthenticationTotal.Load()},
+		{"model_failures_invalid_request_total", r.modelInvalidRequestTotal.Load()},
+		{"model_failures_unavailable_total", r.modelUnavailableTotal.Load()},
+		{"model_failures_dependency_total", r.modelDependencyTotal.Load()},
+		{"model_failures_unknown_total", r.modelUnknownFailureTotal.Load()},
+		{"model_circuit_open_total", r.modelCircuitOpenTotal.Load()},
+		{"model_fallback_total", r.modelFallbackTotal.Load()},
 		{"model_call_duration_ms_total", r.modelDurationMSTotal.Load()},
 		{"model_prompt_tokens_total", r.modelPromptTokensTotal.Load()},
 		{"model_completion_tokens_total", r.modelCompletionTokensTotal.Load()},
 		{"model_tokens_total", r.modelTokensTotal.Load()},
+		{"document_queue_depth", uint64(r.documentQueueDepth.Load())},
+		{"postprocess_queue_depth", uint64(r.postprocessQueueDepth.Load())},
+		{"evaluation_queue_depth", uint64(r.evaluationQueueDepth.Load())},
+		{"agent_queue_depth", uint64(r.agentQueueDepth.Load())},
 	}
 	for _, line := range lines {
 		if _, err := fmt.Fprintf(w, "%s %d\n", line.name, line.value); err != nil {

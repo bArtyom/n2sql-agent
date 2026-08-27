@@ -20,6 +20,36 @@ type chatCompleterStub struct {
 	err     error
 }
 
+type enabledProviderStoreStub struct {
+	current    modelprovider.Provider
+	enabled    []modelprovider.Provider
+	currentErr error
+}
+
+func (s enabledProviderStoreStub) Current(context.Context) (modelprovider.Provider, error) {
+	return s.current, s.currentErr
+}
+func (enabledProviderStoreStub) Save(context.Context, modelprovider.Provider) (modelprovider.Provider, error) {
+	return modelprovider.Provider{}, nil
+}
+func (s enabledProviderStoreStub) Enabled(context.Context) ([]modelprovider.Provider, error) {
+	return s.enabled, nil
+}
+
+type sequencedChatCompleter struct {
+	errors []error
+	calls  []string
+}
+
+func (s *sequencedChatCompleter) Chat(_ context.Context, baseURL, _ string, _ modelclient.ChatRequest) (modelclient.ChatResponse, error) {
+	s.calls = append(s.calls, baseURL)
+	index := len(s.calls) - 1
+	if index < len(s.errors) && s.errors[index] != nil {
+		return modelclient.ChatResponse{}, s.errors[index]
+	}
+	return modelclient.ChatResponse{Message: "fallback response"}, nil
+}
+
 func TestChatServiceRejectsMissingAPIKey(t *testing.T) {
 	service := modelruntime.NewChatService(
 		providerStoreStub{provider: modelprovider.Provider{APIKeyEnvVar: "TEST_MODEL_PROVIDER_API_KEY"}},
@@ -49,6 +79,24 @@ func (s *chatCompleterStub) ChatStream(_ context.Context, baseURL, apiKey string
 	s.apiKey = apiKey
 	s.request = request
 	return onDelta("OK")
+}
+
+type sequencedChatStreamer struct {
+	errors []error
+	calls  []string
+}
+
+func (s *sequencedChatStreamer) Chat(_ context.Context, _ string, _ string, _ modelclient.ChatRequest) (modelclient.ChatResponse, error) {
+	return modelclient.ChatResponse{}, nil
+}
+
+func (s *sequencedChatStreamer) ChatStream(_ context.Context, baseURL, _ string, _ modelclient.ChatRequest, onDelta func(string) error) error {
+	s.calls = append(s.calls, baseURL)
+	index := len(s.calls) - 1
+	if index < len(s.errors) && s.errors[index] != nil {
+		return s.errors[index]
+	}
+	return onDelta("fallback stream")
 }
 
 func TestChatServiceUsesConfiguredChatModelAndEnvironmentKey(t *testing.T) {
@@ -86,6 +134,39 @@ func TestChatServiceUsesConfiguredChatModelAndEnvironmentKey(t *testing.T) {
 	}
 	if completer.request.Stream {
 		t.Fatal("stream = true, want false")
+	}
+}
+
+func TestChatServiceFailsOverToNextEnabledProviderAfterTransientFailure(t *testing.T) {
+	first := modelprovider.Provider{
+		Name:         "primary",
+		BaseURL:      "https://primary.example.com/v1",
+		APIKeyEnvVar: "TEST_MODEL_PROVIDER_API_KEY",
+		ChatModel:    "primary-chat",
+	}
+	second := modelprovider.Provider{
+		Name:         "secondary",
+		BaseURL:      "https://secondary.example.com/v1",
+		APIKeyEnvVar: "TEST_MODEL_PROVIDER_API_KEY",
+		ChatModel:    "secondary-chat",
+	}
+	completer := &sequencedChatCompleter{errors: []error{
+		&modelclient.HTTPStatusError{Operation: "chat", StatusCode: 503},
+		nil,
+	}}
+	service := modelruntime.NewChatService(enabledProviderStoreStub{current: first, enabled: []modelprovider.Provider{first, second}}, completer, "TEST_MODEL_PROVIDER_API_KEY", func(string) (string, bool) {
+		return "test-secret", true
+	})
+
+	response, err := service.Chat(context.Background(), "retry once")
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if response.Message != "fallback response" {
+		t.Fatalf("message = %q", response.Message)
+	}
+	if !reflect.DeepEqual(completer.calls, []string{first.BaseURL, second.BaseURL}) {
+		t.Fatalf("provider call order = %#v", completer.calls)
 	}
 }
 
@@ -260,4 +341,88 @@ func TestChatServiceStreamsProvidedMessages(t *testing.T) {
 	if len(deltas) != 1 || deltas[0] != "OK" || !completer.request.Stream {
 		t.Fatalf("deltas = %#v, request = %#v", deltas, completer.request)
 	}
+}
+
+func TestChatServiceStreamsFailOverBeforeAnyDelta(t *testing.T) {
+	first := modelprovider.Provider{
+		Name:         "primary",
+		BaseURL:      "https://primary.example.com/v1",
+		APIKeyEnvVar: "TEST_MODEL_PROVIDER_API_KEY",
+		ChatModel:    "primary-chat",
+	}
+	second := modelprovider.Provider{
+		Name:         "secondary",
+		BaseURL:      "https://secondary.example.com/v1",
+		APIKeyEnvVar: "TEST_MODEL_PROVIDER_API_KEY",
+		ChatModel:    "secondary-chat",
+	}
+	streamer := &sequencedChatStreamer{errors: []error{&modelclient.HTTPStatusError{Operation: "chat stream", StatusCode: 503}, nil}}
+	service := modelruntime.NewChatService(enabledProviderStoreStub{current: first, enabled: []modelprovider.Provider{first, second}}, streamer, "TEST_MODEL_PROVIDER_API_KEY", func(string) (string, bool) {
+		return "test-secret", true
+	})
+
+	var deltas []string
+	err := service.StreamMessages(context.Background(), []modelclient.ChatMessage{{Role: "user", Content: "question"}}, func(delta string) error {
+		deltas = append(deltas, delta)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamMessages() error = %v", err)
+	}
+	if !reflect.DeepEqual(streamer.calls, []string{first.BaseURL, second.BaseURL}) {
+		t.Fatalf("provider call order = %#v", streamer.calls)
+	}
+	if !reflect.DeepEqual(deltas, []string{"fallback stream"}) {
+		t.Fatalf("deltas = %#v", deltas)
+	}
+}
+
+func TestChatServiceDoesNotFailOverAfterStreamingStarted(t *testing.T) {
+	first := modelprovider.Provider{
+		Name:         "primary",
+		BaseURL:      "https://primary.example.com/v1",
+		APIKeyEnvVar: "TEST_MODEL_PROVIDER_API_KEY",
+		ChatModel:    "primary-chat",
+	}
+	second := modelprovider.Provider{
+		Name:         "secondary",
+		BaseURL:      "https://secondary.example.com/v1",
+		APIKeyEnvVar: "TEST_MODEL_PROVIDER_API_KEY",
+		ChatModel:    "secondary-chat",
+	}
+	streamer := &partialFailureStreamer{}
+	service := modelruntime.NewChatService(enabledProviderStoreStub{current: first, enabled: []modelprovider.Provider{first, second}}, streamer, "TEST_MODEL_PROVIDER_API_KEY", func(string) (string, bool) {
+		return "test-secret", true
+	})
+
+	var deltas []string
+	err := service.StreamMessages(context.Background(), []modelclient.ChatMessage{{Role: "user", Content: "question"}}, func(delta string) error {
+		deltas = append(deltas, delta)
+		return nil
+	})
+	if err == nil {
+		t.Fatal("StreamMessages() error = nil, want partial stream error")
+	}
+	if !reflect.DeepEqual(streamer.calls, []string{first.BaseURL}) {
+		t.Fatalf("provider call order = %#v, want no duplicate stream", streamer.calls)
+	}
+	if !reflect.DeepEqual(deltas, []string{"partial"}) {
+		t.Fatalf("deltas = %#v", deltas)
+	}
+}
+
+type partialFailureStreamer struct {
+	calls []string
+}
+
+func (*partialFailureStreamer) Chat(_ context.Context, _ string, _ string, _ modelclient.ChatRequest) (modelclient.ChatResponse, error) {
+	return modelclient.ChatResponse{}, nil
+}
+
+func (s *partialFailureStreamer) ChatStream(_ context.Context, baseURL, _ string, _ modelclient.ChatRequest, onDelta func(string) error) error {
+	s.calls = append(s.calls, baseURL)
+	if err := onDelta("partial"); err != nil {
+		return err
+	}
+	return &modelclient.HTTPStatusError{Operation: "chat stream", StatusCode: 503}
 }

@@ -3,8 +3,10 @@ package modelruntime_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
+	"github.com/bArtyom/n2sql-agent/internal/knowledgebase"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
@@ -28,6 +30,38 @@ type embedderStub struct {
 	apiKey  string
 	request modelclient.EmbeddingRequest
 	err     error
+}
+
+type multimodalEmbedderStub struct {
+	baseURL string
+	apiKey  string
+	request modelclient.MultimodalEmbeddingRequest
+}
+
+type profileStoreStub struct {
+	profile knowledgebase.EmbeddingProfile
+}
+
+func (s profileStoreStub) GetEmbeddingProfile(context.Context, int64) (knowledgebase.EmbeddingProfile, error) {
+	return s.profile, nil
+}
+
+func (profileStoreStub) SaveEmbeddingProfile(context.Context, int64, knowledgebase.EmbeddingProfile) error {
+	return nil
+}
+
+type standardEmbeddingRunnerStub struct{ calls int }
+
+func (s *standardEmbeddingRunnerStub) Embed(context.Context, []string) (modelclient.EmbeddingResponse, error) {
+	s.calls++
+	return modelclient.EmbeddingResponse{Data: []modelclient.Embedding{{Vector: []float32{1}}}}, nil
+}
+
+func (s *multimodalEmbedderStub) EmbedMultimodal(_ context.Context, baseURL, apiKey string, request modelclient.MultimodalEmbeddingRequest) (modelclient.EmbeddingResponse, error) {
+	s.baseURL = baseURL
+	s.apiKey = apiKey
+	s.request = request
+	return modelclient.EmbeddingResponse{Data: []modelclient.Embedding{{Index: 0, Vector: []float32{0.1, 0.2}}}}, nil
 }
 
 func (s *embedderStub) Embed(_ context.Context, baseURL, apiKey string, request modelclient.EmbeddingRequest) (modelclient.EmbeddingResponse, error) {
@@ -134,5 +168,54 @@ func TestEmbeddingServiceUsesOptionalLocalProvider(t *testing.T) {
 	}
 	if embedder.baseURL != "http://127.0.0.1:11434/v1" || embedder.apiKey != "ollama" || embedder.request.Model != "qwen3-embedding:0.6b" {
 		t.Fatalf("local embedding request = %#v, baseURL=%q, apiKey=%q", embedder.request, embedder.baseURL, embedder.apiKey)
+	}
+}
+
+func TestMultimodalEmbeddingServiceUsesConfiguredLocalProvider(t *testing.T) {
+	embedder := &multimodalEmbedderStub{}
+	service := modelruntime.NewMultimodalEmbeddingService(
+		embedder,
+		"http://127.0.0.1:8000/v1",
+		"Qwen3-VL-Embedding-2B",
+		"local-secret",
+	)
+	response, err := service.EmbedImage(context.Background(), "image/png", []byte{1, 2, 3})
+	if err != nil {
+		t.Fatalf("EmbedImage() error = %v", err)
+	}
+	if len(response.Data) != 1 || len(response.Data[0].Vector) != 2 {
+		t.Fatalf("response = %#v", response)
+	}
+	if embedder.baseURL != "http://127.0.0.1:8000/v1" || embedder.apiKey != "local-secret" || embedder.request.Model != "Qwen3-VL-Embedding-2B" {
+		t.Fatalf("request = %#v, baseURL=%q, apiKey=%q", embedder.request, embedder.baseURL, embedder.apiKey)
+	}
+	if !strings.HasPrefix(embedder.request.Input[0].Image, "data:image/png;base64,") {
+		t.Fatalf("image input = %q", embedder.request.Input[0].Image)
+	}
+}
+
+func TestKnowledgeBaseEmbeddingServiceRoutesMultimodalText(t *testing.T) {
+	standard := &standardEmbeddingRunnerStub{}
+	multimodal := modelruntime.NewMultimodalEmbeddingService(&multimodalEmbedderStub{}, "http://127.0.0.1:8000/v1", "qwen3-vl-embedding", "secret")
+	router := modelruntime.NewKnowledgeBaseEmbeddingService(profileStoreStub{profile: knowledgebase.EmbeddingProfile{Mode: knowledgebase.EmbeddingModeMultimodal}}, standard, multimodal)
+
+	response, err := router.EmbedForKnowledgeBase(context.Background(), 7, []string{"架构图"})
+	if err != nil {
+		t.Fatalf("EmbedForKnowledgeBase() error = %v", err)
+	}
+	if len(response.Data) != 1 || standard.calls != 0 {
+		t.Fatalf("response=%#v standard calls=%d", response, standard.calls)
+	}
+}
+
+func TestKnowledgeBaseEmbeddingServiceRoutesStandardText(t *testing.T) {
+	standard := &standardEmbeddingRunnerStub{}
+	router := modelruntime.NewKnowledgeBaseEmbeddingService(profileStoreStub{profile: knowledgebase.DefaultEmbeddingProfile()}, standard, nil)
+
+	if _, err := router.EmbedForKnowledgeBase(context.Background(), 7, []string{"普通正文"}); err != nil {
+		t.Fatalf("EmbedForKnowledgeBase() error = %v", err)
+	}
+	if standard.calls != 1 {
+		t.Fatalf("standard calls = %d, want 1", standard.calls)
 	}
 }

@@ -49,6 +49,8 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/postprocess"
 	"github.com/bArtyom/n2sql-agent/internal/rag"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
+	"github.com/bArtyom/n2sql-agent/internal/sandbox"
+	"github.com/bArtyom/n2sql-agent/internal/tcc"
 	"github.com/bArtyom/n2sql-agent/internal/usage"
 	"github.com/bArtyom/n2sql-agent/internal/worker"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -141,10 +143,18 @@ func main() {
 	}
 	documentStore := document.NewPostgresStoreWithFileStore(db, fileStore)
 	modelClient := modelclient.NewHTTPClient(&http.Client{Timeout: cfg.ModelProviderTimeout}, cfg.ModelProviderAllowedHosts)
-	embeddingService := modelruntime.NewEmbeddingServiceWithLocalFallback(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv, cfg.LocalEmbeddingBaseURL, cfg.LocalEmbeddingModel, cfg.LocalEmbeddingAPIKey)
-	chatService := modelruntime.NewChatService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
+	breakerConfig := modelruntime.CircuitBreakerConfig{FailureLimit: cfg.ModelCircuitBreakerFailureThreshold, RecoveryAfter: cfg.ModelCircuitBreakerRecoveryTimeout}
+	embeddingService := modelruntime.NewEmbeddingServiceWithLocalFallback(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv, cfg.LocalEmbeddingBaseURL, cfg.LocalEmbeddingModel, cfg.LocalEmbeddingAPIKey, breakerConfig)
+	embeddingProfileStore := knowledgebase.NewPostgresEmbeddingProfileStore(db)
+	var multimodalEmbeddingService *modelruntime.MultimodalEmbeddingService
+	if cfg.MultimodalEmbeddingBaseURL != "" && cfg.MultimodalEmbeddingModel != "" {
+		multimodalEmbeddingService = modelruntime.NewMultimodalEmbeddingService(modelClient, cfg.MultimodalEmbeddingBaseURL, cfg.MultimodalEmbeddingModel, cfg.MultimodalEmbeddingAPIKey)
+		log.Printf("multimodal image embedding enabled: endpoint=%s model=%s", cfg.MultimodalEmbeddingBaseURL, cfg.MultimodalEmbeddingModel)
+	}
+	knowledgeBaseEmbeddingService := modelruntime.NewKnowledgeBaseEmbeddingService(embeddingProfileStore, embeddingService, multimodalEmbeddingService)
+	chatService := modelruntime.NewChatService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv, breakerConfig)
 	chunkStore := documentchunk.NewPostgresStore(db)
-	rerankService := modelruntime.NewRerankService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv)
+	rerankService := modelruntime.NewRerankService(providerStore, modelClient, cfg.ModelProviderAPIKeyEnvVar, os.LookupEnv, breakerConfig)
 	queryRewriteService := modelruntime.NewQueryRewriteService(chatService)
 	followUpService := followup.NewModelService(chatService, cfg.AgentTimeout)
 	var graphStore knowledgegraph.Store
@@ -196,6 +206,14 @@ func main() {
 		log.Fatal(err)
 	}
 	agentRunStore := agentrun.NewPostgresStoreWithCheckpointFiles(db, checkpointFiles, cfg.AgentCheckpointInlineBytes)
+	tccStore, err := tcc.NewPostgresStore(db)
+	if err != nil {
+		log.Fatal(err)
+	}
+	tccCoordinator, err := tcc.NewCoordinator(tccStore)
+	if err != nil {
+		log.Fatal(err)
+	}
 	var agentEventStore agentrun.EventStore = agentrun.NewPostgresEventStore(db)
 	if cfg.AgentStreamRedisURL != "" {
 		redisEventStore, redisErr := agentrun.NewRedisEventStore(
@@ -213,7 +231,7 @@ func main() {
 		}
 	}
 	searchService := retrieval.NewHybridServiceWithRerankerAndRewriterAndCache(
-		embeddingService,
+		knowledgeBaseEmbeddingService,
 		chunkStore,
 		chunkStore,
 		rerankService,
@@ -223,15 +241,17 @@ func main() {
 	if graphStore != nil {
 		searchService.SetGraphSearcher(knowledgegraph.NewRetriever(graphStore, graphExtractor, chunkStore))
 	}
+	searchService.SetUnifiedEmbeddingSearcher(chunkStore)
 	documentService := document.NewServiceWithInvalidator(documentStore, fileStore, searchService)
 	if graphStore != nil {
 		documentService.SetGraphInvalidator(graphStore)
 	}
 	documentTagService := documenttag.NewService(documenttag.NewPostgresStore(db))
 	knowledgeBaseService := knowledgebase.NewServiceWithInvalidator(knowledgeBaseStore, fileStore, searchService)
+	knowledgeBaseService.SetEmbeddingProfileStore(embeddingProfileStore)
 	parentSplitter := documentchunk.NewAdaptiveSplitter(3000, 300)
 	childSplitter := documentchunk.NewAdaptiveSplitter(1000, 150)
-	processor := worker.NewEmbeddingHierarchicalChunkingProcessorWithParseResultStore(extractor, parentSplitter, childSplitter, chunkStore, embeddingService, documentService)
+	processor := worker.NewEmbeddingHierarchicalChunkingProcessorWithParseResultStore(extractor, parentSplitter, childSplitter, chunkStore, knowledgeBaseEmbeddingService, documentService)
 	postprocessStore := postprocess.NewPostgresStoreWithLease(db, cfg.PostprocessLease)
 	postprocessRunner := postprocess.NewRunner(postprocessStore, postprocess.RetryPolicy{MaxAttempts: cfg.PostprocessMaxAttempts, InitialDelay: time.Second, MaxDelay: time.Minute})
 	parserRegistry := parserRuntime.Registry
@@ -242,12 +262,28 @@ func main() {
 	}
 	documentSummaryService := documentsummary.NewService(chunkStore, documentStore, chatService, cfg.DocumentSummaryInputChars)
 	documentSummaryService.SetSummaryIndexer(func(ctx context.Context, knowledgeBaseID, documentID int64, content string) error {
-		embeddings, err := embeddingService.Embed(ctx, []string{content})
+		profile, err := knowledgeBaseEmbeddingService.EmbeddingProfile(ctx, knowledgeBaseID)
+		if err != nil {
+			return err
+		}
+		embeddings, err := knowledgeBaseEmbeddingService.EmbedForKnowledgeBase(ctx, knowledgeBaseID, []string{content})
 		if err != nil {
 			return fmt.Errorf("embed document summary: %w", err)
 		}
 		if len(embeddings.Data) != 1 || len(embeddings.Data[0].Vector) == 0 {
 			return errors.New("embedding provider returned no summary vector")
+		}
+		if profile.Mode == knowledgebase.EmbeddingModeMultimodal {
+			if err := chunkStore.ReplaceSummary(ctx, documentID, content, nil); err != nil {
+				return err
+			}
+			unified, ok := any(chunkStore).(interface {
+				UpsertUnifiedSummary(context.Context, knowledgebase.EmbeddingProfile, int64, int64, []float32) error
+			})
+			if !ok {
+				return errors.New("multimodal knowledge base requires a unified summary embedding store")
+			}
+			return unified.UpsertUnifiedSummary(ctx, profile, knowledgeBaseID, documentID, embeddings.Data[0].Vector)
 		}
 		return chunkStore.ReplaceSummary(ctx, documentID, content, embeddings.Data[0].Vector)
 	})
@@ -267,11 +303,16 @@ func main() {
 	if err := postprocessRunner.Register(postprocess.KindSummaryIndex, worker.NewSummaryIndexPostprocessHandler(documentSummaryService)); err != nil {
 		log.Fatal(err)
 	}
-	if err := postprocessRunner.Register(postprocess.KindImageOCR, worker.NewImagePostprocessHandler(postprocessStore, documentService, chunkStore, embeddingService, imageTaskEnricher)); err != nil {
+	if err := postprocessRunner.Register(postprocess.KindImageOCR, worker.NewImagePostprocessHandler(postprocessStore, documentService, chunkStore, knowledgeBaseEmbeddingService, imageTaskEnricher)); err != nil {
 		log.Fatal(err)
 	}
-	if err := postprocessRunner.Register(postprocess.KindImageCaption, worker.NewImagePostprocessHandler(postprocessStore, documentService, chunkStore, embeddingService, imageTaskEnricher)); err != nil {
+	if err := postprocessRunner.Register(postprocess.KindImageCaption, worker.NewImagePostprocessHandler(postprocessStore, documentService, chunkStore, knowledgeBaseEmbeddingService, imageTaskEnricher)); err != nil {
 		log.Fatal(err)
+	}
+	if multimodalEmbeddingService != nil {
+		if err := postprocessRunner.Register(postprocess.KindImageEmbedding, worker.NewImageEmbeddingPostprocessHandler(documentService, chunkStore, knowledgeBaseEmbeddingService, cfg.MultimodalEmbeddingModel)); err != nil {
+			log.Fatal(err)
+		}
 	}
 	if err := postprocessRunner.Register(postprocess.KindRecommendedQuery, worker.NewRecommendedQueryPostprocessHandler(followUpService)); err != nil {
 		log.Fatal(err)
@@ -309,20 +350,31 @@ func main() {
 		if scheduled := documentSummaryAsync.Backfill(backfillContext, candidates); scheduled > 0 {
 			slog.InfoContext(backfillContext, "document_summary_backfill_scheduled", "count", scheduled)
 		}
-		if graphStore != nil {
-			graphScheduled := 0
+		if graphStore != nil || multimodalEmbeddingService != nil {
+			postprocessScheduled := 0
 			for _, candidate := range candidates {
 				if !strings.EqualFold(candidate.ProcessingStatus, "succeeded") {
 					continue
 				}
-				if err := postprocessStore.EnqueueDocument(backfillContext, candidate.DocumentID, postprocess.DocumentOptions{EnableGraph: true}); err != nil {
+				options := postprocess.DocumentOptions{EnableGraph: graphStore != nil}
+				if multimodalEmbeddingService != nil {
+					profile, profileErr := knowledgeBaseEmbeddingService.EmbeddingProfile(backfillContext, candidate.KnowledgeBaseID)
+					if profileErr == nil && profile.Mode == knowledgebase.EmbeddingModeMultimodal {
+						options.EnableImageEmbedding = true
+						options.ImageEmbeddingModel = profile.ModelName
+					}
+				}
+				if !options.EnableGraph && !options.EnableImageEmbedding {
+					continue
+				}
+				if err := postprocessStore.EnqueueDocument(backfillContext, candidate.DocumentID, options); err != nil {
 					slog.WarnContext(backfillContext, "graph_backfill_enqueue_failed", "document_id", candidate.DocumentID, "knowledge_base_id", candidate.KnowledgeBaseID, "error", err)
 					continue
 				}
-				graphScheduled++
+				postprocessScheduled++
 			}
-			if graphScheduled > 0 {
-				slog.InfoContext(backfillContext, "graph_backfill_scheduled", "count", graphScheduled)
+			if postprocessScheduled > 0 {
+				slog.InfoContext(backfillContext, "document_postprocess_backfill_scheduled", "count", postprocessScheduled)
 			}
 		}
 	}()
@@ -334,13 +386,21 @@ func main() {
 				slog.WarnContext(ctx, "graph_document_cleanup_before_reindex_failed", "document_id", task.DocumentID, "knowledge_base_id", task.KnowledgeBaseID, "error", err)
 			}
 		}
-		if err := postprocessStore.EnqueueDocument(ctx, task.DocumentID, postprocess.DocumentOptions{
+		options := postprocess.DocumentOptions{
 			EnableSummary:         true,
 			EnableImageOCR:        imageTaskEnricher != nil,
 			EnableImageCaption:    imageTaskEnricher != nil && strings.TrimSpace(cfg.ImageCaptionPrompt) != "",
 			EnableRecommendations: true,
 			EnableGraph:           graphStore != nil,
-		}); err != nil {
+		}
+		if multimodalEmbeddingService != nil {
+			profile, profileErr := knowledgeBaseEmbeddingService.EmbeddingProfile(ctx, task.KnowledgeBaseID)
+			if profileErr == nil && profile.Mode == knowledgebase.EmbeddingModeMultimodal {
+				options.EnableImageEmbedding = true
+				options.ImageEmbeddingModel = profile.ModelName
+			}
+		}
+		if err := postprocessStore.EnqueueDocument(ctx, task.DocumentID, options); err != nil {
 			slog.WarnContext(ctx, "document_postprocess_tasks_enqueue_failed", "document_id", task.DocumentID, "knowledge_base_id", task.KnowledgeBaseID, "error", err)
 		}
 	})
@@ -389,8 +449,35 @@ func main() {
 	}
 	agentRunRunner.SetChildTimeout(cfg.AgentChildTimeout)
 	agentAnswerService.SetMemoryStore(memoryStore)
+	agentAnswerService.SetTCCCoordinator(tccCoordinator)
 	agentAnswerService.SetDelegateResearchEnabled(true)
 	agentAnswerService.SetChildRunLifecycle(agentservice.NewPersistentChildRunLifecycle(agentRunStore))
+	if cfg.SandboxEnabled {
+		sandboxPolicy := sandbox.Policy{
+			Timeout:        cfg.SandboxTimeout,
+			MemoryBytes:    cfg.SandboxMemoryBytes,
+			CPUs:           cfg.SandboxCPUs,
+			PIDs:           cfg.SandboxPIDs,
+			DiskBytes:      cfg.SandboxDiskBytes,
+			MaxOutputBytes: cfg.SandboxMaxOutputBytes,
+			MaxCodeBytes:   cfg.SandboxMaxCodeBytes,
+			NetworkMode:    sandbox.NetworkNone,
+		}
+		sandboxExecutor, sandboxErr := sandbox.NewDockerExecutor(sandbox.DockerOptions{
+			Binary:        cfg.SandboxDockerBinary,
+			Image:         cfg.SandboxImage,
+			MaxConcurrent: cfg.SandboxMaxConcurrent,
+		})
+		if sandboxErr != nil {
+			log.Fatalf("configure code execution sandbox: %v", sandboxErr)
+		}
+		codeTool, sandboxErr := agent.NewCodeExecutionTool(sandboxExecutor, sandboxPolicy)
+		if sandboxErr != nil {
+			log.Fatalf("configure code execution tool: %v", sandboxErr)
+		}
+		agentAnswerService.SetExternalTools(codeTool)
+		slog.Info("code execution sandbox enabled", "image", cfg.SandboxImage, "timeout", cfg.SandboxTimeout, "max_concurrent", cfg.SandboxMaxConcurrent)
+	}
 
 	server := &http.Server{
 		Addr: cfg.Address,
@@ -491,8 +578,8 @@ func main() {
 	}()
 	go func() {
 		defer close(agentRunDone)
-		agentRunRunner.Run(runContext, cfg.WorkerPollInterval, func(err error) {
-			slog.ErrorContext(runContext, "agent_worker_loop_error", "error", err)
+		agentRunRunner.RunWorkers(runContext, cfg.AgentWorkerConcurrency, cfg.WorkerPollInterval, func(workerIndex int, err error) {
+			slog.ErrorContext(runContext, "agent_worker_loop_error", "worker_index", workerIndex, "error", err)
 		})
 	}()
 	go func() {

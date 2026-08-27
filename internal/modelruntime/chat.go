@@ -9,6 +9,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
+	"github.com/bArtyom/n2sql-agent/internal/ops"
 	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
@@ -80,15 +81,17 @@ type ChatService struct {
 	streamer     modelclient.ChatStreamer
 	apiKeyEnvVar string
 	lookupAPIKey APIKeyLookup
+	breaker      *ops.CircuitBreaker
 }
 
-func NewChatService(providers modelprovider.Store, completer modelclient.ChatCompleter, apiKeyEnvVar string, lookupAPIKey APIKeyLookup) *ChatService {
+func NewChatService(providers modelprovider.Store, completer modelclient.ChatCompleter, apiKeyEnvVar string, lookupAPIKey APIKeyLookup, breakerConfig ...CircuitBreakerConfig) *ChatService {
 	return &ChatService{
 		providers:    providers,
 		completer:    completer,
 		streamer:     chatStreamer(completer),
 		apiKeyEnvVar: apiKeyEnvVar,
 		lookupAPIKey: lookupAPIKey,
+		breaker:      newCircuitBreaker(breakerConfig),
 	}
 }
 
@@ -100,22 +103,42 @@ func (s *ChatService) Chat(ctx context.Context, message string) (modelclient.Cha
 }
 
 func (s *ChatService) ChatMessages(ctx context.Context, messages []modelclient.ChatMessage) (modelclient.ChatResponse, error) {
-	provider, apiKey, err := s.credentials(ctx)
+	credentials, err := s.credentialsCandidates(ctx)
 	if err != nil {
 		return modelclient.ChatResponse{}, err
 	}
-	started := time.Now()
-	response, err := s.completer.Chat(ctx, provider.BaseURL, apiKey, modelclient.ChatRequest{
-		Model:               provider.ChatModel,
-		Messages:            messages,
-		MaxCompletionTokens: maxCompletionTokens(ctx),
-		Stream:              false,
-	})
-	observeModelCall(ctx, usage.ModelKindChat, provider.Name, provider.ChatModel, started, response.Usage, err)
-	if err != nil {
-		return modelclient.ChatResponse{}, &ChatCallError{Err: fmt.Errorf("complete chat: %w", err)}
+	var lastErr error
+	for index, credential := range credentials {
+		if !s.breaker.Allow(credential.provider.Name, capabilityChat) {
+			observeCircuitBreaker(ctx, credential.provider.Name, capabilityChat, usage.CircuitEventOpened)
+			lastErr = fmt.Errorf("provider %s: %w", credential.provider.Name, ops.ErrCircuitOpen)
+			continue
+		}
+		started := time.Now()
+		response, callErr := s.completer.Chat(ctx, credential.provider.BaseURL, credential.apiKey, modelclient.ChatRequest{
+			Model:               credential.provider.ChatModel,
+			Messages:            messages,
+			MaxCompletionTokens: maxCompletionTokens(ctx),
+			Stream:              false,
+		})
+		observeModelCall(ctx, usage.ModelKindChat, credential.provider.Name, credential.provider.ChatModel, started, response.Usage, callErr)
+		if callErr == nil {
+			if index > 0 {
+				observeCircuitBreaker(ctx, credential.provider.Name, capabilityChat, usage.CircuitEventFallback)
+			}
+			s.breaker.RecordSuccess(credential.provider.Name, capabilityChat)
+			return response, nil
+		}
+		lastErr = callErr
+		if !ops.IsRetryableFailure(callErr) {
+			break
+		}
+		s.breaker.RecordFailure(credential.provider.Name, capabilityChat)
 	}
-	return response, nil
+	if lastErr == nil {
+		lastErr = modelprovider.ErrNotFound
+	}
+	return modelclient.ChatResponse{}, &ChatCallError{Err: fmt.Errorf("complete chat: %w", lastErr)}
 }
 
 func (s *ChatService) ChatMessagesWithTools(ctx context.Context, messages []modelclient.ChatMessage, definitions []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
@@ -123,28 +146,49 @@ func (s *ChatService) ChatMessagesWithTools(ctx context.Context, messages []mode
 }
 
 func (s *ChatService) ChatMessagesWithToolsForModel(ctx context.Context, requestedModel string, messages []modelclient.ChatMessage, definitions []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
-	provider, apiKey, err := s.credentials(ctx)
+	credentials, err := s.credentialsCandidates(ctx)
 	if err != nil {
 		return modelclient.ChatResponse{}, err
 	}
-	started := time.Now()
-	model, err := provider.ResolveChatModel(requestedModel)
-	if err != nil {
-		return modelclient.ChatResponse{}, err
+	var lastErr error
+	for index, credential := range credentials {
+		model, resolveErr := credential.provider.ResolveChatModel(requestedModel)
+		if resolveErr != nil {
+			lastErr = resolveErr
+			continue
+		}
+		if !s.breaker.Allow(credential.provider.Name, capabilityChat) {
+			observeCircuitBreaker(ctx, credential.provider.Name, capabilityChat, usage.CircuitEventOpened)
+			lastErr = fmt.Errorf("provider %s: %w", credential.provider.Name, ops.ErrCircuitOpen)
+			continue
+		}
+		started := time.Now()
+		response, callErr := s.completer.Chat(ctx, credential.provider.BaseURL, credential.apiKey, modelclient.ChatRequest{
+			Model:               model,
+			Messages:            messages,
+			Tools:               modelToolDefinitions(definitions),
+			ReasoningEffort:     reasoningEffort(ctx),
+			MaxCompletionTokens: maxCompletionTokens(ctx),
+			Stream:              false,
+		})
+		observeModelCall(ctx, usage.ModelKindChat, credential.provider.Name, model, started, response.Usage, callErr)
+		if callErr == nil {
+			if index > 0 {
+				observeCircuitBreaker(ctx, credential.provider.Name, capabilityChat, usage.CircuitEventFallback)
+			}
+			s.breaker.RecordSuccess(credential.provider.Name, capabilityChat)
+			return response, nil
+		}
+		lastErr = callErr
+		if !ops.IsRetryableFailure(callErr) {
+			break
+		}
+		s.breaker.RecordFailure(credential.provider.Name, capabilityChat)
 	}
-	response, err := s.completer.Chat(ctx, provider.BaseURL, apiKey, modelclient.ChatRequest{
-		Model:               model,
-		Messages:            messages,
-		Tools:               modelToolDefinitions(definitions),
-		ReasoningEffort:     reasoningEffort(ctx),
-		MaxCompletionTokens: maxCompletionTokens(ctx),
-		Stream:              false,
-	})
-	if err != nil {
-		return modelclient.ChatResponse{}, &ChatCallError{Err: fmt.Errorf("complete chat with tools: %w", err)}
+	if lastErr == nil {
+		lastErr = modelprovider.ErrNotFound
 	}
-	observeModelCall(ctx, usage.ModelKindChat, provider.Name, model, started, response.Usage, err)
-	return response, nil
+	return modelclient.ChatResponse{}, &ChatCallError{Err: fmt.Errorf("complete chat with tools: %w", lastErr)}
 }
 
 func (s *ChatService) ValidateChatModel(ctx context.Context, requestedModel string) error {
@@ -178,25 +222,48 @@ func (s *ChatService) StreamMessages(ctx context.Context, messages []modelclient
 	if s.streamer == nil {
 		return ErrStreamingUnavailable
 	}
-	provider, apiKey, err := s.credentials(ctx)
+	credentials, err := s.credentialsCandidates(ctx)
 	if err != nil {
 		return err
 	}
-	started := time.Now()
-	if err := s.streamer.ChatStream(ctx, provider.BaseURL, apiKey, modelclient.ChatRequest{
-		Model:               provider.ChatModel,
-		Messages:            messages,
-		MaxCompletionTokens: maxCompletionTokens(ctx),
-		Stream:              true,
-	}, onDelta); err != nil {
-		observeModelCall(ctx, usage.ModelKindChat, provider.Name, provider.ChatModel, started, nil, err)
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
+	var lastErr error
+	for index, credential := range credentials {
+		if !s.breaker.Allow(credential.provider.Name, capabilityChat) {
+			observeCircuitBreaker(ctx, credential.provider.Name, capabilityChat, usage.CircuitEventOpened)
+			lastErr = fmt.Errorf("provider %s: %w", credential.provider.Name, ops.ErrCircuitOpen)
+			continue
 		}
-		return &ChatCallError{Err: fmt.Errorf("stream chat: %w", err)}
+		started := time.Now()
+		emitted := false
+		streamErr := s.streamer.ChatStream(ctx, credential.provider.BaseURL, credential.apiKey, modelclient.ChatRequest{
+			Model:               credential.provider.ChatModel,
+			Messages:            messages,
+			MaxCompletionTokens: maxCompletionTokens(ctx),
+			Stream:              true,
+		}, func(delta string) error {
+			emitted = true
+			return onDelta(delta)
+		})
+		observeModelCall(ctx, usage.ModelKindChat, credential.provider.Name, credential.provider.ChatModel, started, nil, streamErr)
+		if streamErr == nil {
+			if index > 0 {
+				observeCircuitBreaker(ctx, credential.provider.Name, capabilityChat, usage.CircuitEventFallback)
+			}
+			s.breaker.RecordSuccess(credential.provider.Name, capabilityChat)
+			return nil
+		}
+		lastErr = streamErr
+		// Once a delta reached the client, retrying another provider would
+		// duplicate or reorder the answer. Only fail over before first output.
+		if emitted || errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) || !ops.IsRetryableFailure(streamErr) {
+			return &ChatCallError{Err: fmt.Errorf("stream chat: %w", streamErr)}
+		}
+		s.breaker.RecordFailure(credential.provider.Name, capabilityChat)
 	}
-	observeModelCall(ctx, usage.ModelKindChat, provider.Name, provider.ChatModel, started, nil, nil)
-	return nil
+	if lastErr == nil {
+		lastErr = modelprovider.ErrNotFound
+	}
+	return &ChatCallError{Err: fmt.Errorf("stream chat: %w", lastErr)}
 }
 
 func chatStreamer(completer modelclient.ChatCompleter) modelclient.ChatStreamer {
@@ -204,18 +271,41 @@ func chatStreamer(completer modelclient.ChatCompleter) modelclient.ChatStreamer 
 	return streamer
 }
 
-func (s *ChatService) credentials(ctx context.Context) (modelprovider.Provider, string, error) {
-	provider, err := s.providers.Current(ctx)
-	if err != nil {
-		return modelprovider.Provider{}, "", err
-	}
-	if provider.APIKeyEnvVar != s.apiKeyEnvVar {
-		return modelprovider.Provider{}, "", ErrAPIKeyEnvironmentMismatch
-	}
+type providerCredential struct {
+	provider modelprovider.Provider
+	apiKey   string
+}
 
-	apiKey, found := s.lookupAPIKey(s.apiKeyEnvVar)
-	if !found || apiKey == "" {
-		return modelprovider.Provider{}, "", ErrAPIKeyNotConfigured
+func (s *ChatService) credentialsCandidates(ctx context.Context) ([]providerCredential, error) {
+	current, err := s.providers.Current(ctx)
+	if err != nil {
+		return nil, err
 	}
-	return provider, apiKey, nil
+	providers := []modelprovider.Provider{current}
+	if enabledStore, ok := s.providers.(modelprovider.EnabledStore); ok {
+		if enabled, listErr := enabledStore.Enabled(ctx); listErr == nil && len(enabled) > 0 {
+			providers = enabled
+		}
+	}
+	credentials := make([]providerCredential, 0, len(providers))
+	seen := make(map[string]struct{}, len(providers))
+	for _, provider := range providers {
+		if _, exists := seen[provider.Name]; exists {
+			continue
+		}
+		seen[provider.Name] = struct{}{}
+		if provider.APIKeyEnvVar != s.apiKeyEnvVar {
+			continue
+		}
+
+		apiKey, found := s.lookupAPIKey(s.apiKeyEnvVar)
+		if !found || apiKey == "" {
+			return nil, ErrAPIKeyNotConfigured
+		}
+		credentials = append(credentials, providerCredential{provider: provider, apiKey: apiKey})
+	}
+	if len(credentials) == 0 {
+		return nil, ErrAPIKeyEnvironmentMismatch
+	}
+	return credentials, nil
 }
