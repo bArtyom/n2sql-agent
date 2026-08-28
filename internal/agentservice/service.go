@@ -80,6 +80,7 @@ type Service struct {
 	profileStore       memory.ProfileStore
 	delegateResearch   bool
 	externalTools      []agent.Tool
+	subagentRegistry   *agentruntime.SubagentRegistry
 	childLifecycle     agentruntime.ChildRunLifecycle
 	childScheduler     agentruntime.ChildScheduler
 	tccCoordinator     *tcc.Coordinator
@@ -99,8 +100,7 @@ func (s *Service) SetMemoryStore(store memory.Store) {
 }
 
 // SetDelegateResearchEnabled enables the standard Agent's optional,
-// read-only child research tool. The child is scoped per request and does not
-// inherit the parent's other tools.
+// read-only child research tool. The child is scoped per request.
 func (s *Service) SetDelegateResearchEnabled(enabled bool) {
 	if s != nil {
 		s.delegateResearch = enabled
@@ -108,12 +108,20 @@ func (s *Service) SetDelegateResearchEnabled(enabled bool) {
 }
 
 // SetExternalTools configures optional non-knowledge capabilities. They are
-// exposed in knowledge_base_preferred mode to both parent and child Agents;
-// child Agents still never receive the delegate_research tool, which prevents
-// recursive child creation.
+// exposed in knowledge_base_preferred mode to the parent and selectively
+// inherited by child Agents according to their SubagentConfig allowlist.
 func (s *Service) SetExternalTools(tools ...agent.Tool) {
 	if s != nil {
 		s.externalTools = append([]agent.Tool(nil), tools...)
+	}
+}
+
+// SetSubagentRegistry configures named child roles. A role controls the
+// child's system prompt, model, tools, step budget, and timeout; the runtime
+// still strips recursive delegation regardless of configuration.
+func (s *Service) SetSubagentRegistry(registry *agentruntime.SubagentRegistry) {
+	if s != nil {
+		s.subagentRegistry = registry
 	}
 }
 
@@ -423,6 +431,8 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		delegate.SetChildRunLifecycle(s.childLifecycle)
 		delegate.SetChildScheduler(s.childScheduler)
 		delegate.SetChildEventSink(sink)
+		delegate.SetSubagentRegistry(s.subagentRegistry)
+		delegate.SetChildTools(s.externalTools...)
 		if err := registry.AllowAndRegister(delegate); err != nil {
 			return Response{}, fmt.Errorf("register delegate research tool: %w", err)
 		}

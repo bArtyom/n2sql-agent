@@ -24,6 +24,17 @@ type delegateFailingChatStub struct {
 
 type delegateBlockingChatStub struct{}
 
+type delegateModelChatStub struct {
+	delegateChatStub
+	model string
+}
+
+func (s *delegateModelChatStub) ChatMessagesWithToolsForModel(_ context.Context, model string, _ []modelclient.ChatMessage, definitions []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+	s.model = model
+	s.definitions = append(s.definitions, definitions)
+	return modelclient.ChatResponse{Message: "按指定子 Agent 模型完成研究。"}, nil
+}
+
 func (*delegateBlockingChatStub) ChatMessagesWithTools(ctx context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 	<-ctx.Done()
 	return modelclient.ChatResponse{}, ctx.Err()
@@ -187,6 +198,53 @@ func TestDelegateResearchToolRunsScopedReadOnlyChild(t *testing.T) {
 	}
 }
 
+func TestDelegateResearchToolUsesNamedSubagentModelAndParentToolAllowlist(t *testing.T) {
+	chat := &delegateModelChatStub{}
+	registry, err := NewSubagentRegistry([]SubagentConfig{
+		{Name: "fast-research", SystemPrompt: "快速研究", Tools: []string{"knowledge_search", "parent_read"}, Model: "child-model", MaxSteps: 1, Timeout: time.Second},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentTool := testNamedTool{name: "parent_read"}
+	unsafeTool := testNamedTool{name: "delegate_research"}
+	tool, err := NewDelegateResearchTool(chat, delegateSearcherStub{}, 7, 4096, 3, nil, false, retrieval.DefaultKeywordThreshold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool.SetSubagentRegistry(registry)
+	tool.SetChildTools(parentTool, unsafeTool)
+	result, err := tool.Call(context.Background(), json.RawMessage(`{"question":"研究年假","subagent":"fast-research"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat.model != "child-model" || result.Content == "" {
+		t.Fatalf("model=%q result=%#v", chat.model, result)
+	}
+	if len(chat.definitions) != 1 {
+		t.Fatalf("definitions = %#v", chat.definitions)
+	}
+	var foundParent, foundUnsafe bool
+	for _, definition := range chat.definitions[0] {
+		foundParent = foundParent || definition.Name == "parent_read"
+		foundUnsafe = foundUnsafe || definition.Name == "delegate_research"
+	}
+	if !foundParent || foundUnsafe {
+		t.Fatalf("child tool definitions = %#v", chat.definitions[0])
+	}
+}
+
+type testNamedTool struct{ name string }
+
+func (t testNamedTool) Name() string        { return t.name }
+func (t testNamedTool) Description() string { return "test tool" }
+func (t testNamedTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{}}`)
+}
+func (t testNamedTool) Call(context.Context, json.RawMessage) (agent.ToolResult, error) {
+	return agent.ToolResult{Content: "ok"}, nil
+}
+
 func TestDelegateResearchToolPropagatesFolderScopeToChildSearch(t *testing.T) {
 	searcher := &delegateFolderSearcherStub{}
 	chat := &delegateChatStub{}
@@ -234,6 +292,23 @@ func TestDelegateResearchToolPersistsChildLifecycleWhenConfigured(t *testing.T) 
 	}
 }
 
+func TestDelegateResearchToolPassesToolCallAndTraceIdentityToChild(t *testing.T) {
+	lifecycle := &childLifecycleStub{}
+	tool, err := NewDelegateResearchTool(&delegateChatStub{}, delegateSearcherStub{}, 7, 4096, 3, nil, false, retrieval.DefaultKeywordThreshold)
+	if err != nil {
+		t.Fatalf("NewDelegateResearchTool() error = %v", err)
+	}
+	tool.SetParentRun(42, "parent-run")
+	tool.SetChildRunLifecycle(lifecycle)
+	ctx := WithExecutionIdentity(context.Background(), ExecutionIdentity{ToolCallID: "call-parent-1", TraceID: "trace-parent-1"})
+	if _, err := tool.Call(ctx, json.RawMessage(`{"question":"研究年假"}`)); err != nil {
+		t.Fatalf("Call() error = %v", err)
+	}
+	if lifecycle.started.ToolCallID != "call-parent-1" || lifecycle.started.TraceID != "trace-parent-1" {
+		t.Fatalf("child identity = %#v, want tool_call_id and trace_id", lifecycle.started)
+	}
+}
+
 func TestDelegateResearchToolReturnsPartialResultWithoutAutomaticRetry(t *testing.T) {
 	lifecycle := &childLifecycleStub{}
 	tool, err := NewDelegateResearchTool(&delegateFailingChatStub{}, delegateSearcherStub{}, 7, 4096, 3, nil, false, retrieval.DefaultKeywordThreshold)
@@ -274,13 +349,23 @@ func TestDelegateResearchToolPublishesAssociatedChildEvents(t *testing.T) {
 	if len(events) == 0 {
 		t.Fatal("child event sink received no events")
 	}
+	seenResult := false
 	for _, event := range events {
-		if event.Type != agent.EventChildEvent || event.RunID != "parent-run" {
+		if (event.Type != agent.EventChildEvent && event.Type != agent.EventChildResult) || event.RunID != "parent-run" {
 			t.Fatalf("child event = %#v", event)
 		}
 		data, ok := event.Data.(map[string]any)
 		if !ok || data["child_run_id"] == "" || data["parent_run_id"] != "parent-run" {
 			t.Fatalf("child event data = %#v", event.Data)
 		}
+		if event.Type == agent.EventChildResult {
+			seenResult = true
+			if data["phase"] != "result" || data["result_available"] != true {
+				t.Fatalf("child result data = %#v", event.Data)
+			}
+		}
+	}
+	if !seenResult {
+		t.Fatal("child event sink received no separate child_result event")
 	}
 }
