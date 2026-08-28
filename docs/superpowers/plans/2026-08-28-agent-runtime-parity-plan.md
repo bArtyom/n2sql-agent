@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-28-agent-runtime-parity-design.md`
 
+**Implementation status (2026-08-28):** Core implementation for Tasks 1–10 is complete. The checklist below records the original TDD plan; focused tests have been added and the final full-repository verification is performed after this documentation update.
+
 ## Global Constraints
 
 - 逻辑上只保留一套 Agent Checkpoint；旧 checkpoint 接口不做兼容。

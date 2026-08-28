@@ -1,0 +1,498 @@
+# n2sql-agent Agent Runtime 面试与项目讲解
+
+> 本文是当前项目 Agent 主线的学习和面试说明。项目参考 DeerFlow 的运行时思想，结合 Go、PostgreSQL、Redis Stream 和现有 RAG 能力实现；不是把所有逻辑堆在 HTTP Handler 中，也不是把原始思考链或完整工具结果暴露给浏览器。
+
+## 1. 一分钟介绍
+
+这是一个面向文档知识库的 Agent + RAG 问答系统。用户提交问题后，HTTP 层只负责校验请求、创建 `agent_run` 并返回 `run_id`，真正的 ReAct 执行交给后台 Worker。Worker 使用数据库队列领取任务，通过模型的 Function Calling 决定是否调用知识库检索、文档读取或其他安全工具；工具结果作为不可信观察反馈给模型，模型再决定继续调用工具还是生成答案。
+
+运行过程具有流式事件、统一 checkpoint、租约续期、Worker 接管、工具失败自修正、审批中断、子 Agent、运行预算和错误分类。PostgreSQL 保存需要恢复和审计的事实，Redis/Hub 只负责低延迟事件传输和短期回放。最终普通会话只保存用户问题和最终助手回答，内部工具过程保存在 Agent Run 的运行轨迹和统一 checkpoint 中。
+
+面试时可以概括为：
+
+> “我的 Agent 是一个数据库驱动的异步 ReAct Runtime。提交请求后先创建 pending Run，Worker 用 `FOR UPDATE SKIP LOCKED` 领取并获得租约；Engine 通过 Function Calling 在 ModelNode 和 ToolNode 之间循环。每个模型决策、工具结果和中断边界写入一个版本化 checkpoint，事件同时进入持久化事件日志和 Redis/Hub，由 SSE 用游标续传。Worker 崩溃后，新的 Worker 通过租约回收和 checkpoint fencing 接管，从 pending tool call 或当前节点继续。普通工具失败会把错误反馈给模型重试，副作用工具必须审批并遵守幂等边界。”
+
+## 2. 总体架构
+
+```text
+浏览器
+  │ POST /agent-chat/stream
+  ▼
+HTTP Handler
+  ├─ 校验知识库范围、模型、附件、幂等键
+  ├─ INSERT agent_runs(status=pending, request snapshot)
+  └─ 202 {run_id, stream_url}
+
+浏览器 ── GET /agent-runs/{run_id}/stream ──► SSE Handler
+                                               │
+                                               ├─ Redis Stream / Hub：实时事件、短期回放
+                                               └─ PostgreSQL event journal：可靠补发
+
+共享 Worker Pool
+  ├─ Worker A: ClaimNext → lease → Execute Agent Run
+  ├─ Worker B: ClaimNext → 可执行另一个用户的 Run
+  └─ Worker C: 过期租约回收后接管 Run
+              │
+              ▼
+       Agent Engine / ReAct Loop
+          ├─ Model：Function Calling + 流式文本
+          ├─ Tool：知识库检索、文档工具、外部工具
+          ├─ Child Agent：共享受限 Scheduler 的独立 Run
+          ├─ Checkpoint：一个统一可恢复状态
+          └─ Events：run/tool/reasoning/message/child/interrupt
+              │
+              ├─ agent_runs.response：最终结果
+              ├─ conversation_messages：用户问题 + 最终回答
+              └─ agent_checkpoints：恢复所需隐藏状态
+```
+
+关键边界是：
+
+| 边界 | 负责什么 | 不负责什么 |
+| --- | --- | --- |
+| HTTP Handler | 校验、入队、SSE 转发 | 不长时间执行模型和工具 |
+| Worker | 领取、租约、执行、状态收口 | 不把 HTTP 连接当作任务生命周期 |
+| Agent Engine | ReAct 决策、工具调用、预算、checkpoint 边界 | 不直接操作浏览器 |
+| PostgreSQL | Run、Attempt、Checkpoint、最终答案、事件日志 | 不承担低延迟广播 |
+| Redis/Hub | 实时事件、短期 replay、订阅者广播 | 不是最终状态事实来源 |
+| SSE Handler | 把事件按游标发给浏览器 | 不决定 Agent 下一步 |
+
+## 3. 与 DeerFlow 思路对应的十个能力
+
+### 3.1 稳定事件契约和游标
+
+事件包含稳定的 `version`、`id`、`run_id`、`type`、`category`、`seq`、`execution_id` 和 `trace_id`。其中：
+
+- `id` 用于事件幂等去重；
+- `seq` 是持久化事件日志中的递增游标；
+- `execution_id` 区分同一个 Run 被不同 Worker 执行的第几次尝试；
+- `category` 让前端按 `lifecycle/tool/output/control` 分类，不必解析事件名称猜含义；
+- `version` 为以后增加字段或改变语义预留兼容边界。
+
+事件不是由某个 Worker 的内存计数器决定顺序，而是追加到 PostgreSQL 后使用事件表的稳定 ID 作为 durable sequence。这样 Worker A 崩溃、Worker B 接管后，新事件仍然可以和旧事件放进同一个有序日志。
+
+### 3.2 SSE 断线和 Redis gap
+
+浏览器收到事件后记住 `Last-Event-ID`，例如最后收到 `run-1-exec-a-3`。重连时把它放在 HTTP Header 中。
+
+SSE Handler 的处理顺序是：
+
+1. 先把事件 ID 映射为 PostgreSQL durable `seq`；
+2. 先尝试从持久化事件日志 `ListAfter(seq)` 补发缺失事件；
+3. 再订阅 Hub/Redis 的实时尾部；
+4. 使用事件 ID 去重，避免“补发最后一条”和“实时订阅第一条”重复；
+5. 如果 Redis 短期事件已过期，返回类型化 `stream_replay_gap`。
+
+如果 Run 已进入终态，前端读取 Run 状态和 `response` 恢复最终答案；如果 Run 仍在运行，则丢弃过期游标、订阅当前尾部，继续接收后续事件。中间事件不是最终事实，最终状态和答案不会因为 Redis 过期而丢失。
+
+### 3.3 一个统一 checkpoint
+
+逻辑上每个 Run/Thread 只有一个 `AgentState`，当前实现通过 `agent_checkpoints` 表保存它。它不是“上下文 checkpoint 一张表 + 工具 checkpoint 另一张表”，而是一份完整快照，里面可以同时有：
+
+```json
+{
+  "version": 7,
+  "last_step": 3,
+  "current_node": "tool",
+  "messages": [
+    {"role":"user", "content":"年假怎么计算？"},
+    {"role":"assistant", "tool_calls":[{"id":"call-1","name":"knowledge_search"}]}
+  ],
+  "summary_text": "已检索员工手册，尚未生成最终答案。",
+  "pending_tool_calls": [
+    {"id":"call-1","name":"knowledge_search","arguments":"{\"query\":\"年假\"}"}
+  ]
+}
+```
+
+保存边界包括：
+
+- 下一次模型调用前：保存当前消息和压缩后的摘要；
+- 模型返回工具调用后：保存 `current_node=tool` 和 `pending_tool_calls`；
+- 工具结果写回后：保存工具观察，并清除已经完成的 pending call；
+- 审批/等待子任务时：保存 `interrupt` 或等待节点；
+- 最终答案形成时：保存 `current_node=finish` 和答案消息。
+
+checkpoint 写入必须通过 `lease_token + expected_version` fencing。旧 Worker 即使网络延迟恢复，也不能覆盖新 Worker 的状态。如果 checkpoint 写失败，Engine 会在继续下一次模型或工具副作用前停止本轮，并把失败交给 Worker 收口；不能假装已经有恢复点。
+
+大工具结果不必全部塞进 JSONB：状态中保存受限正文或临时文件引用，临时文件由 blob store 清理。真正重启恢复所需的是消息边界、工具调用 ID、参数哈希和外部引用，而不是无限大的完整结果。
+
+### 3.4 模型流式和 Function Calling
+
+工具定义放在模型请求的独立 `tools` 字段，不作为历史消息追加。每轮请求大致是：
+
+```json
+{
+  "messages": [
+    {"role":"system","content":"你是知识库助手……"},
+    {"role":"user","content":"年假怎么算？"}
+  ],
+  "tools": [
+    {
+      "type":"function",
+      "function":{
+        "name":"knowledge_search",
+        "description":"在当前知识库检索资料",
+        "parameters":{"type":"object","properties":{"query":{"type":"string"}}}
+      }
+    }
+  ],
+  "tool_choice":"auto"
+}
+```
+
+模型可以返回两类内容：
+
+- 文本 delta：立即变成 `message_delta`，SSE 实时显示；
+- tool-call delta：参数 JSON 可能被拆成多段，后端先按 `tool_call_id/index` 累积，只有完整 JSON 校验通过后才执行工具。
+
+工具执行结果不会伪装成可信指令，而是以 `UNTRUSTED_TOOL_RESULT` 形式加入当前轮上下文，再交给模型判断下一步。原始隐藏思考链不写入会话历史；当前 UI 只接收受限的 reasoning 摘要事件。
+
+### 3.5 轻量 Agent Graph
+
+项目没有引入完整 Python/LangGraph 编排框架，而是在 Go 中定义了最小 `Node`、`Transition` 和 `Graph`：
+
+```go
+type Node interface {
+    Name() string
+    Run(context.Context, *AgentState) (Transition, error)
+}
+
+type Transition struct {
+    NextNode string
+    Halt     bool
+}
+```
+
+默认 ReAct 仍然是：
+
+```text
+model → tool → model → tool → finish
+```
+
+审批、等待子 Agent、未来的澄清问题都可以成为持久化节点，而不是在一个长函数中阻塞。`CheckpointState.CurrentNode` 让新 Worker 能从 `tool` 或 `interrupt` 节点继续，而不是从头执行已经完成的模型决策。
+
+### 3.6 Run 级预算和停止原因
+
+单次模型请求的 `max_completion_tokens` 只限制这一调用的输出；Agent 还需要 Run 级总预算：
+
+```go
+type RunBudget struct {
+    MaxModelCalls  int
+    MaxToolCalls   int
+    MaxTotalTokens int
+}
+```
+
+默认值是模型调用 16 次、工具调用 32 次、总 Token 100000。达到预算后，Run 以 `step_limit` 停止并写入 `stop_reason`。此外还区分 `model_error`、`tool_error`、`timeout`、`canceled`、`validation_error` 和 `internal_error`，运维和前端可以知道“为什么停”，而不只得到一个 `agent chat failed`。
+
+### 3.7 配置化子 Agent
+
+父 Agent 通过 `delegate_research` 创建独立 child Run。子 Agent 不是简单的匿名 goroutine，而有自己的：
+
+- `run_id`、`parent_run_id` 和 `run_kind=child`；
+- checkpoint、attempt、租约和超时；
+- 子 Agent 名称、System Prompt、模型、工具白名单和最大步数；
+- 父 Run 事件中的 `child_run_id`、状态和受限摘要。
+
+子 Agent 默认继承父 Agent 允许的外部工具，但明确排除 `delegate_research`、`task`、`create_subagent`，避免递归创建失控。共享 `BoundedChildScheduler` 控制所有父 Run 的子任务总并发，而不是每个父 Agent 私自创建一套槽位。
+
+选择原则是：简单任务父 Agent 自己做；互相独立的研究任务并发 child；有前后依赖的任务由父 Agent 串行推进；需要隔离上下文的复杂任务交给一个 child 内部完成。
+
+### 3.8 Durable Interrupt / Human-in-the-loop
+
+副作用工具执行前，Engine 先写入统一 checkpoint：
+
+```json
+{
+  "current_node":"interrupt",
+  "interrupt": {
+    "kind":"approval",
+    "id":"run-1:approval:call-9",
+    "tool_call_id":"call-9",
+    "tool_name":"write_file",
+    "arguments":"{...}"
+  }
+}
+```
+
+随后 Run 变成 `waiting_approval`，释放 Worker 租约，不占用 goroutine 等用户点击。用户批准接口在事务中锁定 Run 和统一 checkpoint：清除 interrupt、记录 `approved_tool_call_ids`、版本加一、Run 回到 pending。下一个 Worker 领取后看到已批准的调用，只执行一次，不重复弹窗；拒绝则把“用户拒绝”作为工具观察反馈给模型。
+
+因此审批状态不依赖某个进程内 Hub，也不怕原 Worker 崩溃或服务重启。
+
+### 3.9 Tool Catalog 和 Memory Provider
+
+工具通过 `ToolCatalog` 做元数据发现和实际解析，Agent 可以先知道工具名称、描述、参数，再按当前权限注册真正可用的工具。真正的 Tool Registry 仍负责：
+
+- 是否允许暴露；
+- 是否需要审批；
+- 是否可以重试；
+- 是否支持并行；
+- 参数校验和结果脱敏。
+
+记忆通过 `MemoryProvider` 接口解耦：
+
+```go
+type Provider interface {
+    Add(context.Context, Scope, string) error
+    GetContext(context.Context, Scope) (Context, error)
+    Search(context.Context, Scope, string, int) ([]string, error)
+    Update(context.Context, Scope, string, string) error
+    Delete(context.Context, Scope, string) error
+}
+```
+
+当前默认实现使用 PostgreSQL。每轮模型请求动态构造 system prompt，把用户级长期记忆作为一段受控上下文注入；工具定义仍然放独立 `tools` 字段。这样以后可以替换为 DeerMem、Mem0、向量记忆或文件后端，上层 Engine 不需要改变。
+
+### 3.10 观测、故障注入和安全日志
+
+每个请求通过 `trace_id` 关联，Worker 执行再附加 `run_id`、`task_id`、`execution_id` 和 `attempt`。当前记录的低基数信息包括：
+
+- HTTP 请求数量、4xx/5xx 和耗时；
+- Agent Run 成功、失败、取消、超时、步数、工具调用数和总 Token；
+- Worker 领取失败、重试、死信和任务耗时；
+- 模型调用成功率、错误分类、耗时、Prompt/Completion/Total Token、熔断和 fallback；
+- 队列深度；
+- model/tool/checkpoint 等语义阶段的 trace 日志。
+
+日志不会写 API Key、完整 Prompt、完整文档和完整工具参数。Engine 提供测试专用 `FaultInjector`，可以在 `before_model`、`after_tool_checkpoint` 等边界模拟崩溃，验证 Worker 接管和断点续跑，而不需要真的杀掉整个测试进程。
+
+## 4. 一次完整对话示例
+
+问题：用户问“请总结《员工手册》里的年假规定”。
+
+### 第一步：提交
+
+HTTP Handler 校验用户的知识库权限、消息、模型和附件，生成 `run_id=run-101`，写入：
+
+```text
+agent_runs
+  run_id=run-101
+  status=pending
+  attempt_count=0
+  request={消息、知识库范围、模型、预算}
+```
+
+返回 `202`，浏览器随后连接 `/agent-runs/run-101/stream`。
+
+### 第二步：领取和租约
+
+Worker 执行 `ClaimNext`。数据库事务用 `FOR UPDATE SKIP LOCKED` 锁住一条 pending Run，写入：
+
+```text
+status=running
+attempt_count=1
+lease_token=lease-a
+lease_until=未来 5 分钟
+execution_id=run-101-attempt-1-...
+```
+
+另一个用户的 Run 可以被 Worker B 同时领取。当前 Worker 还启动心跳，定期用同一个 `lease_token` 续租；续租失败就取消执行 context。
+
+### 第三步：第一次模型决策
+
+Engine 组装 system prompt、用户问题、长期记忆和工具定义，调用聊天模型。模型返回：
+
+```json
+{
+  "tool_calls":[
+    {"id":"call-search-1","name":"knowledge_search","arguments":"{\"query\":\"年假规定\"}"}
+  ]
+}
+```
+
+此时发布 `tool_called`，并把 `pending_tool_calls` 写入统一 checkpoint。若此刻 Worker 崩溃，Worker B 不会再次让模型猜一次，而是读取这个 pending call。
+
+### 第四步：执行工具
+
+`knowledge_search` 在当前知识库范围内做向量、关键词和必要的图谱/图片召回，返回若干受限资料。工具结果经过脱敏、截断、引用提取后：
+
+- 发布 `tool_finished`，只带工具名、摘要、引用和统计；
+- 以不可信 tool message 加入内存中的当前轮消息；
+- checkpoint 更新为 `pending_tool_calls=[]`，`current_node=model`。
+
+如果普通工具失败，Engine 将错误作为观察反馈给模型，例如“检索接口超时，请改写查询或直接说明无法检索”，模型可以换参数再试。如果是写入文件、修改数据库等副作用工具，则先进入 approval，不自动重复执行。
+
+### 第五步：第二次模型决策和流式回答
+
+模型根据检索结果生成文本，响应中的文本 delta 逐段发布：
+
+```text
+message_delta: “根据员工手册，”
+message_delta: “年假天数按入职年限计算……”
+```
+
+同时 Engine 记录最终 `assistant` 消息和 `current_node=finish` checkpoint。模型输出为空、达到预算或持续重复调用工具时，Run 会使用结构化 stop reason 结束。
+
+### 第六步：持久化和收口
+
+最终响应写入：
+
+```text
+agent_runs.response
+  {answer, sources, stats, trace, execution_id}
+
+conversation_messages
+  user: “请总结《员工手册》里的年假规定”
+  assistant: “根据员工手册，……”
+```
+
+普通会话表不保存每一个 tool call。`agent_run_events` 保存可审计的事件日志，`agent_checkpoints` 保存最后的隐藏运行状态。Run 标记 `succeeded`，释放租约，Hub/Redis 流结束。
+
+## 5. Worker 崩溃、重试和恢复示例
+
+假设 Worker A 已完成知识库检索，checkpoint 是：
+
+```json
+{
+  "version": 4,
+  "current_node": "model",
+  "messages": [
+    {"role":"user","content":"总结年假"},
+    {"role":"assistant","tool_calls":[{"id":"call-1","name":"knowledge_search"}]},
+    {"role":"tool","tool_call_id":"call-1","content":"UNTRUSTED_TOOL_RESULT\n……"}
+  ],
+  "pending_tool_calls": []
+}
+```
+
+Worker A 在下一次模型请求前崩溃：
+
+1. 心跳停止，`lease_until` 到期；
+2. 回收逻辑 `RequeueExpired` 把 `running` 改为 `pending/requeued`，增加下一次尝试记录；
+3. Worker B 用新的 `lease_token=lease-b` 领取；
+4. B 读取 `agent_runs`、同一个 `agent_checkpoints` 的最新有效版本和请求快照；
+5. 因为 `pending_tool_calls` 为空，B 不重复知识库检索，直接将已有工具结果送进模型继续决策；
+6. B 写 checkpoint 时携带 `lease-b` 和期望版本 4。旧 A 如果延迟回来写入，会被 `ErrCheckpointConflict` 拒绝。
+
+如果 A 是在工具调用已经发出、但工具结果尚未 checkpoint 前崩溃：
+
+- 普通只读工具可能被重新调用一次；因此工具实现需要尽可能幂等，或者通过参数哈希/结果缓存避免重复；
+- 副作用工具不能直接盲目重试，必须审批、查询外部状态或使用业务幂等键；
+- checkpoint 不能撤销外部副作用，所以安全边界优先于“绝不重复”。
+
+模型 API 的一次请求则有独立的最多三次调用策略：超时、429、网络异常和 5xx 使用指数退避加随机抖动；认证失败、参数错误和权限不足不重试。Provider 连续失败后才按配置尝试备用 Provider。Worker 级执行失败另有 attempt 历史和租约恢复，两者不是同一个重试层。
+
+## 6. 哪些数据存在哪里
+
+### PostgreSQL：事实来源
+
+| 表/字段 | 保存内容 | 用途 |
+| --- | --- | --- |
+| `agent_runs` | request snapshot、状态、attempt、租约、错误、stop reason、最终 response | Worker 领取、状态查询、最终答案恢复 |
+| `agent_run_attempts` | 每次 Worker 尝试的开始/结束、错误和状态 | 解释重试和崩溃恢复 |
+| `agent_checkpoints` | 一个统一 AgentState 的版本快照 | Worker 接管、pending tool、审批和上下文恢复 |
+| `agent_run_events` | 版本化事件和 durable seq | Redis gap 后补发、审计和调试 |
+| `conversation_messages` | 用户消息和最终助手回答 | 多轮对话历史 |
+| memory 表 | 用户级长期记忆/偏好 | 新对话注入或按需检索 |
+
+### Redis/Hub：短期事件层
+
+保存或转发 `run_started`、`tool_called`、`tool_finished`、`reasoning_delta`、`message_delta`、`run_finished` 等短期运行事件。它们给实时 SSE 使用，设置 TTL/长度上限，过期是允许的；过期后由 PostgreSQL 的事件日志或最终 `response` 兜底。Hub 是进程内广播器，Redis 是跨进程事件桥，不是通用 goroutine 总线。
+
+### 临时文件/Blob Store：大对象
+
+大工具结果、图片和大解析产物不全部堆在 Worker 内存或 Redis。checkpoint 里只保留受限内容和外部引用；任务完成或失败清理时删除临时对象。需要长期保留的原始文件应走对象存储抽象，而不是依赖某个 Worker 的本地临时目录。
+
+## 7. 工具安全和错误自修正
+
+工具策略是后端事实，不由模型或前端决定：
+
+```text
+只读工具
+  参数校验 → 调用 → 失败观察 → 模型改参数/换工具/回答
+
+副作用工具
+  参数校验 → durable approval → 用户批准
+  → 幂等键/外部状态检查 → 执行 → checkpoint
+```
+
+“错误交给模型重新判断”不是把所有异常无限重试。模型能修复的是查询词错误、参数缺失、工具不存在或检索结果为空；认证失败、权限不足、不可逆外部副作用和未知执行状态必须在后端停止。这样既保留 Agent 的自修正能力，也不会把安全策略交给模型。
+
+## 8. 子 Agent 的并发模型
+
+Go 的 Worker 池和 child scheduler 是两层并发：
+
+```text
+进程内共享 Agent Worker Pool（例如 5 个槽位）
+  ├─ Worker 1 执行用户 A 的父 Run
+  ├─ Worker 2 执行用户 B 的父 Run
+  └─ Worker 3 执行用户 A 的 child Run
+
+进程内共享 BoundedChildScheduler（例如 3 个槽位）
+  ├─ 父 Run A 的 child-1
+  ├─ 父 Run A 的 child-2
+  └─ 父 Run B 的 child-1
+```
+
+每个正在执行的 Run 有自己的 context、租约、checkpoint 和事件身份。goroutine 不是线程池中的永久线程：任务完成后 goroutine 退出，新的任务由 Worker 循环或 scheduler 槽位继续消费。`context` 负责取消，`channel` 负责 goroutine 间传结果，Hub 只负责向多个 SSE 订阅者广播运行事件。
+
+## 9. 严格知识库模式和 RAG
+
+Agent 不是“永远只会搜索一次”的固定链路。默认 `knowledge_base_preferred` 允许先查知识库，必要时由 Agent 继续检索或使用后端允许的其他工具；`knowledge_base_only` 要求最终回答必须有知识库证据，没有命中就输出严格拒答。
+
+知识库工具内部是 RAG 子系统：
+
+```text
+问题
+  ├─ 向量召回
+  ├─ 关键词/标题路径召回
+  ├─ 摘要、图片和可选 GraphRAG 召回
+  ├─ Hybrid/RRF 融合
+  ├─ 可选 Rerank + MMR
+  └─ 引用和受限上下文
+```
+
+Agent 的作用是决定何时调用、是否改写问题、是否需要第二次检索和如何组织回答；RAG 的作用是提供候选证据、分数和引用。严格拒答在后端根据“是否存在有效知识库证据”判断，不能只相信模型说自己查到了。
+
+## 10. 代码导航
+
+- ReAct Engine、模型/工具循环、checkpoint 边界：`internal/agentruntime/engine.go`
+- 统一 AgentState 和上下文压缩：`internal/agentruntime/context_state.go`
+- 轻量 Graph：`internal/agentruntime/graph.go`
+- 子 Agent Registry 和委派：`internal/agentruntime/subagent_registry.go`、`delegate_research_tool.go`
+- Agent Run 状态、租约、attempt、checkpoint：`internal/agentrun/run.go`
+- Worker 领取、心跳、错误收口：`internal/agentrun/worker.go`
+- 事件持久化和 durable cursor：`internal/agentrun/events.go`
+- SSE/Last-Event-ID/gap 恢复：`internal/handler/knowledge_base_agent_chat_stream.go`
+- 异步提交和执行适配：`internal/handler/agent_run_worker.go`
+- Tool Registry/Catalog：`internal/agent/registry.go`、`internal/agent/tool_catalog.go`
+- Memory Provider：`internal/memory/provider.go`
+- 错误分类、退避和熔断：`internal/ops/failure.go`、`internal/ops/circuit_breaker.go`
+- 运行指标和 trace：`internal/metrics/metrics.go`、`internal/ops/trace.go`
+- 统一 checkpoint 迁移：`internal/database/migrations/sql/000079_unify_agent_checkpoints.up.sql`
+
+## 11. 面试追问简答
+
+### 为什么不能只把状态放 Redis？
+
+Redis 适合实时事件和短期回放，但 TTL、内存容量和故障策略不适合作为唯一事实来源。Run 状态、最终答案、恢复 checkpoint 和 durable event journal 放 PostgreSQL；Redis 过期只会导致 SSE gap，不会丢最终答案。
+
+### 为什么需要 `FOR UPDATE SKIP LOCKED`？
+
+多个 Worker 同时找 pending 任务时，`FOR UPDATE` 锁住候选行，`SKIP LOCKED` 让其他 Worker 跳过已被锁定的行，分别领取不同任务，不互相等待，也不会重复消费同一个 Run。
+
+### checkpoint 和普通聊天历史有什么区别？
+
+普通聊天历史面向用户，只有用户问题和最终助手回答；checkpoint 面向运行时，包含当前轮尚未结束的工具调用、观察、压缩摘要、当前节点和中断信息。Run 结束后 checkpoint 仍可以作为该 Thread 的隐藏恢复状态，但不会原样展示给用户。
+
+### Worker 崩溃后怎样避免旧 Worker 覆盖新状态？
+
+领取时生成新 `lease_token`，写 checkpoint、续租、成功和失败状态时都必须匹配 token；checkpoint 还比较 `expected_version`。旧 Worker 的写入会得到 lease/version conflict。
+
+### 为什么副作用工具必须审批？
+
+模型可能重试、Worker 可能接管、网络可能在执行后才断开。只要外部状态不确定，自动重试就可能重复扣款、写文件或发消息。审批和幂等键让执行边界变得明确；checkpoint 只能恢复流程，不能撤销已经发生的副作用。
+
+### Agent 的 Token 限制有哪两层？
+
+Provider 请求里的 `max_completion_tokens` 限制一次模型输出；RunBudget 限制整轮 Agent 的模型调用次数、工具调用次数和累计 Token。两者一起防止单次输出过大和 ReAct 循环无限增长。
+
+### SSE 断线时为什么不一定补全所有中间事件？
+
+中间事件主要用于实时展示，不是业务事实。系统优先从 durable event journal 补发；如果事件日志或 Redis 窗口无法覆盖游标，且 Run 已终止，就恢复最终答案；若仍运行，则从当前尾部继续订阅。关键是用户不会因为错过某个 UI 事件而得到错误的最终状态。
+
+## 12. 当前设计的取舍
+
+当前实现是一个紧凑的 Go Agent Runtime：保留 DeerFlow/LangGraph 的核心思想——线程状态、checkpoint、节点、interrupt、子任务和可插拔记忆——但没有引入完整外部编排平台。它适合学习和单体/少量实例部署；如果进入更大规模生产环境，可以在不改变这些接口的前提下替换为对象存储、Prometheus/OTel、独立队列和更强的 Graph 执行器。
+
