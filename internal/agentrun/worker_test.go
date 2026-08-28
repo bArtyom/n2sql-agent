@@ -3,12 +3,113 @@ package agentrun
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
 )
+
+type concurrentRunStore struct {
+	mu        sync.Mutex
+	pending   []Run
+	completed int
+}
+
+func (s *concurrentRunStore) Create(context.Context, CreateInput) (Run, error) {
+	return Run{}, nil
+}
+
+func (s *concurrentRunStore) ClaimNext(context.Context) (Run, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.pending) == 0 {
+		return Run{}, ErrNoRun
+	}
+	run := s.pending[0]
+	s.pending = s.pending[1:]
+	run.Status = StatusRunning
+	if run.LeaseToken == "" {
+		run.LeaseToken = fmt.Sprintf("lease-%d", run.ID)
+	}
+	return run, nil
+}
+
+func (*concurrentRunStore) RequeueExpired(context.Context) error { return nil }
+func (*concurrentRunStore) RenewLease(context.Context, int64, string) error {
+	return nil
+}
+func (s *concurrentRunStore) MarkSucceeded(context.Context, int64, string) error {
+	s.mu.Lock()
+	s.completed++
+	s.mu.Unlock()
+	return nil
+}
+func (*concurrentRunStore) MarkFailed(context.Context, int64, string, string) error {
+	return nil
+}
+func (*concurrentRunStore) MarkCanceled(context.Context, int64, string) error {
+	return nil
+}
+
+func (s *concurrentRunStore) Completed() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.completed
+}
+
+func TestRunWorkersExecutesRunsConcurrently(t *testing.T) {
+	store := &concurrentRunStore{pending: []Run{
+		{ID: 1, RunID: "run-1"},
+		{ID: 2, RunID: "run-2"},
+		{ID: 3, RunID: "run-3"},
+	}}
+	started := make(chan struct{}, 3)
+	release := make(chan struct{})
+	runner, err := NewRunner(store, ExecutorFunc(func(ctx context.Context, run Run, _ EventSink) error {
+		started <- struct{}{}
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}))
+	if err != nil {
+		t.Fatalf("NewRunner() error = %v", err)
+	}
+	runner.heartbeatInterval = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		runner.RunWorkers(ctx, 3, time.Millisecond, nil)
+		close(done)
+	}()
+
+	for range 3 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for three concurrent workers")
+		}
+	}
+	close(release)
+	deadline := time.Now().Add(time.Second)
+	for store.Completed() != 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := store.Completed(); got != 3 {
+		t.Fatalf("completed runs = %d, want 3", got)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("RunWorkers did not stop after context cancellation")
+	}
+}
 
 type runStoreStub struct {
 	run           Run
@@ -52,11 +153,14 @@ func (s *runStoreStub) RequeueExpired(context.Context) error {
 	s.requeued = true
 	return nil
 }
-func (s *runStoreStub) ListToolCheckpoints(context.Context, int64) ([]ToolCheckpoint, error) {
+func (s *runStoreStub) GetLatestCheckpoint(context.Context, int64) (*Checkpoint, error) {
 	return nil, s.checkpointErr
 }
-func (*runStoreStub) SaveToolCheckpoint(context.Context, ToolCheckpoint) error { return nil }
-func (s *runStoreStub) RenewLease(context.Context, int64, string) error        { return s.renewErr }
+func (*runStoreStub) GetLatestThreadCheckpoint(context.Context, int64) (*Checkpoint, error) {
+	return nil, nil
+}
+func (*runStoreStub) SaveCheckpoint(context.Context, Checkpoint) error  { return nil }
+func (s *runStoreStub) RenewLease(context.Context, int64, string) error { return s.renewErr }
 func (s *runStoreStub) MarkSucceeded(_ context.Context, _ int64, token string) error {
 	s.markedToken = token
 	s.status = StatusSucceeded
@@ -96,14 +200,11 @@ func (s *runStoreStub) ResumeParentIfChildrenTerminal(_ context.Context, parentI
 	s.resumedParent = parentID
 	return true, nil
 }
-func (s *runStoreStub) DeleteToolCheckpoints(_ context.Context, id int64) error {
+func (s *runStoreStub) DeleteThreadCheckpoints(_ context.Context, id int64) error {
 	if id > 0 {
 		s.deleted++
 	}
 	return nil
-}
-func (*runStoreStub) CleanupTerminalToolCheckpoints(context.Context, time.Duration) (int64, error) {
-	return 0, nil
 }
 
 func TestRunnerMarksSucceededAfterExecution(t *testing.T) {
@@ -124,8 +225,8 @@ func TestRunnerMarksSucceededAfterExecution(t *testing.T) {
 	if !store.requeued {
 		t.Fatal("RunOnce() did not requeue expired runs before claiming")
 	}
-	if store.deleted != 1 {
-		t.Fatalf("deleted checkpoints = %d, want 1", store.deleted)
+	if store.deleted != 0 {
+		t.Fatalf("deleted checkpoints = %d, want 0 while run is terminal", store.deleted)
 	}
 	if store.markedToken != "lease-a" {
 		t.Fatalf("marked token = %q, want lease-a", store.markedToken)
@@ -160,8 +261,8 @@ func TestRunnerMarksFailedExecution(t *testing.T) {
 	if store.status != StatusFailed || store.failed != "model unavailable" {
 		t.Fatalf("status=%s error=%q, want failed model error", store.status, store.failed)
 	}
-	if store.deleted != 1 {
-		t.Fatalf("deleted checkpoints = %d, want 1", store.deleted)
+	if store.deleted != 0 {
+		t.Fatalf("deleted checkpoints = %d, want 0 while run is terminal", store.deleted)
 	}
 }
 
@@ -228,11 +329,11 @@ func TestRunnerPublishesParentResumeEventAfterLastChild(t *testing.T) {
 	if _, err := runner.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce() error = %v", err)
 	}
-	if len(events) != 1 || events[0].Type != agent.EventChildEvent || events[0].RunID != "parent-4" {
-		t.Fatalf("resume events = %#v, want one parent child_event", events)
+	if len(events) != 1 || events[0].Type != agent.EventChildResult || events[0].RunID != "parent-4" {
+		t.Fatalf("resume events = %#v, want one parent child_result", events)
 	}
 	data, ok := events[0].Data.(map[string]any)
-	if !ok || data["child_run_id"] != "child-9" || data["child_status"] != string(StatusSucceeded) || data["parent_resumed"] != true {
+	if !ok || data["child_run_id"] != "child-9" || data["child_status"] != string(StatusSucceeded) || data["phase"] != "result" || data["result_available"] != true || data["parent_resumed"] != true {
 		t.Fatalf("resume event data = %#v", events[0].Data)
 	}
 }
@@ -267,8 +368,8 @@ func TestRunnerContinuesWhenCheckpointLoadFails(t *testing.T) {
 		checkpointErr: errors.New("checkpoint store unavailable"),
 	}
 	runner, err := NewRunner(store, ExecutorFunc(func(_ context.Context, run Run, _ EventSink) error {
-		if len(run.Checkpoints) != 0 {
-			t.Fatalf("checkpoints = %#v, want empty fallback", run.Checkpoints)
+		if run.Checkpoint != nil {
+			t.Fatalf("checkpoint = %#v, want empty fallback", run.Checkpoint)
 		}
 		return nil
 	}))

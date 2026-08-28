@@ -210,7 +210,7 @@ type Store interface {
 // conversation package independent from the Agent run storage implementation.
 type AgentRunDataCleaner interface {
 	DeleteThreadData(context.Context, int64) error
-	DeleteThreadContext(context.Context, int64) error
+	DeleteThreadCheckpoints(context.Context, int64) error
 }
 
 type idempotencyStore interface {
@@ -537,8 +537,8 @@ func (s *Service) ClearMessages(ctx context.Context, conversationID, knowledgeBa
 		return err
 	}
 	if s.agentRunData != nil {
-		if err := s.agentRunData.DeleteThreadContext(ctx, conversationID); err != nil {
-			return fmt.Errorf("clear conversation agent context: %w", err)
+		if err := s.agentRunData.DeleteThreadCheckpoints(ctx, conversationID); err != nil {
+			return fmt.Errorf("clear conversation agent checkpoints: %w", err)
 		}
 	}
 	return s.store.ClearMessages(ctx, conversationID)

@@ -16,7 +16,6 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agentstream"
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/metrics"
-	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/ops"
 )
 
@@ -105,10 +104,10 @@ func NewPersistentAgentExecutor(answerer agentservice.EventAnswerer, conversatio
 	return NewPersistentAgentExecutorWithCheckpoint(answerer, conversations, hub, registry, resultWriter, eventStore, nil)
 }
 
-// NewPersistentAgentExecutorWithCheckpoint adds a durable boundary after a
-// completed tool event. The event payload is already bounded by the Agent
-// runtime, so the checkpoint stores only a safe summary and metadata.
-func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswerer, conversations *conversation.Service, hub *agentstream.Hub, registry *metrics.Registry, resultWriter agentrun.ResultWriter, eventStore agentrun.EventStore, checkpointStore agentrun.ToolCheckpointStore) agentrun.Executor {
+// NewPersistentAgentExecutorWithCheckpoint wires one DeerFlow-style durable
+// checkpoint store into the Agent engine. The same snapshot is used for an
+// interrupted run and for the next turn of a conversation.
+func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswerer, conversations *conversation.Service, hub *agentstream.Hub, registry *metrics.Registry, resultWriter agentrun.ResultWriter, eventStore agentrun.EventStore, checkpointStore agentrun.CheckpointStore) agentrun.Executor {
 	return agentrun.ExecutorFunc(func(ctx context.Context, run agentrun.Run, sink agentrun.EventSink) error {
 		if answerer == nil || hub == nil {
 			return agentrun.ErrInvalidRun
@@ -130,107 +129,41 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 				request.TraceID = run.RunID
 			}
 		}
-		request.RecoveryCheckpoints = run.Checkpoints
-		var contextStore agentrun.ContextCheckpointStore
-		if candidate, ok := checkpointStore.(agentrun.ContextCheckpointStore); ok {
-			contextStore = candidate
-		}
-		if run.Context != nil && len(run.Context.Messages) > 0 {
-			var messages []modelclient.ChatMessage
-			if err := json.Unmarshal(run.Context.Messages, &messages); err != nil {
-				slog.WarnContext(ctx, "agent_context_checkpoint_decode_failed", "run_id", run.RunID, "error", err)
-			} else {
-				request.RecoveryContext = &agentruntime.ContextState{
-					Version: run.Context.Version, LastStep: run.Context.LastStep,
-					Messages: messages, SummaryText: run.Context.SummaryText,
-				}
-			}
-		}
-		var threadStore agentrun.ThreadContextStore
-		if candidate, ok := checkpointStore.(agentrun.ThreadContextStore); ok {
-			threadStore = candidate
-		}
-		// A run-level recovery context always wins: it represents the exact
-		// interrupted turn. Only a fresh run loads the last completed thread
-		// state, which keeps a failed partial turn from contaminating the next
-		// visible conversation turn.
-		if request.RecoveryContext == nil && threadStore != nil && run.ConversationID > 0 {
-			threadContext, threadErr := threadStore.GetThreadContext(ctx, run.ConversationID)
-			if threadErr != nil {
-				slog.WarnContext(ctx, "agent_thread_context_load_failed", "run_id", run.RunID, "conversation_id", run.ConversationID, "error", threadErr)
-			} else if threadContext != nil {
-				var messages []modelclient.ChatMessage
-				if err := json.Unmarshal(threadContext.Messages, &messages); err != nil {
-					slog.WarnContext(ctx, "agent_thread_context_decode_failed", "run_id", run.RunID, "conversation_id", run.ConversationID, "error", err)
-				} else {
-					request.ThreadContext = &agentruntime.ContextState{
-						Version: threadContext.Version, LastStep: threadContext.LastStep,
-						Messages: messages, SummaryText: threadContext.SummaryText,
-					}
-				}
-			}
-		}
-		if decisionStore, ok := checkpointStore.(agentrun.DecisionCheckpointStore); ok {
-			if decision, decisionErr := decisionStore.GetLatestDecisionCheckpoint(ctx, run.ID); decisionErr != nil {
-				slog.WarnContext(ctx, "agent_decision_checkpoint_load_failed", "run_id", run.RunID, "error", decisionErr)
-			} else if decision != nil && (request.RecoveryContext == nil || decision.StepNumber > request.RecoveryContext.LastStep) {
-				var toolCalls []modelclient.ToolCall
-				if err := json.Unmarshal(decision.ToolCalls, &toolCalls); err == nil {
-					request.RecoveryDecision = &agentruntime.ResumeDecision{DecisionID: decision.DecisionID, StepNumber: decision.StepNumber, ToolCalls: toolCalls}
-				}
-			}
-		}
 		if checkpointStore != nil {
-			request.CheckpointSink = func(ctx context.Context, checkpoint agentruntime.ToolCheckpoint) error {
-				payload, err := json.Marshal(checkpoint.Payload)
+			if run.Checkpoint != nil {
+				var state agentruntime.CheckpointState
+				if err := json.Unmarshal(run.Checkpoint.State, &state); err != nil {
+					slog.WarnContext(ctx, "agent_checkpoint_decode_failed", "run_id", run.RunID, "error", err)
+				} else {
+					request.Checkpoint = &state
+					request.ResumeCurrentRun = true
+				}
+			} else if run.RunKind == agentrun.KindRoot && run.ConversationID > 0 {
+				checkpoint, checkpointErr := checkpointStore.GetLatestThreadCheckpoint(ctx, run.ConversationID)
+				if checkpointErr != nil {
+					slog.WarnContext(ctx, "agent_thread_checkpoint_load_failed", "run_id", run.RunID, "conversation_id", run.ConversationID, "error", checkpointErr)
+				} else if checkpoint != nil {
+					var state agentruntime.CheckpointState
+					if err := json.Unmarshal(checkpoint.State, &state); err != nil {
+						slog.WarnContext(ctx, "agent_thread_checkpoint_decode_failed", "run_id", run.RunID, "conversation_id", run.ConversationID, "error", err)
+					} else {
+						request.Checkpoint = &state
+					}
+				}
+			}
+			checkpointSequence := 0
+			request.CheckpointSink = func(ctx context.Context, state agentruntime.CheckpointState) error {
+				payload, err := json.Marshal(state)
 				if err != nil {
-					return fmt.Errorf("encode tool checkpoint event: %w", err)
+					return fmt.Errorf("encode agent checkpoint state: %w", err)
 				}
-				return checkpointStore.SaveToolCheckpoint(ctx, agentrun.ToolCheckpoint{
-					AgentRunID: run.ID, AttemptCount: run.AttemptCount, StepNumber: checkpoint.StepNumber,
-					ToolCallID: checkpoint.ToolCallID, DecisionID: checkpoint.DecisionID, ToolName: checkpoint.ToolName, Arguments: checkpoint.Arguments,
-					ArgumentsHash: checkpoint.ArgumentsHash, Content: checkpoint.Content, Payload: payload,
+				checkpointSequence++
+				return checkpointStore.SaveCheckpoint(ctx, agentrun.Checkpoint{
+					AgentRunID: run.ID, ConversationID: run.ConversationID,
+					AttemptCount: run.AttemptCount, StepNumber: state.LastStep,
+					CheckpointID: fmt.Sprintf("%s-attempt-%d-%d", run.RunID, run.AttemptCount, checkpointSequence),
+					State:        payload,
 				})
-			}
-			if decisionStore, ok := checkpointStore.(agentrun.DecisionCheckpointStore); ok {
-				request.DecisionSink = func(ctx context.Context, checkpoint agentruntime.DecisionCheckpoint) error {
-					toolCalls, err := json.Marshal(checkpoint.ToolCalls)
-					if err != nil {
-						return fmt.Errorf("encode agent decision checkpoint: %w", err)
-					}
-					return decisionStore.SaveDecisionCheckpoint(ctx, agentrun.DecisionCheckpoint{
-						AgentRunID: run.ID, AttemptCount: run.AttemptCount, StepNumber: checkpoint.StepNumber,
-						DecisionID: checkpoint.DecisionID, ToolCalls: toolCalls,
-					})
-				}
-			}
-			if contextStore != nil {
-				request.ContextSink = func(ctx context.Context, state agentruntime.ContextState) error {
-					messages, err := json.Marshal(state.Messages)
-					if err != nil {
-						return fmt.Errorf("encode agent context checkpoint: %w", err)
-					}
-					return contextStore.SaveContextCheckpoint(ctx, agentrun.ContextCheckpoint{
-						AgentRunID: run.ID, AttemptCount: run.AttemptCount, Version: state.Version,
-						LastStep: state.LastStep, Messages: messages, SummaryText: state.SummaryText,
-					})
-				}
-			}
-			if threadStore != nil && !request.ChildMode && run.ConversationID > 0 {
-				request.FinalContextSink = func(ctx context.Context, state agentruntime.ContextState) error {
-					messages, err := json.Marshal(state.Messages)
-					if err != nil {
-						return fmt.Errorf("encode agent thread context: %w", err)
-					}
-					return threadStore.SaveThreadContext(ctx, agentrun.ThreadContext{
-						ConversationID: run.ConversationID,
-						Version:        state.Version,
-						LastStep:       state.LastStep,
-						LastRunID:      run.RunID,
-						Messages:       messages,
-						SummaryText:    state.SummaryText,
-					})
-				}
 			}
 		}
 

@@ -2,6 +2,7 @@ package agentrun
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -73,12 +74,15 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("claim agent run: %w", err)
 	}
-	if checkpointStore, ok := r.store.(ToolCheckpointStore); ok {
-		checkpoints, checkpointErr := checkpointStore.ListToolCheckpoints(ctx, run.ID)
+	if run.ExecutionID == "" {
+		run.ExecutionID = fmt.Sprintf("%s-attempt-%d-%d", run.RunID, run.AttemptCount, time.Now().UnixNano())
+	}
+	if checkpointStore, ok := r.store.(CheckpointStore); ok {
+		checkpoint, checkpointErr := checkpointStore.GetLatestCheckpoint(ctx, run.ID)
 		if checkpointErr != nil {
 			slog.WarnContext(ctx, "agent_checkpoint_load_failed", "run_id", run.RunID, "error", checkpointErr)
 		} else {
-			run.Checkpoints = checkpoints
+			run.Checkpoint = checkpoint
 		}
 	}
 
@@ -104,7 +108,6 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 		}
 		run.Status = StatusSucceeded
 		r.resumeParentAfterChild(ctx, run)
-		r.cleanupTerminalCheckpoints(ctx, run.ID)
 		return true, nil
 	}
 	if errors.Is(err, agentruntime.ErrAgentWaitingChildren) {
@@ -128,7 +131,6 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 		}
 		run.Status = StatusTimeout
 		r.resumeParentAfterChild(ctx, run)
-		r.cleanupTerminalCheckpoints(ctx, run.ID)
 		slog.WarnContext(ctx, "child_agent_timed_out", "run_id", run.RunID, "duration_ms", time.Since(started).Milliseconds(), "timeout", r.childTimeout)
 		return true, nil
 	}
@@ -138,7 +140,6 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 		}
 		run.Status = StatusCanceled
 		r.resumeParentAfterChild(ctx, run)
-		r.cleanupTerminalCheckpoints(ctx, run.ID)
 		return true, nil
 	}
 	message := err.Error()
@@ -155,7 +156,6 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 	}
 	run.Status = StatusFailed
 	r.resumeParentAfterChild(ctx, run)
-	r.cleanupTerminalCheckpoints(ctx, run.ID)
 	slog.ErrorContext(ctx, "agent_run_failed", "run_id", run.RunID, "duration_ms", time.Since(started).Milliseconds(), "error", err)
 	return true, nil
 }
@@ -217,36 +217,44 @@ func (r *Runner) publishParentResumeEvent(ctx context.Context, child Run) {
 	if sink == nil {
 		return
 	}
+	var childIdentity struct {
+		Request struct {
+			ToolCallID string `json:"tool_call_id"`
+			TraceID    string `json:"trace_id"`
+		} `json:"request"`
+		ToolCallID string `json:"tool_call_id"`
+		TraceID    string `json:"trace_id"`
+	}
+	_ = json.Unmarshal(child.Request, &childIdentity)
+	toolCallID := childIdentity.ToolCallID
+	if toolCallID == "" {
+		toolCallID = childIdentity.Request.ToolCallID
+	}
+	traceID := childIdentity.TraceID
+	if traceID == "" {
+		traceID = childIdentity.Request.TraceID
+	}
 	event := agent.Event{
-		Version: agent.EventSchemaVersion,
-		ID:      fmt.Sprintf("%s-child-resumed-%s-%d", parent.RunID, child.RunID, child.AttemptCount),
-		RunID:   parent.RunID,
-		Type:    agent.EventChildEvent,
+		Version:     agent.EventSchemaVersion,
+		ID:          fmt.Sprintf("%s-child-resumed-%s-%d", parent.RunID, child.RunID, child.AttemptCount),
+		RunID:       parent.RunID,
+		Type:        agent.EventChildResult,
+		ToolCallID:  toolCallID,
+		ExecutionID: child.ExecutionID,
+		TraceID:     traceID,
 		Data: map[string]any{
 			"child_run_id":     child.RunID,
 			"parent_run_id":    parent.RunID,
-			"child_event_type": "parent_resumed",
+			"child_event_type": "result_ready",
+			"phase":            "result",
 			"child_status":     string(child.Status),
+			"result_available": true,
 			"parent_resumed":   true,
 		},
 		CreatedAt: time.Now().UTC(),
 	}
 	if err := sink(event); err != nil {
 		slog.WarnContext(ctx, "agent_parent_resume_event_publish_failed", "child_run_id", child.RunID, "parent_run_id", parent.RunID, "error", err)
-	}
-}
-
-func (r *Runner) cleanupTerminalCheckpoints(ctx context.Context, runID int64) {
-	cleaner, ok := r.store.(ToolCheckpointCleaner)
-	if ok {
-		if err := cleaner.DeleteToolCheckpoints(context.WithoutCancel(ctx), runID); err != nil {
-			slog.WarnContext(ctx, "agent_checkpoint_cleanup_failed", "run_id", runID, "error", err)
-		}
-	}
-	if decisionCleaner, ok := r.store.(DecisionCheckpointCleaner); ok {
-		if err := decisionCleaner.DeleteDecisionCheckpoints(context.WithoutCancel(ctx), runID); err != nil {
-			slog.WarnContext(ctx, "agent_decision_checkpoint_cleanup_failed", "run_id", runID, "error", err)
-		}
 	}
 }
 

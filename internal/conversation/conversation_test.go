@@ -35,8 +35,8 @@ type distributedLockStoreStub struct {
 }
 
 type agentRunDataCleanerStub struct {
-	deletedThreads  []int64
-	clearedContexts []int64
+	deletedThreads     []int64
+	clearedCheckpoints []int64
 }
 
 func (s *agentRunDataCleanerStub) DeleteThreadData(_ context.Context, conversationID int64) error {
@@ -44,8 +44,8 @@ func (s *agentRunDataCleanerStub) DeleteThreadData(_ context.Context, conversati
 	return nil
 }
 
-func (s *agentRunDataCleanerStub) DeleteThreadContext(_ context.Context, conversationID int64) error {
-	s.clearedContexts = append(s.clearedContexts, conversationID)
+func (s *agentRunDataCleanerStub) DeleteThreadCheckpoints(_ context.Context, conversationID int64) error {
+	s.clearedCheckpoints = append(s.clearedCheckpoints, conversationID)
 	return nil
 }
 
@@ -202,8 +202,8 @@ func TestServiceClearsHiddenAgentStateWithConversationData(t *testing.T) {
 	if err := service.ClearMessages(context.Background(), 9, 7); err != nil {
 		t.Fatalf("ClearMessages() error = %v", err)
 	}
-	if len(cleaner.clearedContexts) != 1 || cleaner.clearedContexts[0] != 9 {
-		t.Fatalf("cleared agent contexts = %#v, want conversation 9", cleaner.clearedContexts)
+	if len(cleaner.clearedCheckpoints) != 1 || cleaner.clearedCheckpoints[0] != 9 {
+		t.Fatalf("cleared agent checkpoints = %#v, want conversation 9", cleaner.clearedCheckpoints)
 	}
 	if err := service.Delete(context.Background(), 9, 7); err != nil {
 		t.Fatalf("Delete() error = %v", err)

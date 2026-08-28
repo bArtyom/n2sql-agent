@@ -24,17 +24,16 @@
 - GraphRAG 第一版已接入：`graph_extract` 异步任务从文本 Chunk 抽取实体/关系，Neo4j 保存实体、关系和 Chunk 引用；查询侧抽取问题实体做一跳召回，并与向量/关键词候选统一融合、Rerank、上下文扩展和引用。Neo4j 通过 `NEO4J_ENABLE` 可选开启，未配置或调用失败时回退原 Hybrid RAG。当前待补已有文档回填、删除/重索引清理和真实 Neo4j 冒烟评测。
 
 - 最新提交：`0aab837 fix: fence agent worker leases`；Agent/RAG 主线最近完成 Worker 租约 fencing，避免旧 Worker 在任务被接管后继续续租或覆盖新 Worker 的终态。
-- 当前工作区正在开发“标准 Agent 动态委派”切片；README.md 保留用户本地启动记录改动，不参与本切片提交。
+- 当前工作区正在收口 DeerFlow/LangGraph 风格的统一 Agent checkpoint；README.md 保留用户本地启动记录改动，不参与本切片提交。
 - 第一阶段知识库问答底座已完成：知识库、文档上传和 Worker、Markdown/TXT/PDF 提取、OCR 最小骨架、父子 chunk、embedding、混合检索、Rerank、引用和普通 RAG/SSE。
 - Agent Runtime 最小闭环已完成：Tool Registry、Function Calling、受限 ReAct、最大步数/超时/取消、工具失败安全降级、SSE 事件、上下文摘要、会话历史、幂等和运行摘要。
 - Agent 异步运行已接入主聊天链路：标准 Agent 提交接口先持久化 `agent_runs` 并返回 `run_id`，后台 Worker 领取并执行请求快照，执行事件经进程内 Hub 由独立 SSE 连接流式转发；会话保存、审批等待和错误事件均在 Worker 执行上下文中完成。Worker 已增加 5 分钟租约、约 100 秒心跳和过期 `running` 任务回收；旧的同步 POST SSE 逻辑仍保留为无持久化依赖时的回退路径。
 - Agent 运行新增按知识库隔离的只读状态接口 `GET /api/knowledge-bases/{id}/agent-runs/{runID}`，返回状态、尝试次数、错误和时间信息，不暴露请求快照；SSE 负责实时事件，状态接口负责刷新和最终状态确认。
 - Agent 运行最终 `Response` 已持久化到 `agent_runs.response`；当 SSE Hub 事件过期但任务已完成时，前端可通过状态接口恢复最终回答、引用、统计和轨迹。
 - Agent 中间事件支持可选 Redis 短期流：配置 `AGENT_STREAM_REDIS_URL` 后使用 Redis Stream 的有界长度与 TTL，SSE 可跨实例重放并持续订阅；未配置时回退 PostgreSQL 事件表。最终答案、运行状态和会话消息仍持久化到 PostgreSQL。
-- Agent SSE 已增加事件版本、稳定事件 ID、`Last-Event-ID` 续传和 `stream_replay_gap` 恢复；前端遇到事件窗口缺口时改读 PostgreSQL 最终答案。工具 checkpoint 目前完成边界设计，仍保持租约过期后从头重试，不宣称断点续跑。
+- Agent SSE 已增加事件版本、稳定事件 ID、`Last-Event-ID` 续传和 `stream_replay_gap` 恢复；前端遇到事件窗口缺口时改读 PostgreSQL 最终答案。Agent 恢复统一由 `agent_checkpoints` 提供，不再依赖多个 checkpoint 表拼接。
 - 工具安全重试原则已落地：普通工具默认允许失败后反馈模型重试；实现 `RequiresApproval()` 的副作用工具默认禁止自动重试，只有同时显式实现 `Retryable() bool { return true }` 才允许，便于未来接入业务幂等键后安全恢复。
-- Agent 工具 checkpoint 已接入安全复用：新增 `agent_run_checkpoints` 表，标准异步 Worker 在 `tool_finished` 边界保存脱敏结果；小结果以内联元数据保存，大结果写入带 TTL 的本地临时文件，PostgreSQL 只保存引用、预览和参数哈希；恢复时按工具名和规范化参数哈希匹配，只有不需审批且允许重试的工具才复用，副作用工具不会绕过审批，临时文件过期则只读工具降级为重新调用。Run 进入 succeeded/failed/canceled 后立即删除恢复 checkpoint，后台再清理终态遗留记录；最终答案、会话消息和运行摘要不删除。
-- Agent checkpoint 恢复增加可观测字段：`tool_finished` 标记 `checkpoint_action=stored/reused`，运行摘要增加 `checkpoint_reuses`，用于判断 Worker 接管后实际复用了多少个只读工具结果；不记录完整工具内容。
+- Agent checkpoint 已统一为 `agent_checkpoints`：一个快照同时保存消息、压缩摘要和 pending tool calls；Worker 在模型调用前、工具决策后、工具结果写入后和最终答案边界保存。小结果以内联方式保存，大结果通过临时文件引用外置；任务失败接管时读取同一份快照，任务成功后保留为下一轮会话隐藏状态，清空/删除会话时统一清理。
 - Agent SSE gap 恢复增强：事件过期后先查询 Run 状态；若仍为 `running`，前端不再携带过期的 `Last-Event-ID`，而是重新订阅 Redis 当前尾部继续接收后续事件；终态任务仍从 PostgreSQL 恢复最终答案，避免慢前端把长任务误判为失败。
 - Agent Worker 租约 fencing 已补齐：`agent_runs` 增加 `lease_token`，每次领取任务生成新令牌；续租、成功、失败和取消都必须匹配当前令牌，旧 Worker 即使延迟恢复也不能续租或覆盖新 Worker 的终态。租约过期回收和终态更新会清空令牌。
 - Agent Worker 租约丢失主动停止已补齐：心跳续租失败后立即取消本次执行上下文，旧 Worker 不再继续调用模型或工具；数据库 token fencing 继续作为最终写入保护。
@@ -45,11 +44,8 @@
 - Agent 主线能力已收口：只读工具失败会把结构化错误反馈给模型进行纠错，副作用工具失败不自动重试；Worker 通过租约过期回收恢复崩溃任务；子 Agent 由共享调度器异步执行，所有子任务进入终态后唤醒父 Agent。
 - 工具策略层已解耦：`knowledge_base_preferred` 可注入额外工具，`knowledge_base_only` 后端不注册额外工具；子 Agent 继承父 Agent 的业务工具，但不继承 `delegate_research`，避免递归创建子 Agent。
 - Agent 循环检测采用两阶段保护：第一次重复工具调用发布 `loop_detected` 并把警告反馈给模型，模型仍重复时才停止本轮，接近 DeerFlow 的 warning/hard-stop 机制。
-- Agent checkpoint 已增加模型决策边界：模型工具决策先写入 `agent_run_decisions`，Worker 接管时可跳过重复规划并执行已保存决策；工具结果仍写入 `agent_run_checkpoints`，任务终态后两类 checkpoint 都会清理。
-- Agent checkpoint 第一版断点续跑已接入：checkpoint 额外保存有界的原始工具参数；Worker 接管后将最近的安全只读工具调用重建为 `assistant tool_call + tool result` 上下文，直接进入下一次模型决策，减少重复的工具选择；旧格式 checkpoint 已通过迁移清理，不再兼容。
-- Agent checkpoint 恢复轨迹已补齐：接管时发出带 `checkpoint_action=resumed_context` 的 `tool_finished` 事件，并将已恢复的工具参数加入本轮重复调用保护，前端和运行日志可以区分“重新执行”与“从 checkpoint 恢复”。
-- Agent checkpoint 已保存模型决策批次 ID；同一轮并行只读工具恢复时，会重建为一条带多个 `tool_call` 的 assistant 消息及对应 tool 消息，避免恢复后的上下文协议失真。
-- Agent checkpoint 写入已改为可降级：保存失败不会让已成功的工具调用和最终问答失败；`tool_finished` 会标记 `checkpoint_action=save_failed`，表示本轮没有建立可恢复 checkpoint，后续接管时按安全工具重试策略处理。
+- 旧的 `agent_run_contexts`、`agent_thread_contexts`、`agent_run_decisions` 和工具专用 checkpoint 逻辑已从当前实现删除；迁移 `000079` 会删除旧表并创建统一的 `agent_checkpoints`，不兼容旧 checkpoint payload。
+- Agent checkpoint 写入已改为可降级：保存失败不会让已成功的工具调用和最终问答失败；后续接管时按统一快照是否存在和工具安全策略处理。
 - Agent Worker checkpoint 读取也已可降级：恢复存储暂时不可用时记录结构化警告并从空 checkpoint 开始执行，普通只读工具按安全策略重新调用，不再因为恢复元数据故障直接终止主问答。
 - Agent 只读工具已覆盖 `knowledge_search`、`document_list`、`document_info`、`document_read`；文档正文读取受知识库、文档、chunk 数量和字节数限制。
 - 异步文档摘要工具 `document_summary` 已接入标准 Agent：后台生成时返回任务状态并立即结束本轮 Agent，不把 pending 占位结果再次交给模型，避免重复工具调用和步数超限；摘要完成后由后续提问读取缓存。
@@ -65,7 +61,7 @@
 - 动态子 Agent 并发调度已补齐：Agent Engine 原有同轮只读工具并行执行能力继续保留；新增进程级共享 `BoundedChildScheduler`，所有父 Run 的子 Agent 共用最多 3 个执行槽位，槽位满时等待，父 context 取消时等待中的子任务立即退出，避免无限 goroutine 和模型并发失控。子 Run 仍保留 PostgreSQL 持久化，暂不拆成独立数据库 Worker。
 - 动态子 Agent 事件关联已补齐：子 Agent 关键事件通过 `child_event` 进入父 Run 的现有事件存储、Redis/SSE 和前端轨迹，事件携带 `child_run_id`、`parent_run_id`、子事件类型和有界摘要；不会把完整工具结果重复写入父事件。前端不新增 child SSE，而是在父 Run 结束后拉取安全的父子执行树并用折叠视图展示。
 - 父子 Run 查询已补齐：新增 `GET /api/knowledge-bases/{id}/agent-runs/{runID}/children`，按 `parent_run_id` 递归返回最多 8 层安全执行树，包含状态、尝试次数、时间、错误和最终 response，不暴露请求快照、租约 token；数据库查询按知识库隔离。
-- 子 Agent checkpoint 复用已补齐：持久化 child Run 使用“父 Run + 研究问题”生成稳定 ID，重试时通过同一个 child Run 读取最新 attempt 的 `agent_run_checkpoints`；子 Agent Engine 复用安全只读工具结果并继续模型决策，checkpoint 仍使用现有表、临时大结果文件和参数哈希策略，不新增存储体系。
+- 子 Agent checkpoint 复用已补齐：持久化 child Run 使用“父 Run + 研究问题”生成稳定 ID，重试时通过同一个 child Run 读取最新 attempt 的 `agent_checkpoints`；子 Agent Engine 从统一快照恢复消息和 pending tool calls，临时大结果文件只作为快照中的外部内容引用。
 - 子 Agent 失败处理已改为 DeerFlow 风格：如果已经拿到检索资料但最终总结失败，返回 `failed + partial_result + resume_available` 以及有界资料预览，让父 Agent 自己判断继续回答还是重新委派；部分失败结果不写入 checkpoint，避免恢复时被误当成成功结果。只有父 context 取消时才继续向上抛出错误；重试仍复用同一 child Run 和最新安全 checkpoint。
 - 前端已支持会话、引用卡片与懒加载原文、检索统计、Agent 工具轨迹折叠、断线恢复、正文分页预览、固定起步问题和按需生成追问建议。
 - 最新停止生成切片：标准 Agent 流式回答期间输入栏显示“停止生成”按钮，调用 `POST /api/knowledge-bases/{id}/agent-runs/{runID}/stop` 取消执行上下文；引擎发 `run_canceled` 事件，前端标记独立 stopped 终态（保留部分内容、不显示重新生成、不写会话历史）；断线恢复与用户停止语义分离；停止按知识库 ID 隔离。

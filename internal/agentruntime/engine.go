@@ -70,13 +70,8 @@ type Engine struct {
 	allowRepeatedToolCalls  bool
 	toolTimeout             time.Duration
 	parallelToolLimit       int
-	resumeCheckpoints       []ResumeCheckpoint
-	resumeDecision          *ResumeDecision
-	resumeContext           *ContextState
-	checkpointSink          ToolCheckpointSink
-	decisionSink            DecisionCheckpointSink
-	contextSink             ContextCheckpointSink
-	finalContextSink        ContextCheckpointSink
+	resumeCheckpoint        *CheckpointState
+	checkpointSink          CheckpointSink
 	tccCoordinator          *tcc.Coordinator
 	tccAgentRunID           int64
 	executionID             string
@@ -108,58 +103,14 @@ type EngineOptions struct {
 	// ParallelToolLimit caps concurrent read-only calls in one model response.
 	// Zero uses the default.
 	ParallelToolLimit int
-	// ResumeCheckpoints contains only checkpoints loaded by the durable Worker.
-	// The engine reuses one only when the tool is safe and the arguments hash
-	// matches the new model call exactly.
-	ResumeCheckpoints []ResumeCheckpoint
-	ResumeDecision    *ResumeDecision
-	ResumeContext     *ContextState
-	CheckpointSink    ToolCheckpointSink
-	DecisionSink      DecisionCheckpointSink
-	ContextSink       ContextCheckpointSink
-	// FinalContextSink receives the compacted thread state after a successful
-	// answer. Unlike ContextSink, it is not a per-run recovery snapshot.
-	FinalContextSink ContextCheckpointSink
+	// ResumeCheckpoint is the latest complete state loaded by the durable
+	// Worker. It may contain pending tool calls, which are executed before the
+	// next model decision so a reclaimed Worker does not re-plan the same step.
+	ResumeCheckpoint *CheckpointState
+	CheckpointSink   CheckpointSink
 	TCCCoordinator   *tcc.Coordinator
 	TCCAgentRunID    int64
 }
-
-type ResumeCheckpoint struct {
-	ToolCallID    string
-	DecisionID    string
-	ToolName      string
-	Arguments     string
-	ArgumentsHash string
-	StepNumber    int
-	Content       string
-}
-
-type ToolCheckpoint struct {
-	ToolCallID    string
-	DecisionID    string
-	ToolName      string
-	StepNumber    int
-	Arguments     string
-	ArgumentsHash string
-	Content       string
-	Payload       any
-}
-
-type ToolCheckpointSink func(context.Context, ToolCheckpoint) error
-
-type ResumeDecision struct {
-	DecisionID string
-	StepNumber int
-	ToolCalls  []modelclient.ToolCall
-}
-
-type DecisionCheckpoint struct {
-	DecisionID string
-	StepNumber int
-	ToolCalls  []modelclient.ToolCall
-}
-
-type DecisionCheckpointSink func(context.Context, DecisionCheckpoint) error
 
 // TCCTool marks an approved side-effecting tool whose operation is split into
 // Try, Confirm, and Cancel participants. The returned operation IDs must be
@@ -265,13 +216,8 @@ func NewEngineWithOptions(chat modelruntime.ToolChatRunner, registry *agent.Tool
 		allowRepeatedToolCalls:  options.AllowRepeatedToolCalls,
 		toolTimeout:             toolTimeout,
 		parallelToolLimit:       parallelToolLimit,
-		resumeCheckpoints:       options.ResumeCheckpoints,
-		resumeDecision:          options.ResumeDecision,
-		resumeContext:           options.ResumeContext,
+		resumeCheckpoint:        options.ResumeCheckpoint,
 		checkpointSink:          options.CheckpointSink,
-		decisionSink:            options.DecisionSink,
-		contextSink:             options.ContextSink,
-		finalContextSink:        options.FinalContextSink,
 		tccCoordinator:          options.TCCCoordinator,
 		tccAgentRunID:           options.TCCAgentRunID,
 		executionID:             options.ExecutionID,
@@ -319,42 +265,15 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 	emitter := newEventEmitter(runID, sink, ExecutionIdentity{ExecutionID: e.executionID, TraceID: e.traceID})
 	seenToolCalls := make(map[string]struct{})
 	loopWarnings := make(map[string]struct{})
-	var resumedDecision *modelclient.ChatResponse
-	if e.resumeDecision != nil && len(e.resumeDecision.ToolCalls) > 0 {
-		resumedDecision = &modelclient.ChatResponse{ToolCalls: e.resumeDecision.ToolCalls}
-	}
+	pendingToolCalls := checkpointPendingTools(e.resumeCheckpoint)
 	if err := emitter.emit(agent.EventRunStarted, 0, map[string]any{
 		"status": string(agent.RunRunning),
 	}); err != nil {
 		return finishError(result, err)
 	}
 	conversation := append([]modelclient.ChatMessage(nil), messages...)
-	restoredContext := e.resumeContext != nil && len(e.resumeContext.Messages) > 0
-	if restoredContext {
-		contextState := restoreContextState(*e.resumeContext)
-		conversation = append([]modelclient.ChatMessage(nil), contextState.Messages...)
-	}
-	resumedMessages, resumedCheckpoints, resumeErr := e.resumeConversation(run)
-	if resumeErr != nil {
-		return finishErrorWithEvents(result, resumeErr, emitter)
-	}
-	if !restoredContext {
-		conversation = append(conversation, resumedMessages...)
-	}
-	for _, checkpoint := range resumedCheckpoints {
-		if e.resumeDecision != nil && checkpoint.DecisionID == e.resumeDecision.DecisionID {
-			continue
-		}
-		seenToolCalls[normalizedToolCallKey(checkpoint.ToolName, checkpoint.Arguments)] = struct{}{}
-		if err := emitter.emit(agent.EventToolFinished, checkpoint.StepNumber, map[string]any{
-			"tool_call_id":            checkpoint.ToolCallID,
-			"tool_name":               checkpoint.ToolName,
-			"checkpoint_action":       "resumed_context",
-			"resumed_from_checkpoint": true,
-			"result_summary":          "已从 checkpoint 恢复工具结果",
-		}); err != nil {
-			return finishError(result, err)
-		}
+	if len(pendingToolCalls) > 0 && !containsToolCall(conversation, pendingToolCalls[0].ID) && e.resumeCheckpoint != nil {
+		conversation = rebuildModelContext(conversation, *e.resumeCheckpoint)
 	}
 	definitions := e.registry.FunctionDefinitions()
 
@@ -362,20 +281,23 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 		if err := ctx.Err(); err != nil {
 			return finishErrorWithEvents(result, err, emitter)
 		}
-		contextState := compactContextState(ctx, ContextState{
-			Version:     1,
-			LastStep:    len(run.Steps()),
-			Messages:    conversation,
-			SummaryText: summaryTextFromMessages(conversation),
+		checkpointState := compactCheckpointState(ctx, CheckpointState{
+			Version:          1,
+			LastStep:         len(run.Steps()),
+			Messages:         conversation,
+			SummaryText:      summaryTextFromMessages(conversation),
+			PendingToolCalls: pendingToolCalls,
 		}, maxAgentConversationBytes, e.contextSummarizer)
-		conversation = contextState.Messages
-		e.saveContext(ctx, contextState)
+		conversation = rebuildModelContext(conversation, checkpointState)
+		if messageBytes(conversation) > maxAgentConversationBytes {
+			conversation = compactConversationWithSummarizer(ctx, conversation, maxAgentConversationBytes, e.contextSummarizer)
+		}
+		e.saveCheckpoint(ctx, checkpointState)
 
 		var response modelclient.ChatResponse
-		usedResumedDecision := resumedDecision != nil
-		if resumedDecision != nil {
-			response = *resumedDecision
-			resumedDecision = nil
+		resumingPendingTools := len(pendingToolCalls) > 0
+		if resumingPendingTools {
+			response.ToolCalls = append([]modelclient.ToolCall(nil), pendingToolCalls...)
 		} else {
 			if err := run.RecordModelCall(); err != nil {
 				return finishErrorWithEvents(result, err, emitter)
@@ -411,7 +333,10 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				return finishErrorWithEvents(result, err, emitter)
 			}
 			conversation = append(conversation, modelclient.ChatMessage{Role: "assistant", Content: safeMessage})
-			e.saveFinalContext(ctx, conversation, len(run.Steps()))
+			pendingToolCalls = nil
+			e.saveCheckpoint(ctx, CheckpointState{
+				Version: 1, LastStep: len(run.Steps()), Messages: conversation,
+			})
 			if err := emitter.emit(agent.EventMessageDelta, len(run.Steps()), map[string]any{
 				"content": safeMessage,
 			}); err != nil {
@@ -431,19 +356,18 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			return result, nil
 		}
 
-		conversation = append(conversation, modelclient.ChatMessage{
-			Role:      "assistant",
-			Content:   response.Message,
-			ToolCalls: response.ToolCalls,
-		})
-		if e.decisionSink != nil && len(response.ToolCalls) > 0 && !usedResumedDecision {
-			decision := DecisionCheckpoint{DecisionID: fmt.Sprintf("%s-decision-%d", runID, step+1), StepNumber: step + 1, ToolCalls: response.ToolCalls}
-			if err := e.decisionSink(ctx, decision); err != nil {
-				// A decision checkpoint accelerates recovery but must not turn a
-				// successful model response into a failed Agent run.
-				_ = emitter.emit(agent.EventToolFinished, len(run.Steps()), map[string]any{"checkpoint_action": "decision_save_failed"})
-			}
+		if !resumingPendingTools || !containsToolCall(conversation, response.ToolCalls[0].ID) {
+			conversation = append(conversation, modelclient.ChatMessage{
+				Role:      "assistant",
+				Content:   response.Message,
+				ToolCalls: response.ToolCalls,
+			})
 		}
+		pendingToolCalls = append([]modelclient.ToolCall(nil), response.ToolCalls...)
+		e.saveCheckpoint(ctx, CheckpointState{
+			Version: 1, LastStep: len(run.Steps()), Messages: conversation,
+			PendingToolCalls: pendingToolCalls,
+		})
 		parallelResults, parallel := e.precomputeReadOnlyToolCalls(ctx, response.ToolCalls, seenToolCalls)
 		var fallbackAnswer string
 		hasRelevantToolResult := false
@@ -463,7 +387,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 					if feedbackErr != nil {
 						return finishErrorWithEvents(result, feedbackErr, emitter)
 					}
-					conversation = append(conversation, modelclient.ChatMessage{Role: "tool", ToolCallID: toolCall.ID, Content: toolContent})
+					e.appendToolMessageCheckpoint(ctx, run, &conversation, &pendingToolCalls, toolCall.ID, toolContent)
 					continue
 				}
 			}
@@ -482,7 +406,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 					if feedbackErr != nil {
 						return finishErrorWithEvents(result, feedbackErr, emitter)
 					}
-					conversation = append(conversation, modelclient.ChatMessage{Role: "tool", ToolCallID: toolCall.ID, Content: toolContent})
+					e.appendToolMessageCheckpoint(ctx, run, &conversation, &pendingToolCalls, toolCall.ID, toolContent)
 					continue
 				}
 				if err := emitter.emit(agent.EventLoopDetected, len(run.Steps())+1, map[string]any{
@@ -505,23 +429,13 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 					if feedbackErr != nil {
 						return finishErrorWithEvents(result, feedbackErr, emitter)
 					}
-					conversation = append(conversation, modelclient.ChatMessage{Role: "tool", ToolCallID: toolCall.ID, Content: toolContent})
+					e.appendToolMessageCheckpoint(ctx, run, &conversation, &pendingToolCalls, toolCall.ID, toolContent)
 					continue
 				}
 			}
 			arguments := json.RawMessage(toolCall.Function.Arguments)
 			var toolResult agent.ToolResult
-			resumed := false
-			if !e.registry.RequiresApproval(toolCall.Function.Name) && e.registry.Retryable(toolCall.Function.Name) {
-				if checkpoint, ok := e.resumeCheckpoint(toolCall.Function.Name, arguments); ok {
-					toolResult = agent.ToolResult{Content: checkpoint.Content, Metadata: map[string]any{"resumed_from_checkpoint": true}}
-					if err := run.RecordCheckpointReuse(); err != nil {
-						return finishErrorWithEvents(result, err, emitter)
-					}
-					resumed = true
-				}
-			}
-			if !resumed && approvalGate != nil && e.registry.RequiresApproval(toolCall.Function.Name) {
+			if approvalGate != nil && e.registry.RequiresApproval(toolCall.Function.Name) {
 				if err := emitter.emit(agent.EventApprovalRequired, len(run.Steps())+1, map[string]any{"tool_name": toolCall.Function.Name, "arguments": boundedEventText(toolCall.Function.Arguments)}); err != nil {
 					return result, err
 				}
@@ -539,10 +453,10 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 					return result, err
 				}
 			}
-			if !resumed && parallel[callIndex] {
+			if parallel[callIndex] {
 				toolResult = parallelResults[callIndex].result
 				err = parallelResults[callIndex].err
-			} else if !resumed {
+			} else {
 				identityContext := WithExecutionIdentity(ctx, ExecutionIdentity{ToolCallID: toolCall.ID, ExecutionID: e.executionID, TraceID: e.traceID})
 				if tccTool, ok := tool.(TCCTool); ok {
 					toolResult, err = e.callTCC(identityContext, runID, len(run.Steps())+1, toolCall.Function.Name, arguments, tccTool)
@@ -564,7 +478,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 					if feedbackErr != nil {
 						return finishErrorWithEvents(result, feedbackErr, emitter)
 					}
-					conversation = append(conversation, modelclient.ChatMessage{Role: "tool", ToolCallID: toolCall.ID, Content: toolContent})
+					e.appendToolMessageCheckpoint(ctx, run, &conversation, &pendingToolCalls, toolCall.ID, toolContent)
 					continue
 				}
 				return addToolFailureWithEvents(result, toolCall.Function.Name, fmt.Errorf("execute tool: %w", err), emitter)
@@ -629,32 +543,6 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			}
 			toolFinishedData["no_relevant_results"] = toolResult.NoRelevantResults
 			toolFinishedData["result_summary"] = toolResultSummary(toolResult)
-			toolFinishedData["resumed_from_checkpoint"] = resumed
-			if resumed {
-				toolFinishedData["checkpoint_action"] = "reused"
-			} else {
-				toolFinishedData["checkpoint_action"] = "stored"
-			}
-			if !toolResultCheckpointable(toolResult) {
-				toolFinishedData["checkpoint_action"] = "skipped"
-			}
-			if e.checkpointSink != nil && toolResultCheckpointable(toolResult) {
-				if err := e.checkpointSink(ctx, ToolCheckpoint{
-					ToolCallID: toolCall.ID, DecisionID: fmt.Sprintf("%s-decision-%d", runID, step+1),
-					ToolName: toolCall.Function.Name, StepNumber: len(run.Steps()),
-					Arguments:     string(arguments),
-					ArgumentsHash: toolArgumentsHash(toolCall.Function.Name, arguments),
-					// The sink decides whether the result stays inline or is
-					// externalized. SSE never receives this content.
-					Content: toolResult.Content, Payload: toolFinishedData,
-				}); err != nil {
-					// Checkpoints accelerate recovery but are not the primary
-					// Agent result. A storage outage must not discard an already
-					// successful tool call or prevent the model from answering.
-					toolFinishedData["checkpoint_action"] = "save_failed"
-					toolFinishedData["checkpoint_error"] = "checkpoint persistence failed"
-				}
-			}
 			// Structured tool metadata is forwarded for typed rendering while
 			// staying bounded by what each tool already returns.
 			if documents, ok := toolResult.Metadata["documents"]; ok {
@@ -703,12 +591,17 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				ToolCallID: toolCall.ID,
 				Content:    toolContent,
 			})
+			pendingToolCalls = removePendingToolCall(pendingToolCalls, toolCall.ID)
+			e.saveCheckpoint(ctx, CheckpointState{
+				Version: 1, LastStep: len(run.Steps()), Messages: conversation,
+				PendingToolCalls: pendingToolCalls,
+			})
 		}
 		if fallbackAnswer != "" && !hasRelevantToolResult && !e.continueAfterNoRelevant {
-			e.saveContext(ctx, ContextState{Version: 1, LastStep: len(run.Steps()), Messages: conversation, SummaryText: summaryTextFromMessages(conversation)})
+			e.saveCheckpoint(ctx, CheckpointState{Version: 1, LastStep: len(run.Steps()), Messages: conversation, PendingToolCalls: pendingToolCalls})
 			return e.completeWithAnswer(ctx, result, emitter, conversation, fallbackAnswer)
 		}
-		e.saveContext(ctx, ContextState{Version: 1, LastStep: len(run.Steps()), Messages: conversation, SummaryText: summaryTextFromMessages(conversation)})
+		e.saveCheckpoint(ctx, CheckpointState{Version: 1, LastStep: len(run.Steps()), Messages: conversation, PendingToolCalls: pendingToolCalls})
 	}
 
 	return finishErrorWithCategory(result, ErrMaxStepsExceeded, agent.FailureStepLimit, emitter)
@@ -752,9 +645,6 @@ func (e *Engine) precomputeReadOnlyToolCalls(ctx context.Context, calls []modelc
 		}
 		tool, err := e.registry.Find(call.Function.Name)
 		if err != nil || e.registry.RequiresApproval(call.Function.Name) || !e.registry.ParallelSafe(call.Function.Name) {
-			continue
-		}
-		if _, ok := e.resumeCheckpoint(call.Function.Name, json.RawMessage(call.Function.Arguments)); ok {
 			continue
 		}
 		prepared[index] = struct {
@@ -853,16 +743,35 @@ func (e *Engine) chatWithRetry(ctx context.Context, conversation []modelclient.C
 	return response, err
 }
 
-func (e *Engine) saveContext(ctx context.Context, state ContextState) {
-	if e == nil || e.contextSink == nil || len(state.Messages) == 0 {
+func (e *Engine) saveCheckpoint(ctx context.Context, state CheckpointState) {
+	if e == nil || e.checkpointSink == nil || len(state.Messages) == 0 {
 		return
 	}
 	if state.Version <= state.LastStep {
 		state.Version = state.LastStep + 1
 	}
-	// Context persistence is a recovery accelerator. A database hiccup must
+	state = compactCheckpointState(ctx, state, maxAgentConversationBytes, e.contextSummarizer)
+	// Checkpoint persistence is a recovery accelerator. A database hiccup must
 	// not turn a successful tool call into a failed Agent run.
-	_ = e.contextSink(ctx, state)
+	_ = e.checkpointSink(ctx, state)
+}
+
+func (e *Engine) appendToolMessageCheckpoint(ctx context.Context, run *agent.AgentRun, conversation *[]modelclient.ChatMessage, pending *[]modelclient.ToolCall, toolCallID, content string) {
+	if conversation == nil || pending == nil {
+		return
+	}
+	*conversation = append(*conversation, modelclient.ChatMessage{Role: "tool", ToolCallID: toolCallID, Content: content})
+	*pending = removePendingToolCall(*pending, toolCallID)
+	lastStep := 0
+	if run != nil {
+		lastStep = len(run.Steps())
+	}
+	e.saveCheckpoint(ctx, CheckpointState{
+		Version:          1,
+		LastStep:         lastStep,
+		Messages:         *conversation,
+		PendingToolCalls: *pending,
+	})
 }
 
 func retryableModelError(ctx context.Context, err error) bool {
@@ -1097,11 +1006,6 @@ func toolResultSummary(result agent.ToolResult) string {
 	return "工具调用完成"
 }
 
-func toolResultCheckpointable(result agent.ToolResult) bool {
-	checkpointable, ok := result.Metadata["checkpointable"].(bool)
-	return !ok || checkpointable
-}
-
 func (e *Engine) completeWithAnswer(ctx context.Context, result Result, emitter *eventEmitter, conversation []modelclient.ChatMessage, answer string) (Result, error) {
 	safeMessage := security.RedactText(answer)
 	if strings.TrimSpace(safeMessage) == "" {
@@ -1111,7 +1015,7 @@ func (e *Engine) completeWithAnswer(ctx context.Context, result Result, emitter 
 		return finishErrorWithEvents(result, err, emitter)
 	}
 	conversation = append(conversation, modelclient.ChatMessage{Role: "assistant", Content: safeMessage})
-	e.saveFinalContext(ctx, conversation, len(result.Run.Steps()))
+	e.saveCheckpoint(ctx, CheckpointState{Version: 1, LastStep: len(result.Run.Steps()), Messages: conversation})
 	if err := emitter.emit(agent.EventMessageDelta, len(result.Run.Steps()), map[string]any{
 		"content": safeMessage,
 	}); err != nil {
@@ -1129,24 +1033,6 @@ func (e *Engine) completeWithAnswer(ctx context.Context, result Result, emitter 
 	}
 	return result, nil
 }
-
-func (e *Engine) saveFinalContext(ctx context.Context, messages []modelclient.ChatMessage, lastStep int) {
-	if e == nil || e.finalContextSink == nil || len(messages) == 0 {
-		return
-	}
-	state := compactContextState(ctx, ContextState{
-		Version:  1,
-		LastStep: lastStep,
-		Messages: messages,
-	}, maxAgentConversationBytes, e.contextSummarizer)
-	e.saveContext(ctx, state)
-	// This callback is deliberately best effort. The answer has already been
-	// generated; a persistence outage must not turn a successful run into a
-	// visible failure. The run-level ContextSink remains the crash-recovery
-	// boundary for the current attempt.
-	_ = e.finalContextSink(ctx, state)
-}
-
 func markUntrustedToolResult(content string) (string, error) {
 	payload, err := json.Marshal(untrustedToolResultEnvelope{Content: content})
 	if err != nil {
@@ -1231,86 +1117,32 @@ func toolArgumentsHash(toolName string, arguments json.RawMessage) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (e *Engine) resumeCheckpoint(toolName string, arguments json.RawMessage) (ResumeCheckpoint, bool) {
-	wantHash := toolArgumentsHash(toolName, arguments)
-	for index := len(e.resumeCheckpoints) - 1; index >= 0; index-- {
-		checkpoint := e.resumeCheckpoints[index]
-		if checkpoint.ToolName == toolName && checkpoint.ArgumentsHash == wantHash && strings.TrimSpace(checkpoint.Content) != "" {
-			return checkpoint, true
-		}
+func checkpointPendingTools(checkpoint *CheckpointState) []modelclient.ToolCall {
+	if checkpoint == nil || len(checkpoint.PendingToolCalls) == 0 {
+		return nil
 	}
-	return ResumeCheckpoint{}, false
+	return append([]modelclient.ToolCall(nil), checkpoint.PendingToolCalls...)
 }
 
-// resumeConversation reconstructs only the safe, completed tool exchanges
-// that were checkpointed before a Worker stopped. The next model call sees
-// those exchanges as existing context, so it does not need to decide to call
-// the same read-only tool again. Only current-format checkpoints with original
-// arguments and a decision ID are reconstructed into a model conversation.
-func (e *Engine) resumeConversation(run *agent.AgentRun) ([]modelclient.ChatMessage, []ResumeCheckpoint, error) {
-	if run == nil || len(e.resumeCheckpoints) == 0 {
-		return nil, nil, nil
-	}
-	selected := make([]ResumeCheckpoint, 0, len(e.resumeCheckpoints))
-	seen := make(map[string]struct{})
-	for index := len(e.resumeCheckpoints) - 1; index >= 0; index-- {
-		checkpoint := e.resumeCheckpoints[index]
-		if checkpoint.ToolCallID == "" || checkpoint.DecisionID == "" || checkpoint.Arguments == "" || checkpoint.Content == "" || !json.Valid([]byte(checkpoint.Arguments)) {
+func removePendingToolCall(calls []modelclient.ToolCall, toolCallID string) []modelclient.ToolCall {
+	for index, call := range calls {
+		if call.ID != toolCallID {
 			continue
 		}
-		if e.registry.RequiresApproval(checkpoint.ToolName) || !e.registry.Retryable(checkpoint.ToolName) {
-			continue
-		}
-		key := checkpoint.ToolName + "\x00" + checkpoint.ArgumentsHash
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		if _, err := e.registry.Find(checkpoint.ToolName); err != nil {
-			continue
-		}
-		seen[key] = struct{}{}
-		selected = append(selected, checkpoint)
+		return append(calls[:index:index], calls[index+1:]...)
 	}
-	type resumeGroup struct {
-		decisionID  string
-		checkpoints []ResumeCheckpoint
-	}
-	groups := make([]resumeGroup, 0, len(selected))
-	for index := len(selected) - 1; index >= 0; index-- {
-		checkpoint := selected[index]
-		if err := run.RecordCheckpointReuse(); err != nil {
-			return nil, nil, err
-		}
-		decisionID := checkpoint.DecisionID
-		if len(groups) == 0 || groups[len(groups)-1].decisionID != decisionID {
-			groups = append(groups, resumeGroup{decisionID: decisionID})
-		}
-		groups[len(groups)-1].checkpoints = append(groups[len(groups)-1].checkpoints, checkpoint)
-	}
-	messages := make([]modelclient.ChatMessage, 0, len(selected)*2)
-	for _, group := range groups {
-		if e.resumeDecision != nil && group.decisionID == e.resumeDecision.DecisionID {
-			// The decision itself is restored as the pending response below.
-			// Completed calls in this group are reused by resumeCheckpoint;
-			// unfinished calls will execute through the normal tool loop.
-			continue
-		}
-		assistant := modelclient.ChatMessage{Role: "assistant", ToolCalls: make([]modelclient.ToolCall, 0, len(group.checkpoints))}
-		for _, checkpoint := range group.checkpoints {
-			assistant.ToolCalls = append(assistant.ToolCalls, modelclient.ToolCall{
-				ID: checkpoint.ToolCallID, Type: "function",
-				Function: modelclient.ToolCallFunction{Name: checkpoint.ToolName, Arguments: checkpoint.Arguments},
-			})
-		}
-		messages = append(messages, assistant)
-		for _, checkpoint := range group.checkpoints {
-			messages = append(messages, modelclient.ChatMessage{
-				Role: "tool", ToolCallID: checkpoint.ToolCallID,
-				Content: untrustedToolResultPrefix + checkpoint.Content,
-			})
+	return calls
+}
+
+func containsToolCall(messages []modelclient.ChatMessage, toolCallID string) bool {
+	for _, message := range messages {
+		for _, call := range message.ToolCalls {
+			if call.ID == toolCallID {
+				return true
+			}
 		}
 	}
-	return messages, selected, nil
+	return false
 }
 
 func addToolFailureWithEvents(result Result, toolName string, err error, emitter *eventEmitter) (Result, error) {

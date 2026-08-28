@@ -5,7 +5,6 @@ import (
 	"log"
 	"strings"
 
-	"github.com/bArtyom/n2sql-agent/internal/agentrun"
 	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 )
@@ -72,22 +71,18 @@ type ChatRequest struct {
 	History             []HistoryMessage      `json:"history,omitempty"`
 	ConversationID      int64                 `json:"conversation_id,omitempty"`
 	CachedSummary       *CachedHistorySummary `json:"-"`
-	// ThreadContext is the hidden DeerFlow-style durable Agent state loaded
-	// from the previous completed turn. It is separate from the visible
-	// user/assistant conversation history and never leaves this service.
-	ThreadContext       *agentruntime.ContextState          `json:"-"`
-	RecoveryCheckpoints []agentrun.ToolCheckpoint           `json:"-"`
-	RecoveryDecision    *agentruntime.ResumeDecision        `json:"-"`
-	RecoveryContext     *agentruntime.ContextState          `json:"-"`
-	CheckpointSink      agentruntime.ToolCheckpointSink     `json:"-"`
-	DecisionSink        agentruntime.DecisionCheckpointSink `json:"-"`
-	ContextSink         agentruntime.ContextCheckpointSink  `json:"-"`
-	FinalContextSink    agentruntime.ContextCheckpointSink  `json:"-"`
-	ChildMode           bool                                `json:"child_mode,omitempty"`
-	ParentRunPublicID   string                              `json:"parent_run_public_id,omitempty"`
-	ToolCallID          string                              `json:"-"`
-	ExecutionID         string                              `json:"-"`
-	TraceID             string                              `json:"-"`
+	// Checkpoint is the single hidden DeerFlow-style durable Agent state. A
+	// fresh run uses the latest completed thread snapshot; a reclaimed run uses
+	// its own latest snapshot. ResumeCurrentRun distinguishes those two cases
+	// so the current user message is not appended twice.
+	Checkpoint        *agentruntime.CheckpointState `json:"-"`
+	ResumeCurrentRun  bool                          `json:"-"`
+	CheckpointSink    agentruntime.CheckpointSink   `json:"-"`
+	ChildMode         bool                          `json:"child_mode,omitempty"`
+	ParentRunPublicID string                        `json:"parent_run_public_id,omitempty"`
+	ToolCallID        string                        `json:"-"`
+	ExecutionID       string                        `json:"-"`
+	TraceID           string                        `json:"-"`
 }
 
 type HistorySummaryStats struct {

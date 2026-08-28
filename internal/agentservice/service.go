@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
-	"github.com/bArtyom/n2sql-agent/internal/agentrun"
 	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
 	"github.com/bArtyom/n2sql-agent/internal/auth"
 	"github.com/bArtyom/n2sql-agent/internal/document"
@@ -322,7 +321,7 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	}
 	var history []modelclient.ChatMessage
 	var historySummaryStats HistorySummaryStats
-	if request.ThreadContext == nil {
+	if request.Checkpoint == nil {
 		history, historySummaryStats, err = buildHistoryMessages(runContext, request.History, s.maxHistoryMessages, s.maxHistoryBytes, s.historySummarizer, request.CachedSummary)
 		if err != nil {
 			return Response{}, err
@@ -420,13 +419,8 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		ExecutionID:       request.ExecutionID,
 		TraceID:           request.TraceID,
 		ContextSummarizer: contextSummarizer,
-		ResumeCheckpoints: resumeCheckpoints(request.RecoveryCheckpoints),
-		ResumeDecision:    request.RecoveryDecision,
-		ResumeContext:     request.RecoveryContext,
+		ResumeCheckpoint:  request.Checkpoint,
 		CheckpointSink:    request.CheckpointSink,
-		DecisionSink:      request.DecisionSink,
-		ContextSink:       request.ContextSink,
-		FinalContextSink:  request.FinalContextSink,
 		TCCCoordinator:    s.tccCoordinator,
 		TCCAgentRunID:     request.ParentRunDatabaseID,
 	})
@@ -447,8 +441,8 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	}
 	systemPrompt := systemContent + s.memoryPrompt(runContext, knowledgeBaseID)
 	var messages []modelclient.ChatMessage
-	if request.ThreadContext != nil && len(request.ThreadContext.Messages) > 0 {
-		messages = agentruntime.BuildTurnContext(systemPrompt, *request.ThreadContext)
+	if request.Checkpoint != nil && len(request.Checkpoint.Messages) > 0 {
+		messages = agentruntime.BuildTurnContext(systemPrompt, *request.Checkpoint)
 	} else {
 		messages = []modelclient.ChatMessage{{Role: "system", Content: systemPrompt}}
 		messages = append(messages, history...)
@@ -461,7 +455,9 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		}
 		userMessage.ContentParts = parts
 	}
-	messages = append(messages, userMessage)
+	if !request.ResumeCurrentRun {
+		messages = append(messages, userMessage)
+	}
 	collector := newSourceCollector()
 	traceCollector := newTraceCollector()
 	eventSink := traceCollector.Sink(collector.Sink(withHistorySummaryStats(sink, historySummaryStats)))
@@ -496,20 +492,6 @@ func (s *Service) registerExternalTools(registry *agent.ToolRegistry) error {
 		}
 	}
 	return nil
-}
-
-func resumeCheckpoints(checkpoints []agentrun.ToolCheckpoint) []agentruntime.ResumeCheckpoint {
-	if len(checkpoints) == 0 {
-		return nil
-	}
-	result := make([]agentruntime.ResumeCheckpoint, 0, len(checkpoints))
-	for _, checkpoint := range checkpoints {
-		result = append(result, agentruntime.ResumeCheckpoint{
-			ToolCallID: checkpoint.ToolCallID, DecisionID: checkpoint.DecisionID, ToolName: checkpoint.ToolName, Arguments: checkpoint.Arguments,
-			ArgumentsHash: checkpoint.ArgumentsHash, StepNumber: checkpoint.StepNumber, Content: checkpoint.Content,
-		})
-	}
-	return result
 }
 
 func systemPromptFor(documentReaderAvailable, chunkReaderAvailable, documentSummaryAvailable bool) string {

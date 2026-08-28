@@ -2,8 +2,6 @@ package agentruntime_test
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -590,6 +588,54 @@ func TestEngineSummarizesOlderToolResultsWithinCurrentTurn(t *testing.T) {
 	}
 }
 
+func TestEnginePersistsContextAtSemanticBoundaries(t *testing.T) {
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(&readOnlyToolStub{toolStub: toolStub{content: "检索结果"}}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	var states []agentruntime.CheckpointState
+	modelCalls := 0
+	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		modelCalls++
+		if modelCalls == 1 {
+			return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+				ID: "search-1", Type: "function",
+				Function: modelclient.ToolCallFunction{Name: "knowledge_search", Arguments: `{}`},
+			}}}, nil
+		}
+		if len(messages) != 3 || messages[2].Role != "tool" {
+			t.Fatalf("model did not receive completed tool message: %#v", messages)
+		}
+		return modelclient.ChatResponse{Message: "完成"}, nil
+	}}
+	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 2, agentruntime.EngineOptions{
+		CheckpointSink: func(_ context.Context, state agentruntime.CheckpointState) error {
+			states = append(states, state)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEngineWithOptions() error = %v", err)
+	}
+	if _, err := engine.Run(context.Background(), "run-context-boundary", []modelclient.ChatMessage{{Role: "user", Content: "检索资料"}}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(states) < 2 {
+		t.Fatalf("context snapshots = %d, want before model and after tool", len(states))
+	}
+	last := states[len(states)-1]
+	toolFound := false
+	for _, message := range last.Messages {
+		if message.Role == "tool" {
+			toolFound = true
+			break
+		}
+	}
+	if !toolFound || len(last.Messages) < 3 || len(last.PendingToolCalls) != 0 {
+		t.Fatalf("last context = %#v, want completed tool message and no pending calls", last)
+	}
+}
+
 func messageBytesForTest(messages []modelclient.ChatMessage) int {
 	total := 0
 	for _, message := range messages {
@@ -1022,159 +1068,50 @@ func TestEngineFeedsToolExecutionFailureBackToModel(t *testing.T) {
 	}
 }
 
-func TestEngineReusesMatchingSafeCheckpointWithoutCallingTool(t *testing.T) {
+func TestEngineResumesPendingToolsFromUnifiedCheckpoint(t *testing.T) {
 	called := false
-	tool := &readOnlyToolStub{toolStub: toolStub{onCall: func(context.Context) { called = true }}}
+	tool := &readOnlyToolStub{toolStub: toolStub{content: "已恢复的检索结果", onCall: func(context.Context) { called = true }}}
 	registry := agent.NewToolRegistry()
 	if err := registry.Register(tool); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 	arguments := `{"query":"年假"}`
-	sum := sha256.Sum256([]byte("knowledge_search\x00" + arguments))
-	engine, err := agentruntime.NewEngineWithOptions(chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
-		if len(messages) != 3 || !strings.Contains(messages[len(messages)-1].Content, "checkpoint content") {
-			t.Fatalf("model did not receive checkpoint content: %#v", messages)
-		}
-		return modelclient.ChatResponse{Message: "根据已恢复的检索结果回答"}, nil
-	}}, registry, 2, agentruntime.EngineOptions{ResumeCheckpoints: []agentruntime.ResumeCheckpoint{{
-		ToolCallID: "checkpoint-call", DecisionID: "checkpoint-decision", ToolName: "knowledge_search", Arguments: arguments,
-		ArgumentsHash: hex.EncodeToString(sum[:]), Content: "checkpoint content",
-	}}})
-	if err != nil {
-		t.Fatalf("NewEngineWithOptions() error = %v", err)
-	}
-	result, err := engine.Run(context.Background(), "run-resume-safe", []modelclient.ChatMessage{{Role: "user", Content: "查询"}})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if got := result.Run.Stats().CheckpointReuses; got != 1 {
-		t.Fatalf("checkpoint reuses = %d, want 1", got)
-	}
-	if called {
-		t.Fatal("safe checkpoint was not reused")
-	}
-}
-
-func TestEngineResumesPersistedDecisionBeforeCallingModel(t *testing.T) {
-	tool := &toolStub{}
-	registry := agent.NewToolRegistry()
-	if err := registry.Register(tool); err != nil {
-		t.Fatalf("Register() error = %v", err)
-	}
-	modelCalls := 0
-	chat := chatStub{call: func(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
-		modelCalls++
-		return modelclient.ChatResponse{Message: "恢复后的最终答案"}, nil
-	}}
-	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 2, agentruntime.EngineOptions{
-		ResumeDecision: &agentruntime.ResumeDecision{
-			DecisionID: "decision-resume-1",
-			StepNumber: 1,
-			ToolCalls: []modelclient.ToolCall{{
-				ID:   "resume-call-1",
-				Type: "function",
-				Function: modelclient.ToolCallFunction{
-					Name:      "knowledge_search",
-					Arguments: `{"query":"年假"}`,
-				},
-			}},
+	checkpoint := agentruntime.CheckpointState{
+		Version:  1,
+		LastStep: 1,
+		Messages: []modelclient.ChatMessage{
+			{Role: "user", Content: "查询年假"},
+			{Role: "assistant", ToolCalls: []modelclient.ToolCall{{
+				ID: "call-resumed", Type: "function",
+				Function: modelclient.ToolCallFunction{Name: "knowledge_search", Arguments: arguments},
+			}}},
 		},
-	})
-	if err != nil {
-		t.Fatalf("NewEngineWithOptions() error = %v", err)
+		PendingToolCalls: []modelclient.ToolCall{{
+			ID: "call-resumed", Type: "function",
+			Function: modelclient.ToolCallFunction{Name: "knowledge_search", Arguments: arguments},
+		}},
 	}
-	result, err := engine.Run(context.Background(), "run-resume-decision", []modelclient.ChatMessage{{Role: "user", Content: "继续查询"}})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if result.Run.Status() != agent.RunSucceeded || result.Run.FinalAnswer() != "恢复后的最终答案" {
-		t.Fatalf("run = %s/%q, want resumed success", result.Run.Status(), result.Run.FinalAnswer())
-	}
-	if modelCalls != 1 || string(tool.args) != `{"query":"年假"}` {
-		t.Fatalf("model calls = %d, tool args = %s, want one final model call and resumed tool decision", modelCalls, tool.args)
-	}
-}
-
-func TestEngineResumesSafeToolConversationWithoutRepeatingModelDecision(t *testing.T) {
-	called := false
-	tool := &readOnlyToolStub{toolStub: toolStub{onCall: func(context.Context) { called = true }}}
-	registry := agent.NewToolRegistry()
-	if err := registry.Register(tool); err != nil {
-		t.Fatalf("Register() error = %v", err)
-	}
-	arguments := `{"query":"年假"}`
-	sum := sha256.Sum256([]byte("knowledge_search\x00" + arguments))
 	modelCalls := 0
 	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 		modelCalls++
-		if len(messages) != 3 || messages[1].Role != "assistant" || len(messages[1].ToolCalls) != 1 || messages[2].ToolCallID != "call-resumed" {
-			t.Fatalf("messages = %#v, want resumed assistant/tool pair", messages)
+		if len(messages) != 4 || messages[2].Role != "assistant" || messages[3].Role != "tool" {
+			t.Fatalf("messages = %#v, want checkpoint assistant/tool state", messages)
 		}
 		return modelclient.ChatResponse{Message: "根据断点继续回答"}, nil
 	}}
-	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 2, agentruntime.EngineOptions{ResumeCheckpoints: []agentruntime.ResumeCheckpoint{{
-		ToolCallID: "call-resumed", DecisionID: "decision-resumed", ToolName: "knowledge_search", Arguments: arguments,
-		ArgumentsHash: hex.EncodeToString(sum[:]), Content: "已保存的检索结果",
-	}}})
+	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 2, agentruntime.EngineOptions{ResumeCheckpoint: &checkpoint})
 	if err != nil {
 		t.Fatalf("NewEngineWithOptions() error = %v", err)
 	}
-	var events []agent.Event
-	result, err := engine.RunWithEvents(context.Background(), "run-resume-conversation", []modelclient.ChatMessage{{Role: "user", Content: "查询"}}, func(event agent.Event) error {
-		events = append(events, event)
-		return nil
+	result, err := engine.Run(context.Background(), "run-resume-unified", []modelclient.ChatMessage{
+		{Role: "system", Content: "系统提示"},
+		{Role: "user", Content: "查询年假"},
 	})
 	if err != nil || result.Run.FinalAnswer() != "根据断点继续回答" {
 		t.Fatalf("Run() = (%#v, %v), want resumed answer", result.Run, err)
 	}
-	if modelCalls != 1 {
-		t.Fatalf("model calls = %d, want 1 continuation call", modelCalls)
-	}
-	if called {
-		t.Fatal("safe checkpoint tool was executed again")
-	}
-	if got := result.Run.Stats().CheckpointReuses; got != 1 {
-		t.Fatalf("checkpoint reuses = %d, want 1", got)
-	}
-	if len(events) < 2 || events[1].Type != agent.EventToolFinished {
-		t.Fatalf("events = %#v, want resumed tool_finished event", events)
-	}
-	resumedData, ok := events[1].Data.(map[string]any)
-	if !ok || resumedData["checkpoint_action"] != "resumed_context" {
-		t.Fatalf("resumed event data = %#v, want resumed_context", events[1].Data)
-	}
-}
-
-func TestEngineRestoresParallelToolCallsInOneAssistantMessage(t *testing.T) {
-	registry := agent.NewToolRegistry()
-	if err := registry.Register(&readOnlyToolStub{}); err != nil {
-		t.Fatalf("Register() error = %v", err)
-	}
-	argumentsA := `{"query":"年假"}`
-	argumentsB := `{"query":"病假"}`
-	hash := func(arguments string) string {
-		sum := sha256.Sum256([]byte("knowledge_search\x00" + arguments))
-		return hex.EncodeToString(sum[:])
-	}
-	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
-		if len(messages) != 4 || len(messages[1].ToolCalls) != 2 || messages[2].ToolCallID != "call-a" || messages[3].ToolCallID != "call-b" {
-			t.Fatalf("messages = %#v, want one assistant message with two tool results", messages)
-		}
-		return modelclient.ChatResponse{Message: "已合并两个检索结果"}, nil
-	}}
-	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 2, agentruntime.EngineOptions{ResumeCheckpoints: []agentruntime.ResumeCheckpoint{
-		{ToolCallID: "call-a", DecisionID: "decision-1", ToolName: "knowledge_search", Arguments: argumentsA, ArgumentsHash: hash(argumentsA), Content: "年假结果"},
-		{ToolCallID: "call-b", DecisionID: "decision-1", ToolName: "knowledge_search", Arguments: argumentsB, ArgumentsHash: hash(argumentsB), Content: "病假结果"},
-	}})
-	if err != nil {
-		t.Fatalf("NewEngineWithOptions() error = %v", err)
-	}
-	result, err := engine.Run(context.Background(), "run-resume-parallel", []modelclient.ChatMessage{{Role: "user", Content: "查询假期"}})
-	if err != nil || result.Run.FinalAnswer() != "已合并两个检索结果" {
-		t.Fatalf("Run() = (%#v, %v), want merged answer", result.Run, err)
-	}
-	if got := result.Run.Stats().CheckpointReuses; got != 2 {
-		t.Fatalf("checkpoint reuses = %d, want 2", got)
+	if !called || modelCalls != 1 {
+		t.Fatalf("tool called=%v model calls=%d, want one resumed tool execution and one continuation", called, modelCalls)
 	}
 }
 
@@ -1198,7 +1135,7 @@ func TestEngineContinuesWhenCheckpointPersistenceFails(t *testing.T) {
 		return modelclient.ChatResponse{Message: "仍然完成回答"}, nil
 	}}
 	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 2, agentruntime.EngineOptions{
-		CheckpointSink: func(context.Context, agentruntime.ToolCheckpoint) error {
+		CheckpointSink: func(context.Context, agentruntime.CheckpointState) error {
 			return errors.New("checkpoint database unavailable")
 		},
 	})
@@ -1213,19 +1150,12 @@ func TestEngineContinuesWhenCheckpointPersistenceFails(t *testing.T) {
 	if err != nil || result.Run.Status() != agent.RunSucceeded || result.Run.FinalAnswer() != "仍然完成回答" {
 		t.Fatalf("Run() = (%#v, %v), want successful answer", result.Run, err)
 	}
-	for _, event := range events {
-		if event.Type != agent.EventToolFinished {
-			continue
-		}
-		data, ok := event.Data.(map[string]any)
-		if ok && data["checkpoint_action"] == "save_failed" {
-			return
-		}
+	if len(events) == 0 {
+		t.Fatal("events are empty")
 	}
-	t.Fatalf("events = %#v, want checkpoint_action=save_failed", events)
 }
 
-func TestEngineDoesNotPersistPartialChildResultAsCheckpoint(t *testing.T) {
+func TestEnginePersistsPartialChildResultInUnifiedCheckpoint(t *testing.T) {
 	registry := agent.NewToolRegistry()
 	if err := registry.Register(&readOnlyToolStub{toolStub: toolStub{
 		content:  "子 Agent 部分结果",
@@ -1249,7 +1179,7 @@ func TestEngineDoesNotPersistPartialChildResultAsCheckpoint(t *testing.T) {
 	}}
 	checkpointSaves := 0
 	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 2, agentruntime.EngineOptions{
-		CheckpointSink: func(context.Context, agentruntime.ToolCheckpoint) error {
+		CheckpointSink: func(context.Context, agentruntime.CheckpointState) error {
 			checkpointSaves++
 			return nil
 		},
@@ -1261,8 +1191,8 @@ func TestEngineDoesNotPersistPartialChildResultAsCheckpoint(t *testing.T) {
 	if err != nil || result.Run.FinalAnswer() != "基于部分结果回答" {
 		t.Fatalf("Run() = (%#v, %v), want successful parent answer", result.Run, err)
 	}
-	if checkpointSaves != 0 {
-		t.Fatalf("checkpoint saves = %d, want 0 for partial child result", checkpointSaves)
+	if checkpointSaves == 0 {
+		t.Fatal("checkpoint saves = 0, want unified state snapshots at semantic boundaries")
 	}
 }
 
