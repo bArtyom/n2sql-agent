@@ -148,6 +148,36 @@ func (s *PostgresStore) Delete(ctx context.Context, userID, knowledgeBaseID, mem
 	return nil
 }
 
+func (s *PostgresStore) Update(ctx context.Context, userID, knowledgeBaseID, memoryID int64, content string) (Memory, error) {
+	if userID <= 0 {
+		return Memory{}, ErrUnauthorized
+	}
+	if knowledgeBaseID <= 0 {
+		return Memory{}, ErrInvalidKnowledgeBase
+	}
+	if memoryID <= 0 {
+		return Memory{}, ErrInvalidMemory
+	}
+	content = strings.TrimSpace(content)
+	if content == "" || len([]byte(content)) > MaxContentBytes {
+		return Memory{}, ErrInvalidContent
+	}
+	var result Memory
+	err := s.db.QueryRowContext(ctx, `
+		UPDATE agent_memories
+		SET content = $4, updated_at = CURRENT_TIMESTAMP
+		WHERE user_id = $1 AND knowledge_base_id = $2 AND id = $3
+		RETURNING id, user_id, knowledge_base_id, content, source, created_at, updated_at`, userID, knowledgeBaseID, memoryID, content).Scan(
+		&result.ID, &result.UserID, &result.KnowledgeBaseID, &result.Content, &result.Source, &result.CreatedAt, &result.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Memory{}, ErrNotFound
+	}
+	if err != nil {
+		return Memory{}, fmt.Errorf("update memory: %w", err)
+	}
+	return result, nil
+}
+
 func (s *PostgresStore) GetProfile(ctx context.Context, userID int64) (Profile, error) {
 	if userID <= 0 {
 		return Profile{}, ErrUnauthorized

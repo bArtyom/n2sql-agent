@@ -63,11 +63,31 @@ type FunctionDefinition struct {
 	Parameters  json.RawMessage `json:"parameters"`
 }
 
+// ToolDescriptor is the metadata-only view used for progressive disclosure.
+// Tool is intentionally omitted from JSON and remains unresolved until the
+// Agent explicitly selects a name.
+type ToolDescriptor struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+	Tool        Tool            `json:"-"`
+}
+
+// ToolCatalog separates capability discovery from capability execution. A
+// caller can expose descriptors first and resolve the concrete implementation
+// only after the model has selected a tool.
+type ToolCatalog interface {
+	Discover(query string, limit int) []ToolDescriptor
+	Resolve(name string) (Tool, error)
+}
+
 // ToolRegistry stores the tools exposed to an Agent.
 type ToolRegistry struct {
 	tools        map[string]Tool
 	allowedTools map[string]struct{}
 }
+
+var _ ToolCatalog = (*ToolRegistry)(nil)
 
 func NewToolRegistry() *ToolRegistry {
 	return &ToolRegistry{tools: make(map[string]Tool)}
@@ -131,6 +151,31 @@ func (r *ToolRegistry) AllowAndRegister(tool Tool) error {
 func (r *ToolRegistry) Get(name string) (Tool, bool) {
 	tool, ok := r.tools[name]
 	return tool, ok
+}
+
+func (r *ToolRegistry) Discover(query string, limit int) []ToolDescriptor {
+	if r == nil {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+	query = strings.ToLower(strings.TrimSpace(query))
+	items := make([]ToolDescriptor, 0, len(r.tools))
+	for _, tool := range r.List() {
+		if query != "" && !strings.Contains(strings.ToLower(tool.Name()), query) && !strings.Contains(strings.ToLower(tool.Description()), query) {
+			continue
+		}
+		items = append(items, ToolDescriptor{Name: tool.Name(), Description: tool.Description(), Parameters: append(json.RawMessage(nil), tool.Parameters()...)})
+		if len(items) == limit {
+			break
+		}
+	}
+	return items
+}
+
+func (r *ToolRegistry) Resolve(name string) (Tool, error) {
+	return r.Find(name)
 }
 
 // SetKnowledgeSearchFolderScope applies a request-level folder boundary to
