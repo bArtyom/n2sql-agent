@@ -43,6 +43,18 @@ var (
 	ErrAgentApprovalPending = errors.New("agent approval is pending")
 )
 
+// FaultPoint names semantic boundaries where tests may inject a failure. The
+// hook is nil in production; it exists to exercise crash recovery without
+// killing the whole process under a debugger or integration test.
+type FaultPoint string
+
+const (
+	FaultBeforeModel         FaultPoint = "before_model"
+	FaultAfterToolCheckpoint FaultPoint = "after_tool_checkpoint"
+)
+
+type FaultInjector func(context.Context, FaultPoint) error
+
 const (
 	maxModelCallRetries      = 2
 	modelRetryBaseDelay      = 100 * time.Millisecond
@@ -82,6 +94,7 @@ type Engine struct {
 	executionID             string
 	traceID                 string
 	budget                  agent.RunBudget
+	faultInjector           FaultInjector
 }
 
 // EngineOptions controls bounded loop behavior without changing the default
@@ -117,6 +130,7 @@ type EngineOptions struct {
 	TCCCoordinator   *tcc.Coordinator
 	TCCAgentRunID    int64
 	Budget           agent.RunBudget
+	FaultInjector    FaultInjector
 }
 
 // TCCTool marks an approved side-effecting tool whose operation is split into
@@ -232,6 +246,7 @@ func NewEngineWithOptions(chat modelruntime.ToolChatRunner, registry *agent.Tool
 		executionID:             options.ExecutionID,
 		traceID:                 options.TraceID,
 		budget:                  options.Budget,
+		faultInjector:           options.FaultInjector,
 	}, nil
 }
 
@@ -305,10 +320,17 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 		if messageBytes(conversation) > maxAgentConversationBytes {
 			conversation = compactConversationWithSummarizer(ctx, conversation, maxAgentConversationBytes, e.contextSummarizer)
 		}
-		e.saveCheckpoint(ctx, checkpointState)
+		resumingPendingTools := len(pendingToolCalls) > 0
+		if err := e.saveCheckpoint(ctx, checkpointState); err != nil {
+			return finishErrorWithCategory(result, err, agent.FailureInternal, emitter)
+		}
+		if !resumingPendingTools {
+			if err := e.injectFault(ctx, FaultBeforeModel); err != nil {
+				return finishErrorWithCategory(result, err, agent.FailureInternal, emitter)
+			}
+		}
 
 		var response modelclient.ChatResponse
-		resumingPendingTools := len(pendingToolCalls) > 0
 		streamedMessage := false
 		streamedReasoning := false
 		if resumingPendingTools {
@@ -380,9 +402,11 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			}
 			conversation = append(conversation, modelclient.ChatMessage{Role: "assistant", Content: safeMessage})
 			pendingToolCalls = nil
-			e.saveCheckpoint(ctx, CheckpointState{
+			if err := e.saveCheckpoint(ctx, CheckpointState{
 				Version: 1, LastStep: len(run.Steps()), CurrentNode: "finish", Messages: conversation,
-			})
+			}); err != nil {
+				return finishErrorWithCategory(result, err, agent.FailureInternal, emitter)
+			}
 			if !streamedMessage {
 				if err := emitter.emit(agent.EventMessageDelta, len(run.Steps()), map[string]any{
 					"content": safeMessage,
@@ -412,10 +436,12 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			})
 		}
 		pendingToolCalls = append([]modelclient.ToolCall(nil), response.ToolCalls...)
-		e.saveCheckpoint(ctx, CheckpointState{
+		if err := e.saveCheckpoint(ctx, CheckpointState{
 			Version: 1, LastStep: len(run.Steps()), CurrentNode: "tool", Messages: conversation,
 			PendingToolCalls: pendingToolCalls,
-		})
+		}); err != nil {
+			return finishErrorWithCategory(result, err, agent.FailureInternal, emitter)
+		}
 		if err := e.checkToolBudget(run, len(response.ToolCalls)); err != nil {
 			return finishErrorWithCategory(result, err, agent.FailureStepLimit, emitter)
 		}
@@ -438,7 +464,9 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 					if feedbackErr != nil {
 						return finishErrorWithEvents(result, feedbackErr, emitter)
 					}
-					e.appendToolMessageCheckpoint(ctx, run, &conversation, &pendingToolCalls, toolCall.ID, toolContent)
+					if checkpointErr := e.appendToolMessageCheckpoint(ctx, run, &conversation, &pendingToolCalls, toolCall.ID, toolContent); checkpointErr != nil {
+						return finishErrorWithCategory(result, checkpointErr, agent.FailureInternal, emitter)
+					}
 					continue
 				}
 			}
@@ -457,7 +485,9 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 					if feedbackErr != nil {
 						return finishErrorWithEvents(result, feedbackErr, emitter)
 					}
-					e.appendToolMessageCheckpoint(ctx, run, &conversation, &pendingToolCalls, toolCall.ID, toolContent)
+					if checkpointErr := e.appendToolMessageCheckpoint(ctx, run, &conversation, &pendingToolCalls, toolCall.ID, toolContent); checkpointErr != nil {
+						return finishErrorWithCategory(result, checkpointErr, agent.FailureInternal, emitter)
+					}
 					continue
 				}
 				if err := emitter.emit(agent.EventLoopDetected, len(run.Steps())+1, map[string]any{
@@ -480,7 +510,9 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 					if feedbackErr != nil {
 						return finishErrorWithEvents(result, feedbackErr, emitter)
 					}
-					e.appendToolMessageCheckpoint(ctx, run, &conversation, &pendingToolCalls, toolCall.ID, toolContent)
+					if checkpointErr := e.appendToolMessageCheckpoint(ctx, run, &conversation, &pendingToolCalls, toolCall.ID, toolContent); checkpointErr != nil {
+						return finishErrorWithCategory(result, checkpointErr, agent.FailureInternal, emitter)
+					}
 					continue
 				}
 			}
@@ -491,7 +523,9 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				if feedbackErr != nil {
 					return finishErrorWithEvents(result, feedbackErr, emitter)
 				}
-				e.appendToolMessageCheckpoint(ctx, run, &conversation, &pendingToolCalls, toolCall.ID, toolContent)
+				if checkpointErr := e.appendToolMessageCheckpoint(ctx, run, &conversation, &pendingToolCalls, toolCall.ID, toolContent); checkpointErr != nil {
+					return finishErrorWithCategory(result, checkpointErr, agent.FailureInternal, emitter)
+				}
 				continue
 			}
 			if approvalGate != nil && e.registry.RequiresApproval(toolCall.Function.Name) && !e.approvedToolCall(toolCall.ID) {
@@ -551,7 +585,9 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 					if feedbackErr != nil {
 						return finishErrorWithEvents(result, feedbackErr, emitter)
 					}
-					e.appendToolMessageCheckpoint(ctx, run, &conversation, &pendingToolCalls, toolCall.ID, toolContent)
+					if checkpointErr := e.appendToolMessageCheckpoint(ctx, run, &conversation, &pendingToolCalls, toolCall.ID, toolContent); checkpointErr != nil {
+						return finishErrorWithCategory(result, checkpointErr, agent.FailureInternal, emitter)
+					}
 					continue
 				}
 				return addToolFailureWithEvents(result, toolCall.Function.Name, fmt.Errorf("execute tool: %w", err), emitter)
@@ -665,16 +701,25 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				Content:    toolContent,
 			})
 			pendingToolCalls = removePendingToolCall(pendingToolCalls, toolCall.ID)
-			e.saveCheckpoint(ctx, CheckpointState{
+			if err := e.saveCheckpoint(ctx, CheckpointState{
 				Version: 1, LastStep: len(run.Steps()), Messages: conversation,
 				PendingToolCalls: pendingToolCalls,
-			})
+			}); err != nil {
+				return finishErrorWithCategory(result, err, agent.FailureInternal, emitter)
+			}
+			if err := e.injectFault(ctx, FaultAfterToolCheckpoint); err != nil {
+				return finishErrorWithCategory(result, err, agent.FailureInternal, emitter)
+			}
 		}
 		if fallbackAnswer != "" && !hasRelevantToolResult && !e.continueAfterNoRelevant {
-			e.saveCheckpoint(ctx, CheckpointState{Version: 1, LastStep: len(run.Steps()), Messages: conversation, PendingToolCalls: pendingToolCalls})
+			if err := e.saveCheckpoint(ctx, CheckpointState{Version: 1, LastStep: len(run.Steps()), CurrentNode: "model", Messages: conversation, PendingToolCalls: pendingToolCalls}); err != nil {
+				return finishErrorWithCategory(result, err, agent.FailureInternal, emitter)
+			}
 			return e.completeWithAnswer(ctx, result, emitter, conversation, fallbackAnswer)
 		}
-		e.saveCheckpoint(ctx, CheckpointState{Version: 1, LastStep: len(run.Steps()), Messages: conversation, PendingToolCalls: pendingToolCalls})
+		if err := e.saveCheckpoint(ctx, CheckpointState{Version: 1, LastStep: len(run.Steps()), CurrentNode: "model", Messages: conversation, PendingToolCalls: pendingToolCalls}); err != nil {
+			return finishErrorWithCategory(result, err, agent.FailureInternal, emitter)
+		}
 	}
 
 	return finishErrorWithCategory(result, ErrMaxStepsExceeded, agent.FailureStepLimit, emitter)
@@ -837,8 +882,8 @@ func (e *Engine) chatWithRetryStream(ctx context.Context, conversation []modelcl
 	return response, err
 }
 
-func (e *Engine) saveCheckpoint(ctx context.Context, state CheckpointState) {
-	_ = e.saveCheckpointStrict(ctx, state)
+func (e *Engine) saveCheckpoint(ctx context.Context, state CheckpointState) error {
+	return e.saveCheckpointStrict(ctx, state)
 }
 
 func (e *Engine) saveCheckpointStrict(ctx context.Context, state CheckpointState) error {
@@ -849,9 +894,17 @@ func (e *Engine) saveCheckpointStrict(ctx context.Context, state CheckpointState
 		state.Version = state.LastStep + 1
 	}
 	state = compactCheckpointState(ctx, state, maxAgentConversationBytes, e.contextSummarizer)
-	// Checkpoint persistence is a recovery accelerator. A database hiccup must
-	// not turn a successful tool call into a failed Agent run.
+	// A checkpoint is the recovery boundary for an in-flight run. If it cannot
+	// be written, stop before advancing to another model/tool side effect; a
+	// later Worker must not continue from an unrecorded state.
 	return e.checkpointSink(ctx, state)
+}
+
+func (e *Engine) injectFault(ctx context.Context, point FaultPoint) error {
+	if e == nil || e.faultInjector == nil {
+		return nil
+	}
+	return e.faultInjector(ctx, point)
 }
 
 func (e *Engine) approvedToolCall(toolCallID string) bool {
@@ -892,9 +945,9 @@ func rejectedToolCallIDs(checkpoint *CheckpointState) []string {
 	return append([]string(nil), checkpoint.RejectedToolCallIDs...)
 }
 
-func (e *Engine) appendToolMessageCheckpoint(ctx context.Context, run *agent.AgentRun, conversation *[]modelclient.ChatMessage, pending *[]modelclient.ToolCall, toolCallID, content string) {
+func (e *Engine) appendToolMessageCheckpoint(ctx context.Context, run *agent.AgentRun, conversation *[]modelclient.ChatMessage, pending *[]modelclient.ToolCall, toolCallID, content string) error {
 	if conversation == nil || pending == nil {
-		return
+		return ErrInvalidContext
 	}
 	*conversation = append(*conversation, modelclient.ChatMessage{Role: "tool", ToolCallID: toolCallID, Content: content})
 	*pending = removePendingToolCall(*pending, toolCallID)
@@ -902,7 +955,7 @@ func (e *Engine) appendToolMessageCheckpoint(ctx context.Context, run *agent.Age
 	if run != nil {
 		lastStep = len(run.Steps())
 	}
-	e.saveCheckpoint(ctx, CheckpointState{
+	return e.saveCheckpoint(ctx, CheckpointState{
 		Version:          1,
 		LastStep:         lastStep,
 		CurrentNode:      "model",
@@ -1182,7 +1235,9 @@ func (e *Engine) completeWithAnswer(ctx context.Context, result Result, emitter 
 		return finishErrorWithEvents(result, err, emitter)
 	}
 	conversation = append(conversation, modelclient.ChatMessage{Role: "assistant", Content: safeMessage})
-	e.saveCheckpoint(ctx, CheckpointState{Version: 1, LastStep: len(result.Run.Steps()), Messages: conversation})
+	if err := e.saveCheckpoint(ctx, CheckpointState{Version: 1, LastStep: len(result.Run.Steps()), CurrentNode: "finish", Messages: conversation}); err != nil {
+		return finishErrorWithCategory(result, err, agent.FailureInternal, emitter)
+	}
 	if err := emitter.emit(agent.EventMessageDelta, len(result.Run.Steps()), map[string]any{
 		"content": safeMessage,
 	}); err != nil {

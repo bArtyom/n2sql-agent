@@ -636,6 +636,31 @@ func TestEnginePersistsContextAtSemanticBoundaries(t *testing.T) {
 	}
 }
 
+func TestEngineStopsBeforeModelWhenCheckpointFails(t *testing.T) {
+	modelCalls := 0
+	chat := chatStub{call: func(context.Context, []modelclient.ChatMessage, []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		modelCalls++
+		return modelclient.ChatResponse{Message: "不应该被调用"}, nil
+	}}
+	checkpointErr := errors.New("checkpoint store unavailable")
+	engine, err := agentruntime.NewEngineWithOptions(chat, agent.NewToolRegistry(), 1, agentruntime.EngineOptions{
+		CheckpointSink: func(context.Context, agentruntime.CheckpointState) error { return checkpointErr },
+	})
+	if err != nil {
+		t.Fatalf("NewEngineWithOptions() error = %v", err)
+	}
+	result, err := engine.Run(context.Background(), "run-checkpoint-failure", []modelclient.ChatMessage{{Role: "user", Content: "问题"}})
+	if !errors.Is(err, checkpointErr) {
+		t.Fatalf("Run() error = %v, want checkpoint error", err)
+	}
+	if modelCalls != 0 {
+		t.Fatalf("model calls = %d, want no model call before durable checkpoint", modelCalls)
+	}
+	if result.Run.Status() != agent.RunFailed {
+		t.Fatalf("run status = %s, want failed", result.Run.Status())
+	}
+}
+
 func messageBytesForTest(messages []modelclient.ChatMessage) int {
 	total := 0
 	for _, message := range messages {

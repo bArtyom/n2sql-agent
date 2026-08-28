@@ -180,6 +180,10 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 
 		executionContext, stopRun := context.WithCancel(ctx)
 		executionContext = ops.WithTraceID(executionContext, request.TraceID)
+		executionContext = ops.WithTraceIdentity(executionContext, ops.TraceIdentity{
+			TraceID: request.TraceID, RunID: run.RunID, TaskID: run.RunID,
+			ExecutionID: run.ExecutionID, Attempt: run.AttemptCount,
+		})
 		defer stopRun()
 		keepStreamOpen := false
 		if request.ChildMode {
