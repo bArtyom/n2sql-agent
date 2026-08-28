@@ -254,3 +254,10 @@
 - 评测入口分为：已有知识库快速回归、固定知识库快照对比、临时知识库完整数据集评测、离线检索评测和完整 RAG 评测。
 - 当前已完成已有知识库上的 RAG 评测和离线检索指标基础；临时知识库导入、自动解析/切分/Embedding、PID 到多 Chunk 映射尚未完全接入。
 - `knowledge_base_snapshot` 当前保存评测时的快照信息，但检索仍需进一步绑定不可变文档/Chunk 版本，才能保证跨 Run 的严格可复现。
+
+## Agent Runtime 对齐收口（2026-08-28）
+
+- 已完成 DeerFlow 风格 Agent Runtime 十项能力：稳定事件契约与 durable cursor、Redis gap 恢复、统一 checkpoint fencing、工具调用模型流式输出、轻量 Graph、Run 级预算、配置化子 Agent、durable approval interrupt、ToolCatalog/MemoryProvider 边界，以及运行观测与故障注入。
+- Agent 的恢复事实统一来自 `agent_checkpoints`，不再维护独立的上下文 checkpoint 和工具 checkpoint。checkpoint 写入现在是安全边界：写入失败会在继续下一次模型/工具副作用前停止本轮，避免产生无法可靠恢复的状态。
+- 运行阶段日志通过 `trace_id/run_id/task_id/execution_id/attempt` 关联，并限制字符串长度；新增 `agent_model_started/completed`、`agent_tool_started/completed` 阶段观测。日志和指标不写完整 Prompt、API Key、完整文档或完整工具结果。
+- 详细的架构、表结构、一次对话、Worker 接管、重试、SSE、记忆、子 Agent 和面试回答见 `docs/agent-runtime-interview-guide.md`。
