@@ -1140,7 +1140,7 @@ func TestEngineResumesPendingToolsFromUnifiedCheckpoint(t *testing.T) {
 	}
 }
 
-func TestEngineContinuesWhenCheckpointPersistenceFails(t *testing.T) {
+func TestEngineStopsWhenCheckpointPersistenceFails(t *testing.T) {
 	registry := agent.NewToolRegistry()
 	if err := registry.Register(&readOnlyToolStub{}); err != nil {
 		t.Fatalf("Register() error = %v", err)
@@ -1148,20 +1148,13 @@ func TestEngineContinuesWhenCheckpointPersistenceFails(t *testing.T) {
 	modelCalls := 0
 	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 		modelCalls++
-		if modelCalls == 1 {
-			return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
-				ID: "call-checkpoint-failure", Type: "function",
-				Function: modelclient.ToolCallFunction{Name: "knowledge_search", Arguments: `{}`},
-			}}}, nil
-		}
-		if len(messages) != 3 || messages[2].Role != "tool" {
-			t.Fatalf("messages = %#v, want tool result after persistence failure", messages)
-		}
-		return modelclient.ChatResponse{Message: "仍然完成回答"}, nil
+		t.Fatalf("model received messages = %#v, want checkpoint failure before model call", messages)
+		return modelclient.ChatResponse{}, nil
 	}}
+	checkpointErr := errors.New("checkpoint database unavailable")
 	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 2, agentruntime.EngineOptions{
 		CheckpointSink: func(context.Context, agentruntime.CheckpointState) error {
-			return errors.New("checkpoint database unavailable")
+			return checkpointErr
 		},
 	})
 	if err != nil {
@@ -1172,11 +1165,11 @@ func TestEngineContinuesWhenCheckpointPersistenceFails(t *testing.T) {
 		events = append(events, event)
 		return nil
 	})
-	if err != nil || result.Run.Status() != agent.RunSucceeded || result.Run.FinalAnswer() != "仍然完成回答" {
-		t.Fatalf("Run() = (%#v, %v), want successful answer", result.Run, err)
+	if !errors.Is(err, checkpointErr) || result.Run.Status() != agent.RunFailed {
+		t.Fatalf("Run() = (%#v, %v), want checkpoint failure", result.Run, err)
 	}
-	if len(events) == 0 {
-		t.Fatal("events are empty")
+	if modelCalls != 0 || len(events) == 0 {
+		t.Fatalf("model calls=%d events=%d, want no model call and lifecycle events", modelCalls, len(events))
 	}
 }
 
