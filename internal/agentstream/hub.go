@@ -32,13 +32,19 @@ const (
 // Event is the small transport-neutral event envelope used by the HTTP
 // handler. Agent events and handler-only events share the same replay path.
 type Event struct {
-	Version    int       `json:"version"`
-	ID         string    `json:"id"`
-	RunID      string    `json:"run_id"`
-	Type       string    `json:"type"`
-	StepNumber int       `json:"step_number,omitempty"`
-	Data       any       `json:"data,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
+	Version     int       `json:"version"`
+	ID          string    `json:"id"`
+	RunID       string    `json:"run_id"`
+	Type        string    `json:"type"`
+	Category    string    `json:"category,omitempty"`
+	TaskID      string    `json:"task_id,omitempty"`
+	Seq         int64     `json:"seq,omitempty"`
+	ToolCallID  string    `json:"tool_call_id,omitempty"`
+	ExecutionID string    `json:"execution_id,omitempty"`
+	TraceID     string    `json:"trace_id,omitempty"`
+	StepNumber  int       `json:"step_number,omitempty"`
+	Data        any       `json:"data,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type run struct {
@@ -156,13 +162,19 @@ func (h *Hub) Cancel(runID string, knowledgeBaseID int64) error {
 
 func (h *Hub) PublishAgent(event agent.Event) error {
 	return h.Publish(Event{
-		Version:    EventSchemaVersion,
-		ID:         event.ID,
-		RunID:      event.RunID,
-		Type:       string(event.Type),
-		StepNumber: event.StepNumber,
-		Data:       event.Data,
-		CreatedAt:  event.CreatedAt,
+		Version:     EventSchemaVersion,
+		ID:          event.ID,
+		RunID:       event.RunID,
+		Type:        string(event.Type),
+		Category:    event.Category,
+		TaskID:      event.TaskID,
+		Seq:         event.Seq,
+		ToolCallID:  event.ToolCallID,
+		ExecutionID: event.ExecutionID,
+		TraceID:     event.TraceID,
+		StepNumber:  event.StepNumber,
+		Data:        event.Data,
+		CreatedAt:   event.CreatedAt,
 	})
 }
 
@@ -350,7 +362,7 @@ func validEventType(eventType string) bool {
 		string(agent.EventRunStarted), string(agent.EventStepStarted), string(agent.EventToolCalled),
 		string(agent.EventToolFinished), string(agent.EventApprovalRequired), string(agent.EventApprovalResolved),
 		string(agent.EventApprovalExpired), string(agent.EventReasoningDelta), string(agent.EventMessageDelta),
-		string(agent.EventRunFinished), string(agent.EventRunFailed), string(agent.EventRunCanceled), string(agent.EventChildEvent):
+		string(agent.EventRunFinished), string(agent.EventRunFailed), string(agent.EventRunCanceled), string(agent.EventChildEvent), string(agent.EventChildResult), string(agent.EventLoopDetected), string(agent.EventSkillLoaded):
 		return true
 	default:
 		return false

@@ -26,19 +26,26 @@ const (
 	EventRunFailed        EventType = "run_failed"
 	EventRunCanceled      EventType = "run_canceled"
 	EventChildEvent       EventType = "child_event"
+	EventChildResult      EventType = "child_result"
 	EventLoopDetected     EventType = "loop_detected"
 	EventSkillLoaded      EventType = "skill_loaded"
 )
 
 // Event is an observable occurrence in one Agent run.
 type Event struct {
-	Version    int       `json:"version"`
-	ID         string    `json:"id"`
-	RunID      string    `json:"run_id"`
-	Type       EventType `json:"type"`
-	StepNumber int       `json:"step_number,omitempty"`
-	Data       any       `json:"data,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
+	Version     int       `json:"version"`
+	ID          string    `json:"id"`
+	RunID       string    `json:"run_id"`
+	Type        EventType `json:"type"`
+	Category    string    `json:"category,omitempty"`
+	TaskID      string    `json:"task_id,omitempty"`
+	Seq         int64     `json:"seq,omitempty"`
+	ToolCallID  string    `json:"tool_call_id,omitempty"`
+	ExecutionID string    `json:"execution_id,omitempty"`
+	TraceID     string    `json:"trace_id,omitempty"`
+	StepNumber  int       `json:"step_number,omitempty"`
+	Data        any       `json:"data,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 func NewEvent(id, runID string, eventType EventType, data any) (Event, error) {
@@ -56,9 +63,28 @@ func NewEvent(id, runID string, eventType EventType, data any) (Event, error) {
 		ID:        id,
 		RunID:     runID,
 		Type:      eventType,
+		Category:  EventCategory(eventType),
 		Data:      data,
 		CreatedAt: time.Now().UTC(),
 	}, nil
+}
+
+// EventCategory gives consumers a stable coarse-grained grouping without
+// making them parse the event payload or infer meaning from event names.
+func EventCategory(eventType EventType) string {
+	switch eventType {
+	case EventToolCalled, EventToolFinished:
+		return "tool"
+	case EventReasoningDelta, EventMessageDelta:
+		return "output"
+	case EventApprovalRequired, EventApprovalResolved, EventApprovalExpired,
+		EventLoopDetected, EventSkillLoaded, EventChildEvent, EventChildResult:
+		return "control"
+	case EventRunStarted, EventStepStarted, EventRunFinished, EventRunFailed, EventRunCanceled:
+		return "lifecycle"
+	default:
+		return "unknown"
+	}
 }
 
 func validEventType(eventType EventType) bool {
@@ -76,6 +102,7 @@ func validEventType(eventType EventType) bool {
 		EventRunFailed,
 		EventRunCanceled,
 		EventChildEvent,
+		EventChildResult,
 		EventLoopDetected:
 		return true
 	case EventSkillLoaded:

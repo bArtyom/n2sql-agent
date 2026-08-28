@@ -42,3 +42,54 @@ func TestAgentRunStreamReplaysPersistedEventsWhenHubIsEmpty(t *testing.T) {
 		t.Fatalf("body = %q, want persisted SSE events", response.Body.String())
 	}
 }
+
+type durableGapEventStoreStub struct{}
+
+func (durableGapEventStoreStub) Append(context.Context, agentrun.Run, agentstream.Event) error {
+	return nil
+}
+
+func (durableGapEventStoreStub) List(context.Context, string, int64) ([]agentstream.Event, error) {
+	return nil, nil
+}
+
+func (durableGapEventStoreStub) Subscribe(context.Context, string, int64) ([]agentstream.Event, <-chan agentstream.Event, func(), bool, error) {
+	return nil, nil, func() {}, false, agentstream.ErrEventGap
+}
+
+func (durableGapEventStoreStub) SubscribeFrom(context.Context, string, int64, string) ([]agentstream.Event, <-chan agentstream.Event, func(), bool, error) {
+	return nil, nil, func() {}, false, agentstream.ErrEventGap
+}
+
+func (durableGapEventStoreStub) SequenceByEventID(context.Context, string, int64, string) (int64, error) {
+	return 3, nil
+}
+
+func (durableGapEventStoreStub) ListAfter(context.Context, string, int64, int64, int) ([]agentstream.Event, error) {
+	return []agentstream.Event{
+		{ID: "event-4", Seq: 4, RunID: "run-1", Type: "message_delta", Data: map[string]string{"content": "恢复答案"}},
+		{ID: "event-5", Seq: 5, RunID: "run-1", Type: "run_finished", Data: map[string]string{"answer": "恢复答案"}},
+	}, nil
+}
+
+func TestAgentRunStreamRecoversRedisGapFromDurableSequence(t *testing.T) {
+	endpoint := handler.NewAgentRunStreamWithStore(agentstream.NewHub(), durableGapEventStoreStub{})
+	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/7/agent-runs/run-1/stream", nil)
+	request.Header.Set("Last-Event-ID", "event-3")
+	request.SetPathValue("id", "7")
+	request.SetPathValue("runID", "run-1")
+	response := httptest.NewRecorder()
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, "event: message_delta") || !strings.Contains(body, "恢复答案") || !strings.Contains(body, "event: run_finished") {
+		t.Fatalf("body = %q, want durable events after cursor", body)
+	}
+	if strings.Contains(body, "event: gap") {
+		t.Fatalf("body = %q, did not expect replay gap", body)
+	}
+}

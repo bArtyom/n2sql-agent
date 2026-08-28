@@ -33,6 +33,11 @@ func (b *EventBridge) Append(ctx context.Context, run Run, event agentstream.Eve
 	if err := b.durable.Append(ctx, run, event); err != nil {
 		return err
 	}
+	if sequencer, ok := b.durable.(EventSequenceStore); ok {
+		if sequence, sequenceErr := sequencer.SequenceByEventID(ctx, eventStreamRunID(run, event), run.KnowledgeBaseID, event.ID); sequenceErr == nil {
+			event.Seq = sequence
+		}
+	}
 	// Redis is a delivery optimization. PostgreSQL has already recorded the
 	// event, so a transient Redis failure is safe to tolerate; Hub still serves
 	// subscribers in the current process and a later reconnect can use DB.
@@ -56,6 +61,59 @@ func (b *EventBridge) List(ctx context.Context, runID string, knowledgeBaseID in
 		return nil, ErrInvalidRun
 	}
 	return b.durable.List(ctx, runID, knowledgeBaseID)
+}
+
+func (b *EventBridge) ListAfter(ctx context.Context, runID string, knowledgeBaseID, afterSeq int64, limit int) ([]agentstream.Event, error) {
+	if b == nil || b.durable == nil || limit <= 0 {
+		return nil, ErrInvalidRun
+	}
+	if cursorStore, ok := b.durable.(EventCursorStore); ok {
+		return cursorStore.ListAfter(ctx, runID, knowledgeBaseID, afterSeq, limit)
+	}
+	events, err := b.durable.List(ctx, runID, knowledgeBaseID)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]agentstream.Event, 0, minEventLimit(len(events), limit))
+	for _, event := range events {
+		if event.Seq > afterSeq {
+			filtered = append(filtered, event)
+			if len(filtered) == limit {
+				break
+			}
+		}
+	}
+	return filtered, nil
+}
+
+func (b *EventBridge) SequenceByEventID(ctx context.Context, runID string, knowledgeBaseID int64, eventID string) (int64, error) {
+	if b == nil || b.durable == nil {
+		return 0, ErrInvalidRun
+	}
+	if cursorStore, ok := b.durable.(EventCursorStore); ok {
+		return cursorStore.SequenceByEventID(ctx, runID, knowledgeBaseID, eventID)
+	}
+	events, err := b.durable.List(ctx, runID, knowledgeBaseID)
+	if err != nil {
+		return 0, err
+	}
+	for _, event := range events {
+		if event.ID == eventID {
+			return event.Seq, nil
+		}
+	}
+	return 0, ErrRunNotFound
+}
+
+type EventSequenceStore interface {
+	SequenceByEventID(context.Context, string, int64, string) (int64, error)
+}
+
+func minEventLimit(length, limit int) int {
+	if length < limit {
+		return length
+	}
+	return limit
 }
 
 func (b *EventBridge) Subscribe(ctx context.Context, runID string, knowledgeBaseID int64) ([]agentstream.Event, <-chan agentstream.Event, func(), bool, error) {
@@ -95,3 +153,4 @@ func hasTerminalEvent(events []agentstream.Event) bool {
 
 var _ EventStore = (*EventBridge)(nil)
 var _ LiveEventStore = (*EventBridge)(nil)
+var _ EventCursorStore = (*EventBridge)(nil)

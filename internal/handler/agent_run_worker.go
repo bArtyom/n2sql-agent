@@ -197,9 +197,10 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 				eventRunID = request.ParentRunPublicID
 			}
 			event := agentstream.Event{
-				ID:          fmt.Sprintf("%s-transport-%d", eventIDPrefix, transportEventNumber),
+				ID:          fmt.Sprintf("%s-transport-%s-%d", eventIDPrefix, request.ExecutionID, transportEventNumber),
 				RunID:       eventRunID,
 				Type:        eventType,
+				Category:    eventCategory(eventType),
 				ToolCallID:  request.ToolCallID,
 				ExecutionID: request.ExecutionID,
 				TraceID:     request.TraceID,
@@ -336,6 +337,15 @@ func stopReasonFromFailureCategory(stats *agent.RunStats) string {
 	default:
 		return ""
 	}
+}
+
+func eventCategory(eventType string) string {
+	if eventType == "error" || eventType == "waiting_children" ||
+		eventType == "conversation_saved" || eventType == "conversation_save_failed" ||
+		eventType == "conversation_replayed" {
+		return "control"
+	}
+	return agent.EventCategory(agent.EventType(eventType))
 }
 
 // wrapChildAgentEvent keeps asynchronous child progress on the parent's SSE

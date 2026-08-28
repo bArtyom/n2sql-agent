@@ -319,6 +319,14 @@ func NewAgentRunStreamWithStore(hub *agentstream.Hub, eventStore agentrun.EventS
 					// Redis is only the short-lived transport window. If its
 					// cursor has expired, continue below and try the durable
 					// PostgreSQL journal before declaring a real replay gap.
+					if errors.Is(streamErr, agentstream.ErrEventGap) {
+						if recovered, recoverErr := replayAgentEventGap(r, w, flusher, eventStore, liveStore, runID, knowledgeBaseID, lastEventID); recoverErr != nil {
+							http.Error(w, `{"error":"unable to recover agent event gap"}`, http.StatusInternalServerError)
+							return
+						} else if recovered {
+							return
+						}
+					}
 				}
 				storedEvents, storeErr := eventStore.List(r.Context(), runID, knowledgeBaseID)
 				if storeErr == nil && len(storedEvents) > 0 {
@@ -379,6 +387,112 @@ func NewAgentRunStreamWithStore(hub *agentstream.Hub, eventStore agentrun.EventS
 			}
 		}
 	})
+}
+
+// replayAgentEventGap bridges a missing Redis cursor with the durable event
+// journal. The browser's Last-Event-ID is first translated to PostgreSQL's
+// monotonic sequence, then only the missing suffix is replayed. If the run is
+// still active, a fresh live subscription is attached after that suffix and
+// duplicate events are filtered by sequence/ID.
+func replayAgentEventGap(r *http.Request, w http.ResponseWriter, flusher http.Flusher, eventStore agentrun.EventStore, liveStore agentrun.LiveEventStore, runID string, knowledgeBaseID int64, lastEventID string) (bool, error) {
+	cursorStore, ok := eventStore.(agentrun.EventCursorStore)
+	if !ok || lastEventID == "" {
+		return false, nil
+	}
+	sequence, err := cursorStore.SequenceByEventID(r.Context(), runID, knowledgeBaseID, lastEventID)
+	if err != nil {
+		return false, nil
+	}
+	missing, err := cursorStore.ListAfter(r.Context(), runID, knowledgeBaseID, sequence, 2048)
+	if err != nil || len(missing) == 0 {
+		return false, err
+	}
+
+	setAgentSSEHeaders(w)
+	seen := make(map[string]struct{}, len(missing))
+	lastSequence := sequence
+	for _, event := range missing {
+		seen[event.ID] = struct{}{}
+		if event.Seq > lastSequence {
+			lastSequence = event.Seq
+		}
+		if err := writeAgentSSEEvent(w, flusher, event.Type, event); err != nil {
+			return true, err
+		}
+	}
+	if hasTerminalStreamEvent(missing) || liveStore == nil {
+		return true, nil
+	}
+
+	snapshot, live, cancel, done, err := liveStore.Subscribe(r.Context(), runID, knowledgeBaseID)
+	if err != nil {
+		return true, nil
+	}
+	defer cancel()
+	for _, event := range snapshot {
+		if event.Seq > 0 && event.Seq <= lastSequence {
+			continue
+		}
+		if _, exists := seen[event.ID]; exists {
+			continue
+		}
+		seen[event.ID] = struct{}{}
+		if event.Seq > lastSequence {
+			lastSequence = event.Seq
+		}
+		if err := writeAgentSSEEvent(w, flusher, event.Type, event); err != nil {
+			return true, err
+		}
+	}
+	if done {
+		return true, nil
+	}
+	for {
+		select {
+		case <-r.Context().Done():
+			return true, nil
+		case event, ok := <-live:
+			if !ok {
+				return true, nil
+			}
+			if event.Seq > 0 && event.Seq <= lastSequence {
+				continue
+			}
+			if _, exists := seen[event.ID]; exists {
+				continue
+			}
+			seen[event.ID] = struct{}{}
+			if event.Seq > lastSequence {
+				lastSequence = event.Seq
+			}
+			if err := writeAgentSSEEvent(w, flusher, event.Type, event); err != nil {
+				return true, err
+			}
+			if isTerminalStreamEvent(event.Type) {
+				return true, nil
+			}
+		}
+	}
+}
+
+func setAgentSSEHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+}
+
+func isTerminalStreamEvent(eventType string) bool {
+	return eventType == string(agent.EventRunFinished) || eventType == string(agent.EventRunFailed) || eventType == string(agent.EventRunCanceled)
+}
+
+func hasTerminalStreamEvent(events []agentstream.Event) bool {
+	for _, event := range events {
+		if isTerminalStreamEvent(event.Type) {
+			return true
+		}
+	}
+	return false
 }
 
 func writeAgentSSEEvent(w http.ResponseWriter, flusher http.Flusher, eventType string, value any) error {

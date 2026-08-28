@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
@@ -175,6 +176,8 @@ type eventEmitter struct {
 	identity ExecutionIdentity
 	nextID   int
 }
+
+var fallbackExecutionSequence uint64
 
 type Result struct {
 	Run      *agent.AgentRun
@@ -1065,6 +1068,10 @@ func toolFailureFeedback(toolName string, err error) string {
 }
 
 func newEventEmitter(runID string, sink EventSink, identity ExecutionIdentity) *eventEmitter {
+	if identity.ExecutionID == "" {
+		sequence := atomic.AddUint64(&fallbackExecutionSequence, 1)
+		identity.ExecutionID = fmt.Sprintf("execution-%d-%d", time.Now().UnixNano(), sequence)
+	}
 	return &eventEmitter{runID: runID, sink: sink, identity: identity}
 }
 
@@ -1073,11 +1080,12 @@ func (e *eventEmitter) emit(eventType agent.EventType, stepNumber int, data any)
 		return nil
 	}
 	e.nextID++
-	event, err := agent.NewEvent(fmt.Sprintf("%s-event-%d", e.runID, e.nextID), e.runID, eventType, data)
+	event, err := agent.NewEvent(fmt.Sprintf("%s-event-%s-%d", e.runID, e.identity.ExecutionID, e.nextID), e.runID, eventType, data)
 	if err != nil {
 		return fmt.Errorf("create agent event: %w", err)
 	}
 	event.StepNumber = stepNumber
+	event.Category = agent.EventCategory(eventType)
 	event.ToolCallID = e.identity.ToolCallID
 	event.ExecutionID = e.identity.ExecutionID
 	event.TraceID = e.identity.TraceID
