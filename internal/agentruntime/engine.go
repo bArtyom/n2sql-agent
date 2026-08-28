@@ -87,6 +87,7 @@ type Engine struct {
 	allowRepeatedToolCalls  bool
 	toolTimeout             time.Duration
 	parallelToolLimit       int
+	graph                   *Graph
 	resumeCheckpoint        *CheckpointState
 	checkpointSink          CheckpointSink
 	tccCoordinator          *tcc.Coordinator
@@ -229,6 +230,10 @@ func NewEngineWithOptions(chat modelruntime.ToolChatRunner, registry *agent.Tool
 	if parallelToolLimit <= 0 {
 		return nil, ErrInvalidParallelLimit
 	}
+	graph, err := newAgentRuntimeGraph(maxSteps)
+	if err != nil {
+		return nil, err
+	}
 	return &Engine{
 		chat:                    chat,
 		registry:                registry,
@@ -239,6 +244,7 @@ func NewEngineWithOptions(chat modelruntime.ToolChatRunner, registry *agent.Tool
 		allowRepeatedToolCalls:  options.AllowRepeatedToolCalls,
 		toolTimeout:             toolTimeout,
 		parallelToolLimit:       parallelToolLimit,
+		graph:                   graph,
 		resumeCheckpoint:        options.ResumeCheckpoint,
 		checkpointSink:          options.CheckpointSink,
 		tccCoordinator:          options.TCCCoordinator,
@@ -269,6 +275,11 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 	}
 	if len(messages) == 0 {
 		return Result{}, ErrInvalidMessages
+	}
+	if e.resumeCheckpoint != nil {
+		if err := e.graph.ValidateNode(e.resumeCheckpoint.CurrentNode); err != nil {
+			return Result{}, fmt.Errorf("validate agent checkpoint cursor: %w", err)
+		}
 	}
 
 	run, err := agent.NewAgentRun(runID)
@@ -692,6 +703,27 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				return e.completeWithAnswer(ctx, result, emitter, conversation, toolResult.Content)
 			}
 			if waiting, _ := toolResult.Metadata["waiting_children"].(bool); waiting {
+				childRunIDs := childRunIDsFromMetadata(toolResult.Metadata)
+				interrupt := &InterruptState{
+					Kind:        InterruptChildren,
+					ID:          fmt.Sprintf("%s:children:%s", runID, toolCall.ID),
+					ToolCallID:  toolCall.ID,
+					ToolName:    toolCall.Function.Name,
+					ChildRunIDs: childRunIDs,
+					CreatedAt:   time.Now().UTC(),
+				}
+				if err := e.saveCheckpointStrict(ctx, CheckpointState{
+					Version:             1,
+					LastStep:            len(run.Steps()),
+					CurrentNode:         "interrupt",
+					Messages:            conversation,
+					PendingToolCalls:    pendingToolCalls,
+					Interrupt:           interrupt,
+					ApprovedToolCallIDs: approvedToolCallIDs(e.resumeCheckpoint),
+					RejectedToolCallIDs: rejectedToolCallIDs(e.resumeCheckpoint),
+				}); err != nil {
+					return finishErrorWithCategory(result, err, agent.FailureInternal, emitter)
+				}
 				return result, ErrAgentWaitingChildren
 			}
 			toolContent, err := markUntrustedToolResult(toolResult.Content)
@@ -896,7 +928,13 @@ func (e *Engine) saveCheckpoint(ctx context.Context, state CheckpointState) erro
 }
 
 func (e *Engine) saveCheckpointStrict(ctx context.Context, state CheckpointState) error {
-	if e == nil || e.checkpointSink == nil || len(state.Messages) == 0 {
+	if e == nil {
+		return nil
+	}
+	if err := e.graph.ValidateNode(state.CurrentNode); err != nil {
+		return fmt.Errorf("validate agent checkpoint cursor: %w", err)
+	}
+	if e.checkpointSink == nil || len(state.Messages) == 0 {
 		return nil
 	}
 	if state.Version <= state.LastStep {
@@ -952,6 +990,25 @@ func rejectedToolCallIDs(checkpoint *CheckpointState) []string {
 		return nil
 	}
 	return append([]string(nil), checkpoint.RejectedToolCallIDs...)
+}
+
+func childRunIDsFromMetadata(metadata map[string]any) []string {
+	if len(metadata) == 0 {
+		return nil
+	}
+	if childRunID, ok := metadata["child_run_id"].(string); ok && strings.TrimSpace(childRunID) != "" {
+		return []string{strings.TrimSpace(childRunID)}
+	}
+	if values, ok := metadata["child_run_ids"].([]string); ok {
+		result := make([]string, 0, len(values))
+		for _, value := range values {
+			if value = strings.TrimSpace(value); value != "" {
+				result = append(result, value)
+			}
+		}
+		return result
+	}
+	return nil
 }
 
 func (e *Engine) appendToolMessageCheckpoint(ctx context.Context, run *agent.AgentRun, conversation *[]modelclient.ChatMessage, pending *[]modelclient.ToolCall, toolCallID, content string) error {

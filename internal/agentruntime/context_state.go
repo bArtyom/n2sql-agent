@@ -17,18 +17,21 @@ const durableSummaryPrefix = "Agent 短记忆（较早工具结果摘要）：\n
 type InterruptKind string
 
 const (
-	InterruptApproval InterruptKind = "approval"
+	InterruptApproval      InterruptKind = "approval"
+	InterruptChildren      InterruptKind = "children"
+	InterruptClarification InterruptKind = "clarification"
 )
 
 // InterruptState is the minimal information needed to show and resume a
 // paused run after the original Worker has released its lease.
 type InterruptState struct {
-	Kind       InterruptKind `json:"kind"`
-	ID         string        `json:"id"`
-	ToolCallID string        `json:"tool_call_id"`
-	ToolName   string        `json:"tool_name"`
-	Arguments  string        `json:"arguments,omitempty"`
-	CreatedAt  time.Time     `json:"created_at"`
+	Kind        InterruptKind `json:"kind"`
+	ID          string        `json:"id"`
+	ToolCallID  string        `json:"tool_call_id"`
+	ToolName    string        `json:"tool_name"`
+	Arguments   string        `json:"arguments,omitempty"`
+	ChildRunIDs []string      `json:"child_run_ids,omitempty"`
+	CreatedAt   time.Time     `json:"created_at"`
 }
 
 // CheckpointState is the single durable Agent state. It is the Go equivalent

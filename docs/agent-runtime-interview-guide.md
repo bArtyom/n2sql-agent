@@ -170,7 +170,9 @@ type Transition struct {
 model → tool → model → tool → finish
 ```
 
-审批、等待子 Agent、未来的澄清问题都可以成为持久化节点，而不是在一个长函数中阻塞。`CheckpointState.CurrentNode` 让新 Worker 能从 `tool` 或 `interrupt` 节点继续，而不是从头执行已经完成的模型决策。
+Engine 使用同一份运行时 Graph 注册 `model`、`tool`、`finish` 和 `interrupt` 四类持久化节点。Graph 在恢复前校验 `CurrentNode`，防止损坏或过期游标被误当成模型步骤；真正的模型请求和工具副作用仍由 Engine 节点逻辑执行，Graph 不会替代这些副作用。
+
+审批、等待子 Agent、未来的澄清问题都可以成为持久化节点，而不是在一个长函数中阻塞。`CheckpointState.CurrentNode` 让新 Worker 能从 `tool` 或 `interrupt` 节点继续，而不是从头执行已经完成的模型决策。等待子 Agent 时，统一 checkpoint 额外保存 `interrupt.kind=children`、原工具调用 ID 和 `child_run_ids`；子 Run 全部进入终态后，父 Run 才回到 `pending`，下一个 Worker 使用同一个幂等 child run ID 读取结果，不会重复创建子任务。
 
 ### 3.6 Run 级预算和停止原因
 
@@ -495,4 +497,3 @@ Provider 请求里的 `max_completion_tokens` 限制一次模型输出；RunBudg
 ## 12. 当前设计的取舍
 
 当前实现是一个紧凑的 Go Agent Runtime：保留 DeerFlow/LangGraph 的核心思想——线程状态、checkpoint、节点、interrupt、子任务和可插拔记忆——但没有引入完整外部编排平台。它适合学习和单体/少量实例部署；如果进入更大规模生产环境，可以在不改变这些接口的前提下替换为对象存储、Prometheus/OTel、独立队列和更强的 Graph 执行器。
-

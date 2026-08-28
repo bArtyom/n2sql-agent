@@ -30,10 +30,56 @@ type Transition struct {
 	Halt     bool
 }
 
+const (
+	graphNodeModel     = "model"
+	graphNodeTool      = "tool"
+	graphNodeFinish    = "finish"
+	graphNodeInterrupt = "interrupt"
+)
+
+type checkpointGraphNode struct {
+	name string
+}
+
+func (n checkpointGraphNode) Name() string { return n.name }
+
+// Run is intentionally a no-op. The ReAct Engine owns model/tool side
+// effects; this graph is the durable cursor registry used to validate and
+// resume those semantic nodes.
+func (n checkpointGraphNode) Run(context.Context, *AgentState) (Transition, error) {
+	return Transition{Halt: true}, nil
+}
+
+func newAgentRuntimeGraph(maxSteps int) (*Graph, error) {
+	return NewGraph(graphNodeModel, maxSteps,
+		checkpointGraphNode{name: graphNodeModel},
+		checkpointGraphNode{name: graphNodeTool},
+		checkpointGraphNode{name: graphNodeFinish},
+		checkpointGraphNode{name: graphNodeInterrupt},
+	)
+}
+
 type Graph struct {
 	start    string
 	maxSteps int
 	nodes    map[string]Node
+}
+
+// ValidateNode checks a persisted graph cursor without executing a node.
+// Recovery must reject an unknown cursor before the Engine can call a model or
+// a tool; otherwise a corrupt checkpoint could silently restart from the wrong
+// place.
+func (g *Graph) ValidateNode(nodeName string) error {
+	if g == nil {
+		return ErrInvalidGraph
+	}
+	if nodeName == "" {
+		return nil
+	}
+	if _, ok := g.nodes[nodeName]; !ok {
+		return fmt.Errorf("%w: %s", ErrUnknownGraphNode, nodeName)
+	}
+	return nil
 }
 
 func NewGraph(start string, maxSteps int, nodes ...Node) (*Graph, error) {
@@ -71,10 +117,10 @@ func (g *Graph) Run(ctx context.Context, state *AgentState) (*AgentState, error)
 		if err := ctx.Err(); err != nil {
 			return state, err
 		}
-		node, ok := g.nodes[nodeName]
-		if !ok {
-			return state, fmt.Errorf("%w: %s", ErrUnknownGraphNode, nodeName)
+		if err := g.ValidateNode(nodeName); err != nil {
+			return state, err
 		}
+		node := g.nodes[nodeName]
 		state.CurrentNode = nodeName
 		transition, err := node.Run(ctx, state)
 		if err != nil {

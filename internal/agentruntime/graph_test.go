@@ -66,3 +66,16 @@ func TestGraphResumesFromPersistedCurrentNode(t *testing.T) {
 		t.Fatalf("resumed state = %#v, want tool then finish", state)
 	}
 }
+
+func TestGraphValidatesPersistedNodeWithoutExecutingIt(t *testing.T) {
+	graph, err := agentruntime.NewGraph("model", 1, graphNode{name: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := graph.ValidateNode("model"); err != nil {
+		t.Fatalf("ValidateNode(model) error = %v", err)
+	}
+	if err := graph.ValidateNode("deleted-node"); err == nil {
+		t.Fatal("ValidateNode(deleted-node) error = nil, want unknown node")
+	}
+}

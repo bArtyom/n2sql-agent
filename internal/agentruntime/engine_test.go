@@ -53,7 +53,7 @@ func (waitingChildrenToolStub) Parameters() json.RawMessage {
 }
 func (waitingChildrenToolStub) ParallelSafe() bool { return true }
 func (waitingChildrenToolStub) Call(context.Context, json.RawMessage) (agent.ToolResult, error) {
-	return agent.ToolResult{Content: "子 Agent 已进入后台执行", Metadata: map[string]any{"waiting_children": true}}, nil
+	return agent.ToolResult{Content: "子 Agent 已进入后台执行", Metadata: map[string]any{"waiting_children": true, "child_run_id": "child-1"}}, nil
 }
 
 func (timeoutToolStub) Name() string { return "slow_read" }
@@ -239,6 +239,69 @@ func TestEngineStopsParentWhenChildrenArePending(t *testing.T) {
 	_, err = engine.Run(context.Background(), "parent-waiting", []modelclient.ChatMessage{{Role: "user", Content: "研究"}})
 	if !errors.Is(err, agentruntime.ErrAgentWaitingChildren) {
 		t.Fatalf("Run() error = %v, want ErrAgentWaitingChildren", err)
+	}
+}
+
+func TestEnginePersistsWaitingChildrenInterrupt(t *testing.T) {
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(waitingChildrenToolStub{}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	chat := chatStub{call: func(context.Context, []modelclient.ChatMessage, []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+			ID: "child-call", Type: "function", Function: modelclient.ToolCallFunction{Name: "delegate_research", Arguments: `{}`},
+		}}}, nil
+	}}
+	var states []agentruntime.CheckpointState
+	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 3, agentruntime.EngineOptions{
+		CheckpointSink: func(_ context.Context, state agentruntime.CheckpointState) error {
+			states = append(states, state)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEngineWithOptions() error = %v", err)
+	}
+	_, err = engine.Run(context.Background(), "parent-waiting-checkpoint", []modelclient.ChatMessage{{Role: "user", Content: "研究"}})
+	if !errors.Is(err, agentruntime.ErrAgentWaitingChildren) {
+		t.Fatalf("Run() error = %v, want ErrAgentWaitingChildren", err)
+	}
+	if len(states) == 0 {
+		t.Fatal("checkpoint states are empty")
+	}
+	last := states[len(states)-1]
+	if last.CurrentNode != "interrupt" || last.Interrupt == nil || last.Interrupt.Kind != agentruntime.InterruptChildren {
+		t.Fatalf("last checkpoint = %#v, want durable children interrupt", last)
+	}
+	if last.Interrupt.ToolCallID != "child-call" || len(last.Interrupt.ChildRunIDs) != 1 || last.Interrupt.ChildRunIDs[0] != "child-1" {
+		t.Fatalf("children interrupt = %#v, want child-1 association", last.Interrupt)
+	}
+	if len(last.PendingToolCalls) != 1 || last.PendingToolCalls[0].ID != "child-call" {
+		t.Fatalf("pending tool calls = %#v, want pending child call", last.PendingToolCalls)
+	}
+}
+
+func TestEngineRejectsUnknownResumeCheckpointNode(t *testing.T) {
+	called := false
+	chat := chatStub{call: func(context.Context, []modelclient.ChatMessage, []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		called = true
+		return modelclient.ChatResponse{Message: "不应该执行"}, nil
+	}}
+	engine, err := agentruntime.NewEngineWithOptions(chat, agent.NewToolRegistry(), 3, agentruntime.EngineOptions{
+		ResumeCheckpoint: &agentruntime.CheckpointState{
+			CurrentNode: "deleted-node",
+			Messages:    []modelclient.ChatMessage{{Role: "user", Content: "继续"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEngineWithOptions() error = %v", err)
+	}
+	_, err = engine.Run(context.Background(), "unknown-checkpoint-node", []modelclient.ChatMessage{{Role: "user", Content: "继续"}})
+	if !errors.Is(err, agentruntime.ErrUnknownGraphNode) {
+		t.Fatalf("Run() error = %v, want ErrUnknownGraphNode", err)
+	}
+	if called {
+		t.Fatal("model was called before rejecting the checkpoint cursor")
 	}
 }
 
