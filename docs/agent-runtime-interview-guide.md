@@ -497,3 +497,24 @@ Provider 请求里的 `max_completion_tokens` 限制一次模型输出；RunBudg
 ## 12. 当前设计的取舍
 
 当前实现是一个紧凑的 Go Agent Runtime：保留 DeerFlow/LangGraph 的核心思想——线程状态、checkpoint、节点、interrupt、子任务和可插拔记忆——但没有引入完整外部编排平台。它适合学习和单体/少量实例部署；如果进入更大规模生产环境，可以在不改变这些接口的前提下替换为对象存储、Prometheus/OTel、独立队列和更强的 Graph 执行器。
+
+## 13. 与本地 DeerFlow 的真实差异
+
+下面的差异是“当前代码已经做到了什么”的边界，不把接口存在误说成平台能力已经完全等价：
+
+| 方向 | 当前项目 | DeerFlow | 结论 |
+| --- | --- | --- | --- |
+| Agent 循环 | Go Engine 实现 Model → Tool → Model 的 ReAct 循环 | LangGraph 编译后的 StateGraph/子图 | 核心行为已对齐，编排器仍是轻量版 |
+| Graph 恢复 | Graph 注册 `model/tool/finish/interrupt`，校验 checkpoint 游标 | 图节点、边、Reducer 和 State Schema 共同驱动执行 | 已有恢复边界，尚未提供完整任意 DAG 编排 |
+| Checkpoint | PostgreSQL 保存一个统一的完整状态快照，大结果外置 Blob | LangGraph Checkpointer，并支持 delta/snapshot channel mode 与 checkpoint cache | 可靠恢复已具备，吞吐和缓存层较简单 |
+| 事件流 | PostgreSQL durable event journal + Redis/Hub + SSE Last-Event-ID/gap | StreamBridge、DB 事件、delivery receipt、跨 Worker reconciliation | 断线恢复已具备，交付回执和运维控制面较少 |
+| 工具发现 | `ToolCatalog` 提供元数据发现/解析；当前 Engine 默认仍绑定当前 Registry 定义 | `tool_search` 只把命中的延迟工具 schema 提升给模型 | 接口已预留，真正按需隐藏/提升 schema 仍是后续增强点 |
+| Skills | 工具 allowlist、审批、重试、并行安全和子 Agent继承边界 | Skill 激活、`allowed-tools` 运行时过滤、技能目录和沙箱投影 | 安全边界已具备，Skill 生态和渐进加载较轻 |
+| 记忆 | `MemoryProvider` + PostgreSQL，按用户/知识库注入受限上下文 | `MemoryMiddleware` 在一轮完成后异步队列化，只保留用户输入与最终回答，并可切换 DeerMem/Mem0 等后端 | 存储抽象已对齐，自动异步记忆管线仍较简单 |
+| 子 Agent | 命名配置、父工具边界继承、共享调度槽位、持久化 child Run、等待屏障 | LangGraph 子图、任务工具、子 Agent 运行树和更丰富的任务编排 | 异步执行和恢复已具备，子图级编排较少 |
+| 失败恢复 | 模型错误分类/退避/fallback，租约/attempt/lease token，普通工具反馈模型重试，副作用工具审批 | 还叠加 orphan reconciliation、delivery 语义和更完整的运行管理 | 核心容错已具备，平台运维语义较少 |
+| 目标与长任务 | Run 预算、最大步数、超时、取消和 stop reason | Goal state、no-progress 检测、目标续跑、长任务交付验证 | 有安全上限，但没有 DeerFlow 的目标驱动续跑层 |
+| 观测 | 结构化 trace identity、模型/工具边界、进程内 metrics、故障注入 | LangSmith/Langfuse/Monocle/OTel 等外部 Trace 与完整输入输出审计 | 基础可诊断，外部可视化与跨部署聚合尚未接入 |
+| 生产任务 | PostgreSQL Worker 负责 Agent Run 和子 Run | 还支持 MCP durable background task、远程 status/cancel、artifact 交付 | 当前项目聚焦 Agent + RAG，远程任务平台不在本阶段 |
+
+面试时最稳妥的表述是：项目已经实现 DeerFlow 的核心运行时思想——统一 State/checkpoint、可恢复 Worker、事件游标、工具安全边界、子 Agent 和可插拔记忆；没有声称复刻 DeerFlow 的完整 LangGraph 编排器、Skill 生态、外部 Trace 平台和 MCP 任务控制面。这种回答既能说明设计能力，也能清楚交代工程取舍。
