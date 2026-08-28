@@ -207,6 +207,7 @@ func main() {
 		log.Fatal(err)
 	}
 	agentRunStore := agentrun.NewPostgresStoreWithCheckpointFiles(db, checkpointFiles, cfg.AgentCheckpointInlineBytes)
+	conversationService.SetAgentRunDataCleaner(agentRunStore)
 	tccStore, err := tcc.NewPostgresStore(db)
 	if err != nil {
 		log.Fatal(err)

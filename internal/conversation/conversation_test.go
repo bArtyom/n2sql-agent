@@ -34,6 +34,21 @@ type distributedLockStoreStub struct {
 	lockErr   error
 }
 
+type agentRunDataCleanerStub struct {
+	deletedThreads  []int64
+	clearedContexts []int64
+}
+
+func (s *agentRunDataCleanerStub) DeleteThreadData(_ context.Context, conversationID int64) error {
+	s.deletedThreads = append(s.deletedThreads, conversationID)
+	return nil
+}
+
+func (s *agentRunDataCleanerStub) DeleteThreadContext(_ context.Context, conversationID int64) error {
+	s.clearedContexts = append(s.clearedContexts, conversationID)
+	return nil
+}
+
 func (s *distributedLockStoreStub) WithConversationLock(_ context.Context, conversationID int64, fn func() error) error {
 	s.lockCalls++
 	if conversationID != 9 {
@@ -175,6 +190,26 @@ func TestServiceSearchTrimsQueryAndUsesDefaultLimit(t *testing.T) {
 	}
 	if store.searchQuery != "年假" || store.searchLimit != 50 || len(results) != 1 {
 		t.Fatalf("search = query %q limit %d results %#v", store.searchQuery, store.searchLimit, results)
+	}
+}
+
+func TestServiceClearsHiddenAgentStateWithConversationData(t *testing.T) {
+	store := &storeStub{conversation: conversation.Conversation{ID: 9, KnowledgeBaseID: 7}}
+	cleaner := &agentRunDataCleanerStub{}
+	service := conversation.NewService(store)
+	service.SetAgentRunDataCleaner(cleaner)
+
+	if err := service.ClearMessages(context.Background(), 9, 7); err != nil {
+		t.Fatalf("ClearMessages() error = %v", err)
+	}
+	if len(cleaner.clearedContexts) != 1 || cleaner.clearedContexts[0] != 9 {
+		t.Fatalf("cleared agent contexts = %#v, want conversation 9", cleaner.clearedContexts)
+	}
+	if err := service.Delete(context.Background(), 9, 7); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if len(cleaner.deletedThreads) != 1 || cleaner.deletedThreads[0] != 9 {
+		t.Fatalf("deleted agent threads = %#v, want conversation 9", cleaner.deletedThreads)
 	}
 }
 

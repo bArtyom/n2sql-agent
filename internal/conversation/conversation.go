@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
+	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
@@ -95,24 +96,26 @@ type MessageMetadata struct {
 // so reopening a conversation does not turn the messages table into a second
 // copy of the document corpus.
 type SourceReference struct {
-	DocumentID       int64    `json:"documentId"`
-	OriginalFilename string   `json:"originalFilename,omitempty"`
-	AssetURL         string   `json:"assetUrl,omitempty"`
-	AssetURLs        []string `json:"assetUrls,omitempty"`
-	Position         int      `json:"position"`
-	ChunkKind        string   `json:"chunkKind,omitempty"`
-	ImageInfo        any      `json:"imageInfo,omitempty"`
-	Content          string   `json:"content"`
-	HeadingPath      string   `json:"headingPath,omitempty"`
-	ContentTruncated bool     `json:"contentTruncated,omitempty"`
-	ParentContent    string   `json:"parentContent,omitempty"`
-	ParentPosition   int      `json:"parentPosition,omitempty"`
-	Distance         float64  `json:"distance"`
-	MatchType        string   `json:"matchType,omitempty"`
-	KeywordScore     float64  `json:"keywordScore,omitempty"`
-	HeadingScore     float64  `json:"headingScore,omitempty"`
-	FusionScore      float64  `json:"fusionScore,omitempty"`
-	RerankScore      float64  `json:"rerankScore,omitempty"`
+	DocumentID       int64                              `json:"documentId"`
+	SourceKey        string                             `json:"sourceKey,omitempty"`
+	OriginalFilename string                             `json:"originalFilename,omitempty"`
+	AssetURL         string                             `json:"assetUrl,omitempty"`
+	AssetURLs        []string                           `json:"assetUrls,omitempty"`
+	Position         int                                `json:"position"`
+	ChunkKind        string                             `json:"chunkKind,omitempty"`
+	ImageInfo        any                                `json:"imageInfo,omitempty"`
+	Content          string                             `json:"content"`
+	HeadingPath      string                             `json:"headingPath,omitempty"`
+	ContentTruncated bool                               `json:"contentTruncated,omitempty"`
+	ParentContent    string                             `json:"parentContent,omitempty"`
+	ParentPosition   int                                `json:"parentPosition,omitempty"`
+	Distance         float64                            `json:"distance"`
+	MatchType        string                             `json:"matchType,omitempty"`
+	KeywordScore     float64                            `json:"keywordScore,omitempty"`
+	HeadingScore     float64                            `json:"headingScore,omitempty"`
+	FusionScore      float64                            `json:"fusionScore,omitempty"`
+	RerankScore      float64                            `json:"rerankScore,omitempty"`
+	Layout           []documentextractor.PDFLayoutBlock `json:"layout,omitempty"`
 }
 
 // AgentTrace is the small, display-safe part of an Agent run that we restore
@@ -202,6 +205,14 @@ type Store interface {
 	DeleteMany(context.Context, int64, []int64) error
 }
 
+// AgentRunDataCleaner lets the conversation boundary remove hidden Agent
+// state when a user deletes or clears a conversation. The interface keeps the
+// conversation package independent from the Agent run storage implementation.
+type AgentRunDataCleaner interface {
+	DeleteThreadData(context.Context, int64) error
+	DeleteThreadContext(context.Context, int64) error
+}
+
 type idempotencyStore interface {
 	GetIdempotentResponse(context.Context, int64, string) (IdempotentResponse, error)
 	SaveIdempotentResponse(context.Context, int64, string, string, []byte) error
@@ -234,10 +245,18 @@ type IdempotentResponse struct {
 
 type Service struct {
 	store        Store
+	agentRunData AgentRunDataCleaner
 	summaryLocks sync.Map
 }
 
 func NewService(store Store) *Service { return &Service{store: store} }
+
+func (s *Service) SetAgentRunDataCleaner(cleaner AgentRunDataCleaner) {
+	if s == nil {
+		return
+	}
+	s.agentRunData = cleaner
+}
 
 func (s *Service) SaveFeedback(ctx context.Context, conversationID, knowledgeBaseID, messageID int64, rating int) (Feedback, error) {
 	if conversationID <= 0 || knowledgeBaseID <= 0 || messageID <= 0 || (rating != -1 && rating != 1) {
@@ -462,6 +481,11 @@ func (s *Service) Delete(ctx context.Context, conversationID, knowledgeBaseID in
 	if _, err := s.getOwnedConversation(ctx, conversationID, knowledgeBaseID); err != nil {
 		return err
 	}
+	if s.agentRunData != nil {
+		if err := s.agentRunData.DeleteThreadData(ctx, conversationID); err != nil {
+			return fmt.Errorf("delete conversation agent state: %w", err)
+		}
+	}
 	return s.store.Delete(ctx, conversationID)
 }
 
@@ -472,6 +496,13 @@ func (s *Service) DeleteMany(ctx context.Context, knowledgeBaseID int64, ids []i
 	for _, id := range ids {
 		if id <= 0 {
 			return ErrInvalidConversation
+		}
+	}
+	if s.agentRunData != nil {
+		for _, id := range ids {
+			if err := s.agentRunData.DeleteThreadData(ctx, id); err != nil {
+				return fmt.Errorf("delete conversation %d agent state: %w", id, err)
+			}
 		}
 	}
 	return s.store.DeleteMany(ctx, knowledgeBaseID, ids)
@@ -504,6 +535,11 @@ func (s *Service) ClearMessages(ctx context.Context, conversationID, knowledgeBa
 	}
 	if _, err := s.getOwnedConversation(ctx, conversationID, knowledgeBaseID); err != nil {
 		return err
+	}
+	if s.agentRunData != nil {
+		if err := s.agentRunData.DeleteThreadContext(ctx, conversationID); err != nil {
+			return fmt.Errorf("clear conversation agent context: %w", err)
+		}
 	}
 	return s.store.ClearMessages(ctx, conversationID)
 }

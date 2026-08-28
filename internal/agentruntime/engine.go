@@ -1139,6 +1139,7 @@ func (e *Engine) saveFinalContext(ctx context.Context, messages []modelclient.Ch
 		LastStep: lastStep,
 		Messages: messages,
 	}, maxAgentConversationBytes, e.contextSummarizer)
+	e.saveContext(ctx, state)
 	// This callback is deliberately best effort. The answer has already been
 	// generated; a persistence outage must not turn a successful run into a
 	// visible failure. The run-level ContextSink remains the crash-recovery

@@ -3,6 +3,7 @@ package agentrun
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agentstream"
 )
@@ -15,6 +16,8 @@ type EventBridge struct {
 	durable EventStore
 	live    LiveEventStore
 }
+
+const liveEventCleanupDelay = time.Minute
 
 func NewEventBridge(durable EventStore, live LiveEventStore) (*EventBridge, error) {
 	if durable == nil {
@@ -35,6 +38,15 @@ func (b *EventBridge) Append(ctx context.Context, run Run, event agentstream.Eve
 	// subscribers in the current process and a later reconnect can use DB.
 	if b.live != nil {
 		_ = b.live.Append(ctx, run, event)
+		if isTerminalAgentEvent(event.Type) {
+			if cleaner, ok := b.live.(LiveEventCleaner); ok {
+				streamRunID := eventStreamRunID(run, event)
+				knowledgeBaseID := run.KnowledgeBaseID
+				time.AfterFunc(liveEventCleanupDelay, func() {
+					_ = cleaner.Delete(context.Background(), streamRunID, knowledgeBaseID)
+				})
+			}
+		}
 	}
 	return nil
 }
@@ -54,7 +66,31 @@ func (b *EventBridge) SubscribeFrom(ctx context.Context, runID string, knowledge
 	if b == nil || b.live == nil {
 		return nil, nil, nil, false, agentstream.ErrEventGap
 	}
-	return b.live.SubscribeFrom(ctx, runID, knowledgeBaseID, afterEventID)
+	snapshot, live, cancel, done, err := b.live.SubscribeFrom(ctx, runID, knowledgeBaseID, afterEventID)
+	if err != nil {
+		return nil, nil, nil, false, err
+	}
+	if len(snapshot) == 0 && !done && afterEventID == "" {
+		// A terminal Redis stream may already have been cleaned. Resolve that
+		// state from the durable journal instead of leaving a new SSE client
+		// waiting forever on a stream that can never receive another event.
+		if stored, listErr := b.durable.List(ctx, runID, knowledgeBaseID); listErr == nil && hasTerminalEvent(stored) {
+			if cancel != nil {
+				cancel()
+			}
+			return stored, closedEventChannel(), func() {}, true, nil
+		}
+	}
+	return snapshot, live, cancel, done, nil
+}
+
+func hasTerminalEvent(events []agentstream.Event) bool {
+	for _, event := range events {
+		if isTerminalAgentEvent(event.Type) {
+			return true
+		}
+	}
+	return false
 }
 
 var _ EventStore = (*EventBridge)(nil)

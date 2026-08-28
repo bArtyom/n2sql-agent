@@ -923,6 +923,30 @@ func (s *PostgresStore) GetThreadContext(ctx context.Context, conversationID int
 	return &checkpoint, nil
 }
 
+// DeleteThreadData removes all durable Agent runs for a conversation. Child
+// runs are deleted through agent_runs' ON DELETE CASCADE, which also removes
+// their events and recovery checkpoints. Redis transport entries are
+// intentionally not touched here; they are short-lived and expire on their
+// own.
+func (s *PostgresStore) DeleteThreadData(ctx context.Context, conversationID int64) error {
+	if conversationID <= 0 {
+		return ErrInvalidRun
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		WITH RECURSIVE run_tree AS (
+			SELECT id FROM agent_runs WHERE conversation_id = $1
+			UNION ALL
+			SELECT child.id
+			FROM agent_runs child
+			JOIN run_tree parent ON child.parent_run_id = parent.id
+		)
+		DELETE FROM agent_runs
+		WHERE id IN (SELECT id FROM run_tree)`, conversationID); err != nil {
+		return fmt.Errorf("delete conversation agent runs: %w", err)
+	}
+	return nil
+}
+
 func (s *PostgresStore) DeleteThreadContext(ctx context.Context, conversationID int64) error {
 	if conversationID <= 0 {
 		return ErrInvalidRun

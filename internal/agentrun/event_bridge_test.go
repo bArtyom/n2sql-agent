@@ -9,8 +9,11 @@ import (
 )
 
 type eventStoreStub struct {
-	events []agentstream.Event
-	err    error
+	events       []agentstream.Event
+	err          error
+	liveSnapshot []agentstream.Event
+	liveDone     bool
+	liveErr      error
 }
 
 func (s *eventStoreStub) Append(_ context.Context, _ Run, event agentstream.Event) error {
@@ -26,11 +29,14 @@ func (s *eventStoreStub) List(context.Context, string, int64) ([]agentstream.Eve
 }
 
 func (s *eventStoreStub) Subscribe(context.Context, string, int64) ([]agentstream.Event, <-chan agentstream.Event, func(), bool, error) {
-	return nil, nil, nil, false, errors.New("not implemented")
+	return s.SubscribeFrom(context.Background(), "", 0, "")
 }
 
 func (s *eventStoreStub) SubscribeFrom(context.Context, string, int64, string) ([]agentstream.Event, <-chan agentstream.Event, func(), bool, error) {
-	return nil, nil, nil, false, errors.New("not implemented")
+	if s.liveErr != nil {
+		return nil, nil, nil, false, s.liveErr
+	}
+	return append([]agentstream.Event(nil), s.liveSnapshot...), closedEventChannel(), func() {}, s.liveDone, nil
 }
 
 func TestEventBridgeWritesDurableAndLiveCopies(t *testing.T) {
@@ -65,5 +71,18 @@ func TestEventBridgeToleratesLiveFailureAfterDurableWrite(t *testing.T) {
 	}
 	if len(durable.events) != 1 {
 		t.Fatalf("durable events = %d, want 1", len(durable.events))
+	}
+}
+
+func TestEventBridgeRecoversCleanedTerminalStreamFromDurableJournal(t *testing.T) {
+	durable := &eventStoreStub{events: []agentstream.Event{{ID: "finished", RunID: "run-1", Type: "run_finished"}}}
+	live := &eventStoreStub{}
+	bridge, err := NewEventBridge(durable, live)
+	if err != nil {
+		t.Fatalf("NewEventBridge() error = %v", err)
+	}
+	snapshot, _, _, done, err := bridge.SubscribeFrom(context.Background(), "run-1", 7, "")
+	if err != nil || !done || len(snapshot) != 1 || snapshot[0].ID != "finished" {
+		t.Fatalf("SubscribeFrom() = %#v, done=%v, err=%v, want durable terminal replay", snapshot, done, err)
 	}
 }

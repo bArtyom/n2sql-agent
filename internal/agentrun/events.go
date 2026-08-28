@@ -9,8 +9,9 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agentstream"
 )
 
-// EventStore persists a bounded copy of transport events. Hub remains the
-// low-latency live path; this store is the restart/replay path.
+// EventStore persists the durable Agent event journal. The Hub/Redis stream
+// remains the low-latency transport path; this store is the restart/replay and
+// audit path.
 type EventStore interface {
 	Append(context.Context, Run, agentstream.Event) error
 	List(context.Context, string, int64) ([]agentstream.Event, error)
@@ -31,7 +32,12 @@ func (s *PostgresEventStore) Append(ctx context.Context, run Run, event agentstr
 	if run.ID <= 0 || event.RunID == "" || event.Type == "" {
 		return ErrInvalidRun
 	}
-	payload, err := json.Marshal(event.Data)
+	payload, err := json.Marshal(struct {
+		Data        any    `json:"data"`
+		ToolCallID  string `json:"tool_call_id,omitempty"`
+		ExecutionID string `json:"execution_id,omitempty"`
+		TraceID     string `json:"trace_id,omitempty"`
+	}{Data: event.Data, ToolCallID: event.ToolCallID, ExecutionID: event.ExecutionID, TraceID: event.TraceID})
 	if err != nil {
 		return fmt.Errorf("encode agent event: %w", err)
 	}
@@ -74,8 +80,27 @@ func (s *PostgresEventStore) List(ctx context.Context, runID string, knowledgeBa
 			return nil, fmt.Errorf("scan agent event: %w", err)
 		}
 		if len(payload) > 0 && string(payload) != "null" {
-			if err := json.Unmarshal(payload, &event.Data); err != nil {
+			var envelope struct {
+				Data        json.RawMessage `json:"data"`
+				ToolCallID  string          `json:"tool_call_id"`
+				ExecutionID string          `json:"execution_id"`
+				TraceID     string          `json:"trace_id"`
+			}
+			if err := json.Unmarshal(payload, &envelope); err != nil {
 				return nil, fmt.Errorf("decode agent event: %w", err)
+			}
+			if len(envelope.Data) == 0 {
+				// Read payloads written before the identity envelope was added.
+				if err := json.Unmarshal(payload, &event.Data); err != nil {
+					return nil, fmt.Errorf("decode legacy agent event: %w", err)
+				}
+			} else {
+				if err := json.Unmarshal(envelope.Data, &event.Data); err != nil {
+					return nil, fmt.Errorf("decode agent event data: %w", err)
+				}
+				event.ToolCallID = envelope.ToolCallID
+				event.ExecutionID = envelope.ExecutionID
+				event.TraceID = envelope.TraceID
 			}
 		}
 		event.RunID = runID
