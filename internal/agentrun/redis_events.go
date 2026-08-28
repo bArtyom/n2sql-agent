@@ -38,6 +38,13 @@ type RedisEventStore struct {
 	maxLen int64
 }
 
+// Publish implements StreamBridge. Redis is selected as the single live
+// transport when the server runs in multi-process mode; durable persistence is
+// still handled separately by PostgresEventStore.
+func (s *RedisEventStore) Publish(ctx context.Context, run Run, event agentstream.Event) error {
+	return s.Append(ctx, run, event)
+}
+
 func NewRedisEventStore(redisURL, prefix string, ttl time.Duration, maxLen int) (*RedisEventStore, error) {
 	if redisURL == "" || ttl <= 0 || maxLen <= 0 {
 		return nil, errors.New("invalid redis event stream configuration")
@@ -258,3 +265,4 @@ func closedEventChannel() <-chan agentstream.Event {
 }
 
 var _ LiveEventStore = (*RedisEventStore)(nil)
+var _ StreamBridge = (*RedisEventStore)(nil)
