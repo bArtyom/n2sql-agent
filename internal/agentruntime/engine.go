@@ -336,6 +336,8 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 		if resumingPendingTools {
 			response.ToolCalls = append([]modelclient.ToolCall(nil), pendingToolCalls...)
 		} else {
+			modelStarted := time.Now()
+			ops.TraceStage(ctx, "agent_model_started", "node", "model", "step", len(run.Steps())+1)
 			if err := e.checkModelBudget(run); err != nil {
 				return finishErrorWithCategory(result, err, agent.FailureStepLimit, emitter)
 			}
@@ -366,6 +368,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				streamedReasoning = false
 				response, err = e.chatWithRetry(ctx, conversation, definitions)
 			}
+			ops.TraceStage(ctx, "agent_model_completed", "node", "model", "duration_ms", time.Since(modelStarted).Milliseconds(), "success", err == nil, "tool_calls", len(response.ToolCalls))
 			if err != nil {
 				if stepErr := run.AddStep(agent.Step{Kind: agent.StepModelDecision, Status: agent.StepFailed}); stepErr != nil {
 					return finishErrorWithEvents(result, stepErr, emitter)
@@ -800,12 +803,18 @@ func (e *Engine) precomputeReadOnlyToolCalls(ctx context.Context, calls []modelc
 }
 
 func (e *Engine) callTool(ctx context.Context, tool agent.Tool, args json.RawMessage) (agent.ToolResult, error) {
+	started := time.Now()
+	ops.TraceStage(ctx, "agent_tool_started", "node", "tool", "tool_name", tool.Name())
 	if e.toolTimeout <= 0 {
-		return tool.Call(ctx, args)
+		result, err := tool.Call(ctx, args)
+		ops.TraceStage(ctx, "agent_tool_completed", "node", "tool", "tool_name", tool.Name(), "duration_ms", time.Since(started).Milliseconds(), "success", err == nil)
+		return result, err
 	}
 	toolContext, cancel := context.WithTimeout(ctx, e.toolTimeout)
 	defer cancel()
-	return tool.Call(toolContext, args)
+	result, err := tool.Call(toolContext, args)
+	ops.TraceStage(ctx, "agent_tool_completed", "node", "tool", "tool_name", tool.Name(), "duration_ms", time.Since(started).Milliseconds(), "success", err == nil)
+	return result, err
 }
 
 func (e *Engine) callTCC(ctx context.Context, runID string, step int, toolName string, args json.RawMessage, tool TCCTool) (agent.ToolResult, error) {
