@@ -588,6 +588,19 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			if err := emitter.emit(agent.EventToolFinished, len(run.Steps()), toolFinishedData); err != nil {
 				return finishError(result, err)
 			}
+			if skillName, ok := toolResult.Metadata["skill_name"].(string); ok {
+				if loaded, _ := toolResult.Metadata["skill_body_loaded"].(bool); loaded {
+					if err := result.Run.RecordSkillLoaded(skillName); err != nil {
+						return finishErrorWithEvents(result, err, emitter)
+					}
+					if err := emitter.emit(agent.EventSkillLoaded, len(run.Steps()), map[string]any{
+						"skill_name":   skillName,
+						"tool_call_id": toolCall.ID,
+					}); err != nil {
+						return finishError(result, err)
+					}
+				}
+			}
 			// A pending tool has handed work to another asynchronous worker. Do
 			// not send the placeholder back to the model: doing so can cause the
 			// model to call the same tool repeatedly while the task is running.

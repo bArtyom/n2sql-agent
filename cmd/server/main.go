@@ -50,6 +50,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/rag"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
 	"github.com/bArtyom/n2sql-agent/internal/sandbox"
+	skillcatalog "github.com/bArtyom/n2sql-agent/internal/skill"
 	"github.com/bArtyom/n2sql-agent/internal/tcc"
 	"github.com/bArtyom/n2sql-agent/internal/usage"
 	"github.com/bArtyom/n2sql-agent/internal/worker"
@@ -423,6 +424,18 @@ func main() {
 	)
 	if err != nil {
 		log.Fatal(err)
+	}
+	skillRoot := strings.TrimSpace(os.Getenv("AGENT_SKILLS_DIR"))
+	if skillRoot == "" {
+		skillRoot = "skills"
+	}
+	skillCatalog, skillErr := skillcatalog.LoadCatalogIfExists(skillRoot, skillcatalog.CategoryPublic)
+	if skillErr != nil {
+		log.Fatalf("load Agent Skills: %v", skillErr)
+	}
+	agentAnswerService.SetSkillCatalog(skillCatalog)
+	if skillCatalog.Len() > 0 {
+		slog.Info("agent skills enabled", "directory", skillRoot, "count", skillCatalog.Len())
 	}
 	agentRunExecutor := handler.NewPersistentAgentExecutorWithCheckpoint(agentAnswerService, conversationService, agentStreamHub, metricsRegistry, agentRunStore, agentEventStore, agentRunStore)
 	agentRunRunner, err := agentrun.NewRunnerWithEventSink(agentRunStore, agentRunExecutor, func(run agentrun.Run) func(agent.Event) error {

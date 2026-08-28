@@ -80,6 +80,7 @@ type AgentRun struct {
 	successTools     int
 	failedTools      int
 	checkpointReuses int
+	skills           []string
 	promptTokens     int
 	completionTokens int
 	embeddingTokens  int
@@ -108,6 +109,7 @@ type RunStats struct {
 	CompletionTokens    int                            `json:"completion_tokens"`
 	EmbeddingTokens     int                            `json:"embedding_tokens"`
 	TotalTokens         int                            `json:"total_tokens"`
+	Skills              []string                       `json:"skills,omitempty"`
 	FailureCategory     FailureCategory                `json:"failure_category,omitempty"`
 	QueryRewrite        *usage.QueryRewriteObservation `json:"query_rewrite,omitempty"`
 	Retrieval           *usage.RetrievalObservation    `json:"retrieval,omitempty"`
@@ -232,6 +234,22 @@ func (r *AgentRun) RecordCheckpointReuse() error {
 	return nil
 }
 
+// RecordSkillLoaded keeps only the names of Skills whose full instructions
+// were explicitly loaded during this run. The body remains a request-time
+// tool result and is not copied into run state.
+func (r *AgentRun) RecordSkillLoaded(name string) error {
+	if r == nil || r.status != RunRunning || strings.TrimSpace(name) == "" {
+		return fmt.Errorf("%w: record skill loaded", ErrInvalidRunTransition)
+	}
+	for _, existing := range r.skills {
+		if existing == name {
+			return nil
+		}
+	}
+	r.skills = append(r.skills, name)
+	return nil
+}
+
 // ObserveChatTokens adds provider-reported chat usage to this running Agent.
 func (r *AgentRun) ObserveChatTokens(tokenUsage usage.TokenUsage) {
 	if r == nil {
@@ -351,6 +369,9 @@ func (r *AgentRun) Stats() RunStats {
 		EmbeddingTokens:     r.embeddingTokens,
 		TotalTokens:         r.totalTokens,
 		FailureCategory:     r.failure,
+	}
+	if len(r.skills) > 0 {
+		stats.Skills = append([]string(nil), r.skills...)
 	}
 	if r.queryRewrite.Enabled {
 		queryRewrite := r.queryRewrite

@@ -18,6 +18,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
+	skillcatalog "github.com/bArtyom/n2sql-agent/internal/skill"
 )
 
 const maxQuestionBytes = 8000
@@ -78,6 +79,7 @@ type Service struct {
 	externalTools      []agent.Tool
 	childLifecycle     agentruntime.ChildRunLifecycle
 	childScheduler     agentruntime.ChildScheduler
+	skillCatalog       *skillcatalog.Catalog
 	sequence           atomic.Uint64
 }
 
@@ -108,6 +110,15 @@ func (s *Service) SetDelegateResearchEnabled(enabled bool) {
 func (s *Service) SetExternalTools(tools ...agent.Tool) {
 	if s != nil {
 		s.externalTools = append([]agent.Tool(nil), tools...)
+	}
+}
+
+// SetSkillCatalog enables request-scoped deferred Skill discovery. The
+// catalog is read-only after startup; each Agent run receives only its stable
+// metadata index and can load a body through skill_read when needed.
+func (s *Service) SetSkillCatalog(catalog *skillcatalog.Catalog) {
+	if s != nil {
+		s.skillCatalog = catalog
 	}
 }
 
@@ -346,6 +357,14 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 			}
 		}
 	}
+	if s.skillCatalog != nil && s.skillCatalog.Len() > 0 {
+		if err := registry.AllowAndRegister(agent.NewSkillDescribeTool(s.skillCatalog)); err != nil {
+			return Response{}, fmt.Errorf("register skill describe tool: %w", err)
+		}
+		if err := registry.AllowAndRegister(agent.NewSkillReadTool(s.skillCatalog)); err != nil {
+			return Response{}, fmt.Errorf("register skill read tool: %w", err)
+		}
+	}
 	if request.KnowledgePolicy == KnowledgeBasePreferred {
 		if err := s.registerExternalTools(registry); err != nil {
 			return Response{}, err
@@ -390,6 +409,9 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		runID = s.nextRunID()
 	}
 	systemContent := childSystemPrompt(request.ChildMode, s.documents != nil, s.chunks != nil, s.documentSummary != nil)
+	if s.skillCatalog != nil && s.skillCatalog.Len() > 0 {
+		systemContent += "\n\n" + s.skillCatalog.IndexPrompt()
+	}
 	if request.KnowledgePolicy == KnowledgeBaseOnly && !request.ChildMode {
 		systemContent += "\n\n" + knowledgeBaseOnlyPrompt
 	}
