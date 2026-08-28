@@ -3,6 +3,7 @@ package agentruntime
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
@@ -10,18 +11,41 @@ import (
 
 const durableSummaryPrefix = "Agent 短记忆（较早工具结果摘要）：\n"
 
+// InterruptKind identifies a durable pause point in the Agent graph. The
+// payload belongs to the unified checkpoint; it is not a second tool or
+// context checkpoint.
+type InterruptKind string
+
+const (
+	InterruptApproval InterruptKind = "approval"
+)
+
+// InterruptState is the minimal information needed to show and resume a
+// paused run after the original Worker has released its lease.
+type InterruptState struct {
+	Kind       InterruptKind `json:"kind"`
+	ID         string        `json:"id"`
+	ToolCallID string        `json:"tool_call_id"`
+	ToolName   string        `json:"tool_name"`
+	Arguments  string        `json:"arguments,omitempty"`
+	CreatedAt  time.Time     `json:"created_at"`
+}
+
 // CheckpointState is the single durable Agent state. It is the Go equivalent
 // of DeerFlow's LangGraph thread checkpoint: messages, compacted memory and a
 // pending tool decision are saved together, so a Worker can resume the graph
 // from one coherent state instead of joining separate context/decision/tool
 // tables.
 type CheckpointState struct {
-	Version          int                       `json:"version"`
-	LastStep         int                       `json:"last_step"`
-	CurrentNode      string                    `json:"current_node,omitempty"`
-	Messages         []modelclient.ChatMessage `json:"messages"`
-	SummaryText      string                    `json:"summary_text"`
-	PendingToolCalls []modelclient.ToolCall    `json:"pending_tool_calls,omitempty"`
+	Version             int                       `json:"version"`
+	LastStep            int                       `json:"last_step"`
+	CurrentNode         string                    `json:"current_node,omitempty"`
+	Messages            []modelclient.ChatMessage `json:"messages"`
+	SummaryText         string                    `json:"summary_text"`
+	PendingToolCalls    []modelclient.ToolCall    `json:"pending_tool_calls,omitempty"`
+	Interrupt           *InterruptState           `json:"interrupt,omitempty"`
+	ApprovedToolCallIDs []string                  `json:"approved_tool_call_ids,omitempty"`
+	RejectedToolCallIDs []string                  `json:"rejected_tool_call_ids,omitempty"`
 }
 
 // CheckpointSink persists one complete state snapshot at semantic graph

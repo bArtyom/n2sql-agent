@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/bArtyom/n2sql-agent/internal/agentrun"
 	"github.com/bArtyom/n2sql-agent/internal/agentstream"
 )
 
@@ -15,6 +16,13 @@ type agentRunApprovalRequest struct {
 // NewAgentRunApproval resolves the tool confirmation currently blocking an
 // Agent run. The run and knowledge-base IDs are both checked by the Hub.
 func NewAgentRunApproval(hub *agentstream.Hub) http.Handler {
+	return NewAgentRunApprovalWithStore(hub, nil)
+}
+
+// NewAgentRunApprovalWithStore uses the durable checkpoint/resume path when
+// the Agent runs are backed by PostgreSQL. The Hub-only path remains useful
+// for the synchronous development handler and tests.
+func NewAgentRunApprovalWithStore(hub *agentstream.Hub, store agentrun.ApprovalInterruptStore) http.Handler {
 	if hub == nil {
 		hub = agentstream.NewHub()
 	}
@@ -38,8 +46,14 @@ func NewAgentRunApproval(hub *agentstream.Hub) http.Handler {
 			http.Error(w, `{"error":"invalid approval request"}`, http.StatusBadRequest)
 			return
 		}
-		if err := hub.ResolveApproval(runID, knowledgeBaseID, request.Approved); err != nil {
-			if errors.Is(err, agentstream.ErrApprovalNotFound) {
+		var err error
+		if store != nil {
+			err = store.ResolveApproval(r.Context(), runID, knowledgeBaseID, request.Approved)
+		} else {
+			err = hub.ResolveApproval(runID, knowledgeBaseID, request.Approved)
+		}
+		if err != nil {
+			if errors.Is(err, agentstream.ErrApprovalNotFound) || errors.Is(err, agentrun.ErrApprovalNotFound) {
 				http.Error(w, `{"error":"agent approval not found or already resolved"}`, http.StatusNotFound)
 				return
 			}

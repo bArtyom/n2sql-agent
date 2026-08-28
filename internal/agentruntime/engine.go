@@ -38,6 +38,9 @@ var (
 	ErrInvalidParallelLimit  = errors.New("agent parallel tool limit must be positive")
 	ErrTCCRequiresDurableRun = errors.New("tcc tool requires a durable agent run")
 	ErrRunBudgetExceeded     = errors.New("agent run budget exceeded")
+	// ErrAgentApprovalPending asks the durable Worker to park the run. The
+	// approval request has already been recorded in the unified checkpoint.
+	ErrAgentApprovalPending = errors.New("agent approval is pending")
 )
 
 const (
@@ -289,12 +292,14 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			return finishErrorWithEvents(result, err, emitter)
 		}
 		checkpointState := compactCheckpointState(ctx, CheckpointState{
-			Version:          1,
-			LastStep:         len(run.Steps()),
-			CurrentNode:      "model",
-			Messages:         conversation,
-			SummaryText:      summaryTextFromMessages(conversation),
-			PendingToolCalls: pendingToolCalls,
+			Version:             1,
+			LastStep:            len(run.Steps()),
+			CurrentNode:         "model",
+			Messages:            conversation,
+			SummaryText:         summaryTextFromMessages(conversation),
+			PendingToolCalls:    pendingToolCalls,
+			ApprovedToolCallIDs: approvedToolCallIDs(e.resumeCheckpoint),
+			RejectedToolCallIDs: rejectedToolCallIDs(e.resumeCheckpoint),
 		}, maxAgentConversationBytes, e.contextSummarizer)
 		conversation = rebuildModelContext(conversation, checkpointState)
 		if messageBytes(conversation) > maxAgentConversationBytes {
@@ -481,7 +486,29 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			}
 			arguments := json.RawMessage(toolCall.Function.Arguments)
 			var toolResult agent.ToolResult
-			if approvalGate != nil && e.registry.RequiresApproval(toolCall.Function.Name) {
+			if e.rejectedToolCall(toolCall.ID) {
+				toolContent, feedbackErr := markUntrustedToolResult("用户拒绝了这个工具调用，本次不会执行。")
+				if feedbackErr != nil {
+					return finishErrorWithEvents(result, feedbackErr, emitter)
+				}
+				e.appendToolMessageCheckpoint(ctx, run, &conversation, &pendingToolCalls, toolCall.ID, toolContent)
+				continue
+			}
+			if approvalGate != nil && e.registry.RequiresApproval(toolCall.Function.Name) && !e.approvedToolCall(toolCall.ID) {
+				interrupt := &InterruptState{
+					Kind:       InterruptApproval,
+					ID:         fmt.Sprintf("%s:approval:%s", runID, toolCall.ID),
+					ToolCallID: toolCall.ID,
+					ToolName:   toolCall.Function.Name,
+					Arguments:  boundedEventText(toolCall.Function.Arguments),
+					CreatedAt:  time.Now().UTC(),
+				}
+				if err := e.saveCheckpointStrict(ctx, CheckpointState{
+					Version: 1, LastStep: len(run.Steps()), CurrentNode: "interrupt", Messages: conversation,
+					PendingToolCalls: pendingToolCalls, Interrupt: interrupt,
+				}); err != nil {
+					return finishErrorWithEvents(result, err, emitter)
+				}
 				if err := emitter.emit(agent.EventApprovalRequired, len(run.Steps())+1, map[string]any{"tool_name": toolCall.Function.Name, "arguments": boundedEventText(toolCall.Function.Arguments)}); err != nil {
 					return result, err
 				}
@@ -811,8 +838,12 @@ func (e *Engine) chatWithRetryStream(ctx context.Context, conversation []modelcl
 }
 
 func (e *Engine) saveCheckpoint(ctx context.Context, state CheckpointState) {
+	_ = e.saveCheckpointStrict(ctx, state)
+}
+
+func (e *Engine) saveCheckpointStrict(ctx context.Context, state CheckpointState) error {
 	if e == nil || e.checkpointSink == nil || len(state.Messages) == 0 {
-		return
+		return nil
 	}
 	if state.Version <= state.LastStep {
 		state.Version = state.LastStep + 1
@@ -820,7 +851,45 @@ func (e *Engine) saveCheckpoint(ctx context.Context, state CheckpointState) {
 	state = compactCheckpointState(ctx, state, maxAgentConversationBytes, e.contextSummarizer)
 	// Checkpoint persistence is a recovery accelerator. A database hiccup must
 	// not turn a successful tool call into a failed Agent run.
-	_ = e.checkpointSink(ctx, state)
+	return e.checkpointSink(ctx, state)
+}
+
+func (e *Engine) approvedToolCall(toolCallID string) bool {
+	if e == nil || e.resumeCheckpoint == nil || toolCallID == "" {
+		return false
+	}
+	for _, approved := range e.resumeCheckpoint.ApprovedToolCallIDs {
+		if approved == toolCallID {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *Engine) rejectedToolCall(toolCallID string) bool {
+	if e == nil || e.resumeCheckpoint == nil || toolCallID == "" {
+		return false
+	}
+	for _, rejected := range e.resumeCheckpoint.RejectedToolCallIDs {
+		if rejected == toolCallID {
+			return true
+		}
+	}
+	return false
+}
+
+func approvedToolCallIDs(checkpoint *CheckpointState) []string {
+	if checkpoint == nil {
+		return nil
+	}
+	return append([]string(nil), checkpoint.ApprovedToolCallIDs...)
+}
+
+func rejectedToolCallIDs(checkpoint *CheckpointState) []string {
+	if checkpoint == nil {
+		return nil
+	}
+	return append([]string(nil), checkpoint.RejectedToolCallIDs...)
 }
 
 func (e *Engine) appendToolMessageCheckpoint(ctx context.Context, run *agent.AgentRun, conversation *[]modelclient.ChatMessage, pending *[]modelclient.ToolCall, toolCallID, content string) {

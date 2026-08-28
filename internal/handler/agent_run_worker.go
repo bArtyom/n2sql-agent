@@ -240,6 +240,12 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 		}
 
 		executionContext = agentruntime.WithApprovalGate(executionContext, func(ctx context.Context, toolName string, arguments json.RawMessage) (bool, error) {
+			if checkpointStore != nil {
+				// The Engine has already persisted the approval interrupt in its
+				// unified checkpoint. Release this Worker instead of holding a
+				// goroutine and a lease while a user decides.
+				return false, agentruntime.ErrAgentApprovalPending
+			}
 			approvalContext, cancelApproval := context.WithTimeout(ctx, agentApprovalTimeout)
 			defer cancelApproval()
 			return hub.WaitApproval(approvalContext, run.RunID, run.KnowledgeBaseID, toolName, arguments)
@@ -296,6 +302,13 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 			})
 		}
 		if err != nil {
+			if errors.Is(err, agentruntime.ErrAgentApprovalPending) {
+				// Keep the in-process stream open while the durable run waits.
+				// The lease is released by Runner; another Worker can publish
+				// the resumed events into this same Hub later.
+				keepStreamOpen = true
+				return err
+			}
 			if errors.Is(err, agentruntime.ErrAgentWaitingChildren) {
 				keepStreamOpen = true
 				_ = publish("waiting_children", map[string]any{"run_id": run.RunID})

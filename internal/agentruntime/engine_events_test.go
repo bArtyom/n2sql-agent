@@ -357,6 +357,51 @@ func TestEngineRunWithEventsEmitsApprovalExpired(t *testing.T) {
 	assertEventTypes(t, events, agent.EventRunStarted, agent.EventToolCalled, agent.EventApprovalRequired, agent.EventApprovalExpired)
 }
 
+func TestEngineResumesApprovedInterruptWithoutAskingAgain(t *testing.T) {
+	tool := &toolStub{content: "审批后的结果"}
+	registry := agent.NewToolRegistry()
+	if err := registry.Register(tool); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := agentruntime.CheckpointState{
+		Version:  3,
+		LastStep: 1,
+		Messages: []modelclient.ChatMessage{
+			{Role: "user", Content: "执行操作"},
+			{Role: "assistant", ToolCalls: []modelclient.ToolCall{{
+				ID: "call-approved", Type: "function",
+				Function: modelclient.ToolCallFunction{Name: "knowledge_search", Arguments: `{}`},
+			}}},
+		},
+		PendingToolCalls:    []modelclient.ToolCall{{ID: "call-approved", Type: "function", Function: modelclient.ToolCallFunction{Name: "knowledge_search", Arguments: `{}`}}},
+		ApprovedToolCallIDs: []string{"call-approved"},
+	}
+	chat := chatStub{call: func(_ context.Context, messages []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		if len(messages) != 4 || messages[3].Role != "tool" {
+			t.Fatalf("messages = %#v, want resumed tool result", messages)
+		}
+		return modelclient.ChatResponse{Message: "已继续完成"}, nil
+	}}
+	approvalCalls := 0
+	engine, err := agentruntime.NewEngineWithOptions(chat, registry, 2, agentruntime.EngineOptions{
+		ResumeCheckpoint: &checkpoint,
+		ApprovalGate: func(context.Context, string, json.RawMessage) (bool, error) {
+			approvalCalls++
+			return false, errors.New("approval gate should not run after approval")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := engine.Run(context.Background(), "run-approved-interrupt", []modelclient.ChatMessage{
+		{Role: "system", Content: "系统提示"},
+		{Role: "user", Content: "执行操作"},
+	})
+	if err != nil || result.Run.FinalAnswer() != "已继续完成" || approvalCalls != 0 {
+		t.Fatalf("Run() = (%#v, %v), approval_calls=%d", result.Run, err, approvalCalls)
+	}
+}
+
 func TestEngineRunWithEventsEmitsFailureAndCancellation(t *testing.T) {
 	chat := chatStub{call: func(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 		return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{

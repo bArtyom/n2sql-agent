@@ -25,6 +25,8 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
+	"github.com/bArtyom/n2sql-agent/internal/ops"
+	"github.com/bArtyom/n2sql-agent/internal/postprocess"
 	"github.com/bArtyom/n2sql-agent/internal/rag"
 	"github.com/bArtyom/n2sql-agent/internal/requestid"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
@@ -58,6 +60,7 @@ type Dependencies struct {
 	AgentMaxHistoryBytes    int
 	FollowUpSuggestions     followup.Suggester
 	DocumentSummary         *documentsummary.Service
+	PostprocessTasks        postprocess.Store
 	EvaluationRuns          evaluationrun.Store
 	EvaluationReader        evaluationrun.Reader
 	Memories                memory.Store
@@ -94,6 +97,7 @@ func New(dependencies Dependencies) http.Handler {
 	}
 	if dependencies.ParserEngines != nil {
 		mux.Handle("GET /api/parser-engines", handler.NewParserEngines(dependencies.ParserEngines))
+		mux.Handle("POST /api/knowledge-bases/{id}/chunk-preview", handler.NewChunkPreview(dependencies.ParserEngines))
 	}
 	if dependencies.Conversations != nil {
 		conversationHandler := handler.NewConversationsWithModelProvider(dependencies.Conversations, dependencies.Providers)
@@ -123,6 +127,9 @@ func New(dependencies Dependencies) http.Handler {
 		if reader, ok := dependencies.Documents.(document.Reader); ok {
 			mux.Handle("GET /api/knowledge-bases/{id}/documents", handler.NewDocumentList(reader))
 		}
+		if versionReader, ok := dependencies.Documents.(document.VersionReader); ok {
+			mux.Handle("GET /api/knowledge-bases/{id}/documents/{documentID}/versions", handler.NewDocumentVersions(versionReader))
+		}
 		if folderReader, ok := dependencies.Documents.(document.FolderTreeReader); ok {
 			mux.Handle("GET /api/knowledge-bases/{id}/document-folders", handler.NewDocumentFolderTree(folderReader))
 		}
@@ -150,6 +157,9 @@ func New(dependencies Dependencies) http.Handler {
 		if assetListReader, ok := dependencies.Documents.(document.AssetListReader); ok {
 			mux.Handle("GET /api/knowledge-bases/{id}/documents/{documentID}/assets", handler.NewDocumentAssetList(assetListReader))
 		}
+	}
+	if dependencies.PostprocessTasks != nil {
+		mux.Handle("GET /api/knowledge-bases/{id}/documents/{documentID}/postprocess-tasks", handler.NewDocumentPostprocessTasks(dependencies.PostprocessTasks))
 	}
 	if dependencies.Tags != nil {
 		tagHandler := handler.NewDocumentTags(dependencies.Tags)
@@ -214,7 +224,11 @@ func New(dependencies Dependencies) http.Handler {
 		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}/children", handler.NewAgentRunChildren(dependencies.AgentRunReader))
 		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}/trace", handler.NewAgentRunTrace(dependencies.AgentEventStore))
 		mux.Handle("POST /api/knowledge-bases/{id}/agent-runs/{runID}/stop", handler.NewAgentRunStopWithStore(hub, dependencies.AgentRuns))
-		mux.Handle("POST /api/knowledge-bases/{id}/agent-runs/{runID}/approval", handler.NewAgentRunApproval(hub))
+		var approvalStore agentrun.ApprovalInterruptStore
+		if candidate, ok := dependencies.AgentRuns.(agentrun.ApprovalInterruptStore); ok {
+			approvalStore = candidate
+		}
+		mux.Handle("POST /api/knowledge-bases/{id}/agent-runs/{runID}/approval", handler.NewAgentRunApprovalWithStore(hub, approvalStore))
 	}
 	if dependencies.FollowUpSuggestions != nil {
 		mux.Handle("POST /api/knowledge-bases/{id}/follow-up-suggestions", handler.NewFollowUpSuggestions(dependencies.FollowUpSuggestions))
@@ -230,5 +244,5 @@ func New(dependencies Dependencies) http.Handler {
 	if dependencies.Authorization != nil {
 		root = access.Middleware(dependencies.Authorization)(root)
 	}
-	return requestid.NewMiddleware(slog.Default(), registry.Middleware(root))
+	return requestid.NewMiddleware(slog.Default(), registry.Middleware(ops.Middleware(slog.Default(), root)))
 }

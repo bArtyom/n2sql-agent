@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
 )
 
 type Status string
@@ -18,6 +20,7 @@ const (
 	StatusPending         Status = "pending"
 	StatusRunning         Status = "running"
 	StatusWaitingChildren Status = "waiting_children"
+	StatusWaitingApproval Status = "waiting_approval"
 	StatusRequeued        Status = "requeued"
 	StatusSucceeded       Status = "succeeded"
 	StatusFailed          Status = "failed"
@@ -38,6 +41,7 @@ var (
 	ErrInvalidRun         = errors.New("invalid agent run")
 	ErrLeaseLost          = errors.New("agent run lease lost")
 	ErrCheckpointConflict = errors.New("agent checkpoint ownership or version conflict")
+	ErrApprovalNotFound   = errors.New("agent approval not found")
 )
 
 const defaultLeaseDuration = 5 * time.Minute
@@ -178,6 +182,14 @@ type StopReasonStore interface {
 type ParentRunCoordinator interface {
 	MarkWaitingChildren(context.Context, int64, string) error
 	ResumeParentIfChildrenTerminal(context.Context, int64) (bool, error)
+}
+
+// ApprovalInterruptStore parks an approval-gated run without holding a
+// Worker lease and atomically applies the user's decision to its unified
+// checkpoint before requeueing it.
+type ApprovalInterruptStore interface {
+	MarkWaitingApproval(context.Context, int64, string) error
+	ResolveApproval(context.Context, string, int64, bool) error
 }
 
 // Reader exposes safe run metadata without exposing the persisted request
@@ -690,12 +702,16 @@ func (s *PostgresStore) SaveResponse(ctx context.Context, id int64, response jso
 }
 
 type persistedCheckpointState struct {
-	Version          int               `json:"version"`
-	LastStep         int               `json:"last_step"`
-	Messages         []json.RawMessage `json:"messages"`
-	SummaryText      string            `json:"summary_text"`
-	PendingToolCalls []json.RawMessage `json:"pending_tool_calls,omitempty"`
-	ToolResultRefs   map[string]string `json:"tool_result_refs,omitempty"`
+	Version             int                          `json:"version"`
+	LastStep            int                          `json:"last_step"`
+	CurrentNode         string                       `json:"current_node,omitempty"`
+	Messages            []json.RawMessage            `json:"messages"`
+	SummaryText         string                       `json:"summary_text"`
+	PendingToolCalls    []json.RawMessage            `json:"pending_tool_calls,omitempty"`
+	ToolResultRefs      map[string]string            `json:"tool_result_refs,omitempty"`
+	Interrupt           *agentruntime.InterruptState `json:"interrupt,omitempty"`
+	ApprovedToolCallIDs []string                     `json:"approved_tool_call_ids,omitempty"`
+	RejectedToolCallIDs []string                     `json:"rejected_tool_call_ids,omitempty"`
 }
 
 func (s *PostgresStore) SaveCheckpoint(ctx context.Context, checkpoint Checkpoint) error {
@@ -1095,6 +1111,145 @@ func (s *PostgresStore) MarkWaitingChildren(ctx context.Context, id int64, lease
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit waiting children update: %w", err)
+	}
+	return nil
+}
+
+// MarkWaitingApproval releases the Worker lease after the Engine has saved an
+// approval interrupt in the unified checkpoint. The run can therefore be
+// resumed by any Worker after the user's decision arrives.
+func (s *PostgresStore) MarkWaitingApproval(ctx context.Context, id int64, leaseToken string) error {
+	if id <= 0 || strings.TrimSpace(leaseToken) == "" {
+		return ErrInvalidRun
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin waiting approval update: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var attemptCount int
+	if err := tx.QueryRowContext(ctx, `
+		UPDATE agent_runs
+		SET status = 'waiting_approval', lease_until = NULL, lease_token = NULL,
+			heartbeat_at = NULL, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1 AND status = 'running' AND lease_token = $2
+		RETURNING attempt_count`, id, leaseToken).Scan(&attemptCount); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrRunNotFound
+		}
+		return fmt.Errorf("mark agent run waiting for approval: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE agent_run_attempts
+		SET status = 'requeued', updated_at = CURRENT_TIMESTAMP
+		WHERE agent_run_id = $1 AND attempt_count = $2 AND status = 'running'`, id, attemptCount); err != nil {
+		return fmt.Errorf("update waiting approval attempt: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit waiting approval update: %w", err)
+	}
+	return nil
+}
+
+// ResolveApproval updates the interrupt inside the latest unified checkpoint
+// and requeues the run in one transaction. Approved calls are executed once
+// by the next Worker; rejected calls are returned to the model as a tool
+// observation so it can choose another plan.
+func (s *PostgresStore) ResolveApproval(ctx context.Context, runID string, knowledgeBaseID int64, approved bool) error {
+	if strings.TrimSpace(runID) == "" || knowledgeBaseID <= 0 {
+		return ErrInvalidRun
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin resolve agent approval: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var internalID int64
+	var attemptCount int
+	var status Status
+	if err := tx.QueryRowContext(ctx, `
+		SELECT id, attempt_count, status
+		FROM agent_runs
+		WHERE run_id = $1 AND knowledge_base_id = $2
+		FOR UPDATE`, runID, knowledgeBaseID).Scan(&internalID, &attemptCount, &status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrRunNotFound
+		}
+		return fmt.Errorf("lock agent run for approval: %w", err)
+	}
+	if status != StatusWaitingApproval {
+		return ErrApprovalNotFound
+	}
+	var checkpointDBID int64
+	var rawState []byte
+	if err := tx.QueryRowContext(ctx, `
+		SELECT id, state
+		FROM agent_checkpoints
+		WHERE agent_run_id = $1
+		ORDER BY attempt_count DESC, step_number DESC, id DESC
+		LIMIT 1
+		FOR UPDATE`, internalID).Scan(&checkpointDBID, &rawState); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrApprovalNotFound
+		}
+		return fmt.Errorf("load approval checkpoint: %w", err)
+	}
+	var state map[string]json.RawMessage
+	if err := json.Unmarshal(rawState, &state); err != nil {
+		return fmt.Errorf("decode approval checkpoint: %w", err)
+	}
+	var interrupt agentruntime.InterruptState
+	interruptPayload, ok := state["interrupt"]
+	if !ok || json.Unmarshal(interruptPayload, &interrupt) != nil || interrupt.ToolCallID == "" {
+		return ErrApprovalNotFound
+	}
+	key := "rejected_tool_call_ids"
+	if approved {
+		key = "approved_tool_call_ids"
+	}
+	var resolvedIDs []string
+	if existing := state[key]; len(existing) > 0 {
+		if err := json.Unmarshal(existing, &resolvedIDs); err != nil {
+			return fmt.Errorf("decode approval decisions: %w", err)
+		}
+	}
+	resolvedIDs = append(resolvedIDs, interrupt.ToolCallID)
+	state[key], _ = json.Marshal(resolvedIDs)
+	delete(state, "interrupt")
+	var version int
+	if versionPayload := state["version"]; len(versionPayload) > 0 {
+		_ = json.Unmarshal(versionPayload, &version)
+	}
+	if version <= 0 {
+		version = 1
+	}
+	state["version"], _ = json.Marshal(version + 1)
+	updatedState, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("encode approval checkpoint: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE agent_checkpoints
+		SET state = $2, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1`, checkpointDBID, updatedState); err != nil {
+		return fmt.Errorf("save approval checkpoint: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE agent_runs
+		SET status = 'pending', lease_until = NULL, lease_token = NULL,
+			heartbeat_at = NULL, started_at = NULL, finished_at = NULL,
+			error_message = NULL, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1 AND status = 'waiting_approval'`, internalID); err != nil {
+		return fmt.Errorf("requeue approved agent run: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE agent_run_attempts
+		SET status = 'requeued', updated_at = CURRENT_TIMESTAMP
+		WHERE agent_run_id = $1 AND attempt_count = $2 AND status = 'requeued'`, internalID, attemptCount); err != nil {
+		return fmt.Errorf("record approval resolution: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit agent approval: %w", err)
 	}
 	return nil
 }

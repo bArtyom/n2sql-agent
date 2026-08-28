@@ -112,18 +112,19 @@ func TestRunWorkersExecutesRunsConcurrently(t *testing.T) {
 }
 
 type runStoreStub struct {
-	run           Run
-	status        Status
-	failed        string
-	stopReason    string
-	requeued      bool
-	deleted       int
-	markedToken   string
-	renewErr      error
-	checkpointErr error
-	waiting       bool
-	resumedParent int64
-	parentRun     Run
+	run             Run
+	status          Status
+	failed          string
+	stopReason      string
+	requeued        bool
+	deleted         int
+	markedToken     string
+	renewErr        error
+	checkpointErr   error
+	waiting         bool
+	waitingApproval bool
+	resumedParent   int64
+	parentRun       Run
 }
 
 func (s *runStoreStub) Get(context.Context, string, int64) (Run, error) {
@@ -196,6 +197,12 @@ func (s *runStoreStub) MarkWaitingChildren(_ context.Context, _ int64, _ string)
 	s.status = StatusWaitingChildren
 	return nil
 }
+func (s *runStoreStub) MarkWaitingApproval(_ context.Context, _ int64, _ string) error {
+	s.waitingApproval = true
+	s.status = StatusWaitingApproval
+	return nil
+}
+func (*runStoreStub) ResolveApproval(context.Context, string, int64, bool) error { return nil }
 func (s *runStoreStub) ResumeParentIfChildrenTerminal(_ context.Context, parentID int64) (bool, error) {
 	s.resumedParent = parentID
 	return true, nil
@@ -230,6 +237,20 @@ func TestRunnerMarksSucceededAfterExecution(t *testing.T) {
 	}
 	if store.markedToken != "lease-a" {
 		t.Fatalf("marked token = %q, want lease-a", store.markedToken)
+	}
+}
+
+func TestRunnerParksRunWhenApprovalIsPending(t *testing.T) {
+	store := &runStoreStub{run: Run{ID: 1, RunID: "approval-run", LeaseToken: "lease-a"}, status: StatusPending}
+	runner, err := NewRunner(store, ExecutorFunc(func(context.Context, Run, EventSink) error {
+		return agentruntime.ErrAgentApprovalPending
+	}))
+	if err != nil {
+		t.Fatalf("NewRunner() error = %v", err)
+	}
+	worked, err := runner.RunOnce(context.Background())
+	if err != nil || !worked || !store.waitingApproval || store.status != StatusWaitingApproval {
+		t.Fatalf("RunOnce() = (%v, %v), waiting=%v status=%s", worked, err, store.waitingApproval, store.status)
 	}
 }
 

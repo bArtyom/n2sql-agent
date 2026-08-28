@@ -110,6 +110,16 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 		r.resumeParentAfterChild(ctx, run)
 		return true, nil
 	}
+	if errors.Is(err, agentruntime.ErrAgentApprovalPending) {
+		interruptStore, ok := r.store.(ApprovalInterruptStore)
+		if !ok {
+			return true, fmt.Errorf("agent requested durable approval but store cannot park interrupt: %w", err)
+		}
+		if markErr := interruptStore.MarkWaitingApproval(context.WithoutCancel(ctx), run.ID, run.LeaseToken); markErr != nil {
+			return true, fmt.Errorf("mark agent run waiting for approval: %w", markErr)
+		}
+		return true, nil
+	}
 	if errors.Is(err, agentruntime.ErrAgentWaitingChildren) {
 		coordinator, ok := r.store.(ParentRunCoordinator)
 		if !ok {
