@@ -202,6 +202,7 @@ func main() {
 	}
 	metricsRegistry := metrics.New()
 	agentStreamHub := agentstream.NewHub()
+	var agentStreamBridge agentrun.StreamBridge = agentrun.NewHubStreamBridge(agentStreamHub)
 	checkpointFiles, err := agentrun.NewToolResultFileStore(cfg.AgentCheckpointDir, cfg.AgentCheckpointFileTTL)
 	if err != nil {
 		log.Fatal(err)
@@ -228,12 +229,9 @@ func main() {
 		if redisErr != nil {
 			log.Printf("agent stream Redis disabled, falling back to PostgreSQL event replay: %v", redisErr)
 		} else {
-			agentEventStore, err = agentrun.NewEventBridge(durableAgentEventStore, redisEventStore)
-			if err != nil {
-				log.Fatalf("configure agent event bridge: %v", err)
-			}
+			agentStreamBridge = redisEventStore
 			defer redisEventStore.Close()
-			log.Printf("agent stream Redis enabled as transient SSE layer: ttl=%s max_len=%d; PostgreSQL remains the durable event journal", cfg.AgentStreamTTL, cfg.AgentStreamMaxLen)
+			log.Printf("agent stream Redis enabled as the selected transient SSE bridge: ttl=%s max_len=%d; PostgreSQL remains the durable event journal", cfg.AgentStreamTTL, cfg.AgentStreamMaxLen)
 		}
 	}
 	searchService := retrieval.NewHybridServiceWithRerankerAndRewriterAndCache(
@@ -442,7 +440,7 @@ func main() {
 	if skillCatalog.Len() > 0 {
 		slog.Info("agent skills enabled", "directory", skillRoot, "count", skillCatalog.Len())
 	}
-	agentRunExecutor := handler.NewPersistentAgentExecutorWithCheckpoint(agentAnswerService, conversationService, agentStreamHub, metricsRegistry, agentRunStore, agentEventStore, agentRunStore)
+	agentRunExecutor := handler.NewPersistentAgentExecutorWithCheckpointAndStream(agentAnswerService, conversationService, agentStreamHub, agentStreamBridge, metricsRegistry, agentRunStore, agentEventStore, agentRunStore)
 	agentRunRunner, err := agentrun.NewRunnerWithEventSink(agentRunStore, agentRunExecutor, func(run agentrun.Run) func(agent.Event) error {
 		return func(event agent.Event) error {
 			if err := agentEventStore.Append(context.Background(), run, agentstream.Event{
@@ -459,7 +457,18 @@ func main() {
 			}); err != nil {
 				return err
 			}
-			return agentStreamHub.PublishAgent(event)
+			return agentStreamBridge.Publish(context.Background(), run, agentstream.Event{
+				Version:     agentstream.EventSchemaVersion,
+				ID:          event.ID,
+				RunID:       event.RunID,
+				Type:        string(event.Type),
+				ToolCallID:  event.ToolCallID,
+				ExecutionID: event.ExecutionID,
+				TraceID:     event.TraceID,
+				StepNumber:  event.StepNumber,
+				Data:        event.Data,
+				CreatedAt:   event.CreatedAt,
+			})
 		}
 	})
 	if err != nil {
@@ -515,6 +524,7 @@ func main() {
 			AgentAnswers:            agentAnswerService,
 			AgentStreamingAnswers:   agentAnswerService,
 			AgentStreamHub:          agentStreamHub,
+			AgentStreamBridge:       agentStreamBridge,
 			AgentRuns:               agentRunStore,
 			AgentRunReader:          agentRunStore,
 			AgentEventStore:         agentEventStore,

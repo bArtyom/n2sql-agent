@@ -16,6 +16,28 @@ type agentEventStoreStub struct {
 	events []agentstream.Event
 }
 
+type selectedStreamBridgeStub struct {
+	events []agentstream.Event
+}
+
+func (selectedStreamBridgeStub) Publish(context.Context, agentrun.Run, agentstream.Event) error {
+	return nil
+}
+
+func (s selectedStreamBridgeStub) Subscribe(context.Context, string, int64) ([]agentstream.Event, <-chan agentstream.Event, func(), bool, error) {
+	return s.events, closedAgentEvents(), func() {}, true, nil
+}
+
+func (s selectedStreamBridgeStub) SubscribeFrom(context.Context, string, int64, string) ([]agentstream.Event, <-chan agentstream.Event, func(), bool, error) {
+	return s.events, closedAgentEvents(), func() {}, true, nil
+}
+
+func closedAgentEvents() <-chan agentstream.Event {
+	channel := make(chan agentstream.Event)
+	close(channel)
+	return channel
+}
+
 func (s agentEventStoreStub) Append(context.Context, agentrun.Run, agentstream.Event) error {
 	return nil
 }
@@ -40,6 +62,22 @@ func TestAgentRunStreamReplaysPersistedEventsWhenHubIsEmpty(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), "持久化答案") || !strings.Contains(response.Body.String(), "event: run_finished") {
 		t.Fatalf("body = %q, want persisted SSE events", response.Body.String())
+	}
+}
+
+func TestAgentRunStreamUsesSelectedStreamBridge(t *testing.T) {
+	endpoint := handler.NewAgentRunStreamWithBridge(selectedStreamBridgeStub{events: []agentstream.Event{
+		{ID: "bridge-event-1", RunID: "run-bridge", Type: "run_finished", Data: map[string]string{"answer": "bridge"}},
+	}}, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/7/agent-runs/run-bridge/stream", nil)
+	request.SetPathValue("id", "7")
+	request.SetPathValue("runID", "run-bridge")
+	response := httptest.NewRecorder()
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "bridge-event-1") {
+		t.Fatalf("status=%d body=%q, want selected bridge event", response.Code, response.Body.String())
 	}
 }
 
@@ -72,8 +110,22 @@ func (durableGapEventStoreStub) ListAfter(context.Context, string, int64, int64,
 	}, nil
 }
 
+type gapStreamBridgeStub struct{}
+
+func (gapStreamBridgeStub) Publish(context.Context, agentrun.Run, agentstream.Event) error {
+	return nil
+}
+
+func (gapStreamBridgeStub) Subscribe(context.Context, string, int64) ([]agentstream.Event, <-chan agentstream.Event, func(), bool, error) {
+	return nil, nil, func() {}, false, agentstream.ErrEventGap
+}
+
+func (gapStreamBridgeStub) SubscribeFrom(context.Context, string, int64, string) ([]agentstream.Event, <-chan agentstream.Event, func(), bool, error) {
+	return nil, nil, func() {}, false, agentstream.ErrEventGap
+}
+
 func TestAgentRunStreamRecoversRedisGapFromDurableSequence(t *testing.T) {
-	endpoint := handler.NewAgentRunStreamWithStore(agentstream.NewHub(), durableGapEventStoreStub{})
+	endpoint := handler.NewAgentRunStreamWithBridge(gapStreamBridgeStub{}, durableGapEventStoreStub{})
 	request := httptest.NewRequest(http.MethodGet, "/api/knowledge-bases/7/agent-runs/run-1/stream", nil)
 	request.Header.Set("Last-Event-ID", "event-3")
 	request.SetPathValue("id", "7")

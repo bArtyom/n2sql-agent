@@ -48,6 +48,7 @@ type Dependencies struct {
 	AgentAnswers            agentservice.Answerer
 	AgentStreamingAnswers   agentservice.EventAnswerer
 	AgentStreamHub          *agentstream.Hub
+	AgentStreamBridge       agentrun.StreamBridge
 	AgentRuns               agentrun.Store
 	AgentRunReader          agentrun.Reader
 	AgentEventStore         agentrun.EventStore
@@ -213,12 +214,16 @@ func New(dependencies Dependencies) http.Handler {
 		if hub == nil {
 			hub = agentstream.NewHub()
 		}
+		streamBridge := dependencies.AgentStreamBridge
+		if streamBridge == nil {
+			streamBridge = agentrun.NewHubStreamBridge(hub)
+		}
 		if dependencies.AgentRuns != nil && dependencies.AgentRunExecutor != nil {
 			mux.Handle("POST /api/knowledge-bases/{id}/agent-chat/stream", handler.NewPersistentAgentRunSubmission(dependencies.AgentMaxHistoryBytes, dependencies.AgentRuns, dependencies.Conversations, hub))
 		} else {
 			mux.Handle("POST /api/knowledge-bases/{id}/agent-chat/stream", handler.NewKnowledgeBaseAgentChatStreamWithHub(dependencies.AgentStreamingAnswers, dependencies.Conversations, dependencies.AgentMaxHistoryBytes, registry, hub))
 		}
-		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}/stream", handler.NewAgentRunStreamWithStore(hub, dependencies.AgentEventStore))
+		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}/stream", handler.NewAgentRunStreamWithBridge(streamBridge, dependencies.AgentEventStore))
 		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}/attempts", handler.NewAgentRunAttempts(dependencies.AgentRunReader))
 		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}", handler.NewAgentRunStatus(dependencies.AgentRunReader))
 		mux.Handle("GET /api/knowledge-bases/{id}/agent-runs/{runID}/children", handler.NewAgentRunChildren(dependencies.AgentRunReader))

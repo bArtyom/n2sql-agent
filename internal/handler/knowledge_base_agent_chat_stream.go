@@ -252,16 +252,22 @@ func NewKnowledgeBaseAgentChatStreamWithHub(answerer agentservice.EventAnswerer,
 	})
 }
 
-// NewAgentRunStream serves a replay followed by live events from the same
-// in-process Hub. It is intentionally scoped by knowledge base ID so a run ID
-// cannot be used to read another knowledge base's events.
+// NewAgentRunStream serves a replay followed by live events from an in-process
+// Hub. It is retained as a convenience constructor for single-process callers.
 func NewAgentRunStream(hub *agentstream.Hub) http.Handler {
 	return NewAgentRunStreamWithStore(hub, nil)
 }
 
 func NewAgentRunStreamWithStore(hub *agentstream.Hub, eventStore agentrun.EventStore) http.Handler {
-	if hub == nil {
-		hub = agentstream.NewHub()
+	return NewAgentRunStreamWithBridge(agentrun.NewHubStreamBridge(hub), eventStore)
+}
+
+// NewAgentRunStreamWithBridge serves events from the one selected live
+// transport. The durable EventStore is only consulted when that transport
+// cannot replay the requested cursor.
+func NewAgentRunStreamWithBridge(bridge agentrun.StreamBridge, eventStore agentrun.EventStore) http.Handler {
+	if bridge == nil {
+		bridge = agentrun.NewHubStreamBridge(agentstream.NewHub())
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -283,49 +289,15 @@ func NewAgentRunStreamWithStore(hub *agentstream.Hub, eventStore agentrun.EventS
 			return
 		}
 		lastEventID := r.Header.Get("Last-Event-ID")
-		snapshot, live, cancel, done, err := hub.SubscribeFrom(runID, knowledgeBaseID, lastEventID, r.Context().Done())
+		snapshot, live, cancel, done, err := bridge.SubscribeFrom(r.Context(), runID, knowledgeBaseID, lastEventID)
 		if err != nil {
 			if (errors.Is(err, agentstream.ErrRunNotFound) || errors.Is(err, agentstream.ErrEventGap)) && eventStore != nil {
-				if liveStore, ok := eventStore.(agentrun.LiveEventStore); ok {
-					storedSnapshot, storedLive, stop, storedDone, streamErr := liveStore.SubscribeFrom(r.Context(), runID, knowledgeBaseID, lastEventID)
-					if streamErr == nil {
-						defer stop()
-						w.Header().Set("Content-Type", "text/event-stream")
-						w.Header().Set("Cache-Control", "no-cache")
-						w.Header().Set("X-Accel-Buffering", "no")
-						w.WriteHeader(http.StatusOK)
-						for _, event := range storedSnapshot {
-							if err := writeAgentSSEEvent(w, flusher, event.Type, event); err != nil {
-								return
-							}
-						}
-						if storedDone {
-							return
-						}
-						for {
-							select {
-							case <-r.Context().Done():
-								return
-							case event, ok := <-storedLive:
-								if !ok {
-									return
-								}
-								if err := writeAgentSSEEvent(w, flusher, event.Type, event); err != nil {
-									return
-								}
-							}
-						}
-					}
-					// Redis is only the short-lived transport window. If its
-					// cursor has expired, continue below and try the durable
-					// PostgreSQL journal before declaring a real replay gap.
-					if errors.Is(streamErr, agentstream.ErrEventGap) {
-						if recovered, recoverErr := replayAgentEventGap(r, w, flusher, eventStore, liveStore, runID, knowledgeBaseID, lastEventID); recoverErr != nil {
-							http.Error(w, `{"error":"unable to recover agent event gap"}`, http.StatusInternalServerError)
-							return
-						} else if recovered {
-							return
-						}
+				if errors.Is(err, agentstream.ErrEventGap) {
+					if recovered, recoverErr := replayAgentEventGap(r, w, flusher, eventStore, bridge, runID, knowledgeBaseID, lastEventID); recoverErr != nil {
+						http.Error(w, `{"error":"unable to recover agent event gap"}`, http.StatusInternalServerError)
+						return
+					} else if recovered {
+						return
 					}
 				}
 				storedEvents, storeErr := eventStore.List(r.Context(), runID, knowledgeBaseID)
@@ -389,14 +361,14 @@ func NewAgentRunStreamWithStore(hub *agentstream.Hub, eventStore agentrun.EventS
 	})
 }
 
-// replayAgentEventGap bridges a missing Redis cursor with the durable event
+// replayAgentEventGap bridges a missing live cursor with the durable event
 // journal. The browser's Last-Event-ID is first translated to PostgreSQL's
 // monotonic sequence, then only the missing suffix is replayed. If the run is
-// still active, a fresh live subscription is attached after that suffix and
-// duplicate events are filtered by sequence/ID.
-func replayAgentEventGap(r *http.Request, w http.ResponseWriter, flusher http.Flusher, eventStore agentrun.EventStore, liveStore agentrun.LiveEventStore, runID string, knowledgeBaseID int64, lastEventID string) (bool, error) {
+// still active, a fresh subscription to the selected live bridge is attached
+// after that suffix and duplicate events are filtered by sequence/ID.
+func replayAgentEventGap(r *http.Request, w http.ResponseWriter, flusher http.Flusher, eventStore agentrun.EventStore, bridge agentrun.StreamBridge, runID string, knowledgeBaseID int64, lastEventID string) (bool, error) {
 	cursorStore, ok := eventStore.(agentrun.EventCursorStore)
-	if !ok || lastEventID == "" {
+	if !ok || bridge == nil || lastEventID == "" {
 		return false, nil
 	}
 	sequence, err := cursorStore.SequenceByEventID(r.Context(), runID, knowledgeBaseID, lastEventID)
@@ -420,11 +392,11 @@ func replayAgentEventGap(r *http.Request, w http.ResponseWriter, flusher http.Fl
 			return true, err
 		}
 	}
-	if hasTerminalStreamEvent(missing) || liveStore == nil {
+	if hasTerminalStreamEvent(missing) {
 		return true, nil
 	}
 
-	snapshot, live, cancel, done, err := liveStore.Subscribe(r.Context(), runID, knowledgeBaseID)
+	snapshot, live, cancel, done, err := bridge.Subscribe(r.Context(), runID, knowledgeBaseID)
 	if err != nil {
 		return true, nil
 	}

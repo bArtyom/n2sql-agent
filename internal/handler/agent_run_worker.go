@@ -108,8 +108,15 @@ func NewPersistentAgentExecutor(answerer agentservice.EventAnswerer, conversatio
 // checkpoint store into the Agent engine. The same snapshot is used for an
 // interrupted run and for the next turn of a conversation.
 func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswerer, conversations *conversation.Service, hub *agentstream.Hub, registry *metrics.Registry, resultWriter agentrun.ResultWriter, eventStore agentrun.EventStore, checkpointStore agentrun.CheckpointStore) agentrun.Executor {
+	return NewPersistentAgentExecutorWithCheckpointAndStream(answerer, conversations, hub, agentrun.NewHubStreamBridge(hub), registry, resultWriter, eventStore, checkpointStore)
+}
+
+// NewPersistentAgentExecutorWithCheckpointAndStream separates the control
+// Hub (cancel/approval) from the selected event transport. Production wiring
+// supplies either a Hub adapter or Redis, never both for the same event.
+func NewPersistentAgentExecutorWithCheckpointAndStream(answerer agentservice.EventAnswerer, conversations *conversation.Service, hub *agentstream.Hub, stream agentrun.StreamBridge, registry *metrics.Registry, resultWriter agentrun.ResultWriter, eventStore agentrun.EventStore, checkpointStore agentrun.CheckpointStore) agentrun.Executor {
 	return agentrun.ExecutorFunc(func(ctx context.Context, run agentrun.Run, sink agentrun.EventSink) error {
-		if answerer == nil || hub == nil {
+		if answerer == nil || hub == nil || stream == nil {
 			return agentrun.ErrInvalidRun
 		}
 		var snapshot persistedAgentRequest
@@ -227,7 +234,7 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 					return err
 				}
 			}
-			return hub.Publish(event)
+			return stream.Publish(executionContext, run, event)
 		}
 		emit := func(event agent.Event) error {
 			event.Version = agent.EventSchemaVersion
@@ -240,7 +247,23 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 			if request.ChildMode {
 				return nil
 			}
-			return hub.PublishAgent(event)
+			if event.RunID == "" {
+				event.RunID = run.RunID
+			}
+			return stream.Publish(executionContext, run, agentstream.Event{
+				Version:     agentstream.EventSchemaVersion,
+				ID:          event.ID,
+				RunID:       event.RunID,
+				Type:        string(event.Type),
+				Category:    eventCategory(string(event.Type)),
+				TaskID:      event.TaskID,
+				ToolCallID:  event.ToolCallID,
+				ExecutionID: event.ExecutionID,
+				TraceID:     event.TraceID,
+				StepNumber:  event.StepNumber,
+				Data:        event.Data,
+				CreatedAt:   event.CreatedAt,
+			})
 		}
 
 		executionContext = agentruntime.WithApprovalGate(executionContext, func(ctx context.Context, toolName string, arguments json.RawMessage) (bool, error) {

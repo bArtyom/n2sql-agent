@@ -15,19 +15,6 @@ import (
 
 const defaultRedisEventPrefix = "n2sql:agent:events"
 
-// LiveEventStore is the short-lived transport stream used by SSE. Unlike the
-// PostgreSQL EventStore, it can keep a subscriber attached after a process
-// restart or when the request and worker run on different instances.
-type LiveEventStore interface {
-	EventStore
-	Subscribe(context.Context, string, int64) ([]agentstream.Event, <-chan agentstream.Event, func(), bool, error)
-	SubscribeFrom(context.Context, string, int64, string) ([]agentstream.Event, <-chan agentstream.Event, func(), bool, error)
-}
-
-type LiveEventCleaner interface {
-	Delete(context.Context, string, int64) error
-}
-
 // RedisEventStore keeps a bounded, expiring copy of Agent transport events.
 // The final answer and run state remain in PostgreSQL; Redis is only a replay
 // window for the live conversation.
@@ -97,27 +84,6 @@ func (s *RedisEventStore) Append(ctx context.Context, run Run, event agentstream
 	pipe.Expire(ctx, key, s.ttl)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("append agent stream event: %w", err)
-	}
-	return nil
-}
-
-func (s *RedisEventStore) List(ctx context.Context, runID string, knowledgeBaseID int64) ([]agentstream.Event, error) {
-	if s == nil || s.client == nil || runID == "" || knowledgeBaseID <= 0 {
-		return nil, ErrInvalidRun
-	}
-	entries, err := s.client.XRange(ctx, s.key(runID, knowledgeBaseID), "-", "+").Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		return nil, fmt.Errorf("list agent stream events: %w", err)
-	}
-	return decodeRedisEvents(entries, runID), nil
-}
-
-func (s *RedisEventStore) Delete(ctx context.Context, runID string, knowledgeBaseID int64) error {
-	if s == nil || s.client == nil || runID == "" || knowledgeBaseID <= 0 {
-		return ErrInvalidRun
-	}
-	if err := s.client.Del(ctx, s.key(runID, knowledgeBaseID)).Err(); err != nil {
-		return fmt.Errorf("delete agent stream events: %w", err)
 	}
 	return nil
 }
@@ -264,5 +230,4 @@ func closedEventChannel() <-chan agentstream.Event {
 	return channel
 }
 
-var _ LiveEventStore = (*RedisEventStore)(nil)
 var _ StreamBridge = (*RedisEventStore)(nil)
