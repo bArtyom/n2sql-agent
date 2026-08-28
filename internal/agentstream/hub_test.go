@@ -1,6 +1,7 @@
 package agentstream_test
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -134,8 +135,13 @@ func TestHubSubscribeFromReturnsGapForExpiredCursor(t *testing.T) {
 	if err := hub.Publish(agentstream.Event{ID: "event-2", RunID: "run-1", Type: "message_delta"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, _, err := hub.SubscribeFrom("run-1", 7, "event-1", nil); err != agentstream.ErrEventGap {
+	if _, _, _, _, err := hub.SubscribeFrom("run-1", 7, "event-1", nil); !errors.Is(err, agentstream.ErrEventGap) {
 		t.Fatalf("cursor error = %v, want ErrEventGap", err)
+	} else {
+		var gap *agentstream.EventGap
+		if !errors.As(err, &gap) || gap.RequestedID != "event-1" || gap.EarliestID != "event-2" || gap.LatestID != "event-2" {
+			t.Fatalf("cursor gap = %#v, want requested=event-1 earliest=event-2 latest=event-2", gap)
+		}
 	}
 }
 

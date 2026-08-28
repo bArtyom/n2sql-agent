@@ -33,10 +33,11 @@ const (
 )
 
 var (
-	ErrNoRun       = errors.New("no pending agent run")
-	ErrRunNotFound = errors.New("agent run not found")
-	ErrInvalidRun  = errors.New("invalid agent run")
-	ErrLeaseLost   = errors.New("agent run lease lost")
+	ErrNoRun              = errors.New("no pending agent run")
+	ErrRunNotFound        = errors.New("agent run not found")
+	ErrInvalidRun         = errors.New("invalid agent run")
+	ErrLeaseLost          = errors.New("agent run lease lost")
+	ErrCheckpointConflict = errors.New("agent checkpoint ownership or version conflict")
 )
 
 const defaultLeaseDuration = 5 * time.Minute
@@ -218,14 +219,16 @@ type ResultWriter interface {
 // This mirrors DeerFlow/LangGraph: one checkpointer owns resumable state, while
 // run metadata and the event journal remain separate concerns.
 type Checkpoint struct {
-	ID             int64
-	AgentRunID     int64
-	ConversationID int64
-	AttemptCount   int
-	StepNumber     int
-	CheckpointID   string
-	State          json.RawMessage
-	CreatedAt      time.Time
+	ID              int64
+	AgentRunID      int64
+	ConversationID  int64
+	AttemptCount    int
+	StepNumber      int
+	CheckpointID    string
+	State           json.RawMessage
+	CreatedAt       time.Time
+	LeaseToken      string `json:"-"`
+	ExpectedVersion int    `json:"-"`
 }
 
 type CheckpointStore interface {
@@ -697,14 +700,48 @@ type persistedCheckpointState struct {
 
 func (s *PostgresStore) SaveCheckpoint(ctx context.Context, checkpoint Checkpoint) error {
 	if checkpoint.AgentRunID <= 0 || checkpoint.AttemptCount <= 0 || checkpoint.StepNumber < 0 ||
-		strings.TrimSpace(checkpoint.CheckpointID) == "" || len(checkpoint.State) == 0 || !json.Valid(checkpoint.State) {
+		strings.TrimSpace(checkpoint.CheckpointID) == "" || strings.TrimSpace(checkpoint.LeaseToken) == "" || len(checkpoint.State) == 0 || !json.Valid(checkpoint.State) {
 		return ErrInvalidRun
 	}
 	state, err := s.externalizeCheckpointState(ctx, checkpoint)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `
+	var persisted persistedCheckpointState
+	if err := json.Unmarshal(state, &persisted); err != nil || persisted.Version <= 0 {
+		return ErrInvalidRun
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin agent checkpoint: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var leaseToken string
+	var status Status
+	if err := tx.QueryRowContext(ctx, `
+		SELECT lease_token, status
+		FROM agent_runs
+		WHERE id = $1
+		FOR UPDATE`, checkpoint.AgentRunID).Scan(&leaseToken, &status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrRunNotFound
+		}
+		return fmt.Errorf("lock agent run for checkpoint: %w", err)
+	}
+	if leaseToken != checkpoint.LeaseToken || status != StatusRunning {
+		return ErrCheckpointConflict
+	}
+	var currentVersion int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX((state->>'version')::integer), 0)
+		FROM agent_checkpoints
+		WHERE agent_run_id = $1`, checkpoint.AgentRunID).Scan(&currentVersion); err != nil {
+		return fmt.Errorf("read agent checkpoint version: %w", err)
+	}
+	if checkpoint.ExpectedVersion != currentVersion || persisted.Version <= currentVersion {
+		return ErrCheckpointConflict
+	}
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO agent_checkpoints
 			(agent_run_id, conversation_id, attempt_count, step_number, checkpoint_id, state)
 		VALUES ($1, NULLIF($2, 0), $3, $4, $5, $6)
@@ -716,6 +753,9 @@ func (s *PostgresStore) SaveCheckpoint(ctx context.Context, checkpoint Checkpoin
 		checkpoint.StepNumber, checkpoint.CheckpointID, state)
 	if err != nil {
 		return fmt.Errorf("save agent checkpoint: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit agent checkpoint: %w", err)
 	}
 	return nil
 }

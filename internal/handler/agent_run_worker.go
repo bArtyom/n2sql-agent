@@ -130,6 +130,7 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 			}
 		}
 		if checkpointStore != nil {
+			checkpointVersion := 0
 			if run.Checkpoint != nil {
 				var state agentruntime.CheckpointState
 				if err := json.Unmarshal(run.Checkpoint.State, &state); err != nil {
@@ -137,6 +138,7 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 				} else {
 					request.Checkpoint = &state
 					request.ResumeCurrentRun = true
+					checkpointVersion = state.Version
 				}
 			} else if run.RunKind == agentrun.KindRoot && run.ConversationID > 0 {
 				checkpoint, checkpointErr := checkpointStore.GetLatestThreadCheckpoint(ctx, run.ConversationID)
@@ -153,17 +155,26 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 			}
 			checkpointSequence := 0
 			request.CheckpointSink = func(ctx context.Context, state agentruntime.CheckpointState) error {
+				checkpointSequence++
+				expectedVersion := checkpointVersion
+				if state.Version <= expectedVersion {
+					state.Version = expectedVersion + 1
+				}
 				payload, err := json.Marshal(state)
 				if err != nil {
 					return fmt.Errorf("encode agent checkpoint state: %w", err)
 				}
-				checkpointSequence++
-				return checkpointStore.SaveCheckpoint(ctx, agentrun.Checkpoint{
+				if err := checkpointStore.SaveCheckpoint(ctx, agentrun.Checkpoint{
 					AgentRunID: run.ID, ConversationID: run.ConversationID,
 					AttemptCount: run.AttemptCount, StepNumber: state.LastStep,
-					CheckpointID: fmt.Sprintf("%s-attempt-%d-%d", run.RunID, run.AttemptCount, checkpointSequence),
-					State:        payload,
-				})
+					CheckpointID: fmt.Sprintf("%s-unified", run.RunID),
+					LeaseToken:   run.LeaseToken, ExpectedVersion: expectedVersion,
+					State: payload,
+				}); err != nil {
+					return err
+				}
+				checkpointVersion = state.Version
+				return nil
 			}
 		}
 

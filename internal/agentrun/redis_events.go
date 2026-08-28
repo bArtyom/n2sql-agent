@@ -145,7 +145,7 @@ func (s *RedisEventStore) SubscribeFrom(ctx context.Context, runID string, knowl
 			}
 		}
 		if cursorIndex < 0 {
-			return nil, nil, nil, false, agentstream.ErrEventGap
+			return nil, nil, nil, false, agentstream.NewEventGap(afterEventID, snapshot)
 		}
 		lastID = entries[cursorIndex].ID
 	} else if len(entries) > 0 {

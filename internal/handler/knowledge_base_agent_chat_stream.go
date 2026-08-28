@@ -334,7 +334,7 @@ func NewAgentRunStreamWithStore(hub *agentstream.Hub, eventStore agentrun.EventS
 						var gap bool
 						storedEvents, gap = eventsAfterCursor(storedEvents, lastEventID)
 						if gap {
-							_ = writeAgentStreamGap(w, flusher, runID, lastEventID)
+							_ = writeAgentStreamGap(w, flusher, runID, lastEventID, nil)
 							return
 						}
 					}
@@ -350,7 +350,7 @@ func NewAgentRunStreamWithStore(hub *agentstream.Hub, eventStore agentrun.EventS
 				}
 			}
 			if errors.Is(err, agentstream.ErrEventGap) {
-				_ = writeAgentStreamGap(w, flusher, runID, lastEventID)
+				_ = writeAgentStreamGap(w, flusher, runID, lastEventID, err)
 				return
 			}
 			if errors.Is(err, agentstream.ErrRunNotFound) {
@@ -545,15 +545,23 @@ func eventsAfterCursor(events []agentstream.Event, cursor string) ([]agentstream
 	return nil, true
 }
 
-func writeAgentStreamGap(w http.ResponseWriter, flusher http.Flusher, runID, requestedEventID string) error {
+func writeAgentStreamGap(w http.ResponseWriter, flusher http.Flusher, runID, requestedEventID string, gapErrors ...error) error {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
-	return writeSSEMessage(w, flusher, "gap", map[string]any{
+	data := map[string]any{
 		"code":               "stream_replay_gap",
 		"run_id":             runID,
 		"requested_event_id": requestedEventID,
 		"recovery":           "reload_durable_state",
-	})
+	}
+	if len(gapErrors) > 0 && gapErrors[0] != nil {
+		var gap *agentstream.EventGap
+		if errors.As(gapErrors[0], &gap) {
+			data["earliest_event_id"] = gap.EarliestID
+			data["latest_event_id"] = gap.LatestID
+		}
+	}
+	return writeSSEMessage(w, flusher, "gap", data)
 }

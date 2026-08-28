@@ -22,6 +22,19 @@ var (
 	ErrApprovalAlreadyPending = errors.New("agent approval already pending")
 )
 
+// EventGap explains why a Last-Event-ID cannot be replayed from the bounded
+// live window. Callers can use errors.Is(err, ErrEventGap) and errors.As to
+// inspect the retained cursor bounds before deciding on durable recovery.
+type EventGap struct {
+	RequestedID string `json:"requested_event_id"`
+	EarliestID  string `json:"earliest_event_id,omitempty"`
+	LatestID    string `json:"latest_event_id,omitempty"`
+}
+
+func (e *EventGap) Error() string { return ErrEventGap.Error() }
+
+func (e *EventGap) Unwrap() error { return ErrEventGap }
+
 const (
 	EventSchemaVersion     = 1
 	defaultMaxRuns         = 128
@@ -327,7 +340,7 @@ func (h *Hub) SubscribeFrom(runID string, knowledgeBaseID int64, afterEventID st
 			}
 		}
 		if cursorIndex < 0 {
-			return nil, nil, nil, false, ErrEventGap
+			return nil, nil, nil, false, NewEventGap(afterEventID, snapshot)
 		}
 		snapshot = snapshot[cursorIndex+1:]
 	}
@@ -354,6 +367,15 @@ func (h *Hub) SubscribeFrom(runID string, knowledgeBaseID int64, afterEventID st
 		}()
 	}
 	return snapshot, live, cancel, false, nil
+}
+
+func NewEventGap(requestedID string, events []Event) error {
+	gap := &EventGap{RequestedID: requestedID}
+	if len(events) > 0 {
+		gap.EarliestID = events[0].ID
+		gap.LatestID = events[len(events)-1].ID
+	}
+	return gap
 }
 
 func validEventType(eventType string) bool {
