@@ -17,6 +17,7 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
+	"github.com/bArtyom/n2sql-agent/internal/ops"
 )
 
 // persistedAgentRequest is the request snapshot stored in agent_runs. Headers
@@ -26,6 +27,8 @@ type persistedAgentRequest struct {
 	Request        agentservice.ChatRequest `json:"request"`
 	IdempotencyKey string                   `json:"idempotency_key,omitempty"`
 	RequestHash    string                   `json:"request_hash,omitempty"`
+	ToolCallID     string                   `json:"tool_call_id,omitempty"`
+	TraceID        string                   `json:"trace_id,omitempty"`
 }
 
 // NewPersistentAgentRunSubmission accepts a chat request, stores a durable
@@ -117,11 +120,60 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 		request := snapshot.Request
 		request.RunID = run.RunID
 		request.ParentRunDatabaseID = run.ID
+		request.ToolCallID = snapshot.ToolCallID
+		request.TraceID = snapshot.TraceID
+		request.ExecutionID = run.ExecutionID
+		if request.TraceID == "" {
+			if request.ParentRunPublicID != "" {
+				request.TraceID = request.ParentRunPublicID
+			} else {
+				request.TraceID = run.RunID
+			}
+		}
 		request.RecoveryCheckpoints = run.Checkpoints
+		var contextStore agentrun.ContextCheckpointStore
+		if candidate, ok := checkpointStore.(agentrun.ContextCheckpointStore); ok {
+			contextStore = candidate
+		}
+		if run.Context != nil && len(run.Context.Messages) > 0 {
+			var messages []modelclient.ChatMessage
+			if err := json.Unmarshal(run.Context.Messages, &messages); err != nil {
+				slog.WarnContext(ctx, "agent_context_checkpoint_decode_failed", "run_id", run.RunID, "error", err)
+			} else {
+				request.RecoveryContext = &agentruntime.ContextState{
+					Version: run.Context.Version, LastStep: run.Context.LastStep,
+					Messages: messages, SummaryText: run.Context.SummaryText,
+				}
+			}
+		}
+		var threadStore agentrun.ThreadContextStore
+		if candidate, ok := checkpointStore.(agentrun.ThreadContextStore); ok {
+			threadStore = candidate
+		}
+		// A run-level recovery context always wins: it represents the exact
+		// interrupted turn. Only a fresh run loads the last completed thread
+		// state, which keeps a failed partial turn from contaminating the next
+		// visible conversation turn.
+		if request.RecoveryContext == nil && threadStore != nil && run.ConversationID > 0 {
+			threadContext, threadErr := threadStore.GetThreadContext(ctx, run.ConversationID)
+			if threadErr != nil {
+				slog.WarnContext(ctx, "agent_thread_context_load_failed", "run_id", run.RunID, "conversation_id", run.ConversationID, "error", threadErr)
+			} else if threadContext != nil {
+				var messages []modelclient.ChatMessage
+				if err := json.Unmarshal(threadContext.Messages, &messages); err != nil {
+					slog.WarnContext(ctx, "agent_thread_context_decode_failed", "run_id", run.RunID, "conversation_id", run.ConversationID, "error", err)
+				} else {
+					request.ThreadContext = &agentruntime.ContextState{
+						Version: threadContext.Version, LastStep: threadContext.LastStep,
+						Messages: messages, SummaryText: threadContext.SummaryText,
+					}
+				}
+			}
+		}
 		if decisionStore, ok := checkpointStore.(agentrun.DecisionCheckpointStore); ok {
 			if decision, decisionErr := decisionStore.GetLatestDecisionCheckpoint(ctx, run.ID); decisionErr != nil {
 				slog.WarnContext(ctx, "agent_decision_checkpoint_load_failed", "run_id", run.RunID, "error", decisionErr)
-			} else if decision != nil {
+			} else if decision != nil && (request.RecoveryContext == nil || decision.StepNumber > request.RecoveryContext.LastStep) {
 				var toolCalls []modelclient.ToolCall
 				if err := json.Unmarshal(decision.ToolCalls, &toolCalls); err == nil {
 					request.RecoveryDecision = &agentruntime.ResumeDecision{DecisionID: decision.DecisionID, StepNumber: decision.StepNumber, ToolCalls: toolCalls}
@@ -152,9 +204,38 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 					})
 				}
 			}
+			if contextStore != nil {
+				request.ContextSink = func(ctx context.Context, state agentruntime.ContextState) error {
+					messages, err := json.Marshal(state.Messages)
+					if err != nil {
+						return fmt.Errorf("encode agent context checkpoint: %w", err)
+					}
+					return contextStore.SaveContextCheckpoint(ctx, agentrun.ContextCheckpoint{
+						AgentRunID: run.ID, AttemptCount: run.AttemptCount, Version: state.Version,
+						LastStep: state.LastStep, Messages: messages, SummaryText: state.SummaryText,
+					})
+				}
+			}
+			if threadStore != nil && !request.ChildMode && run.ConversationID > 0 {
+				request.FinalContextSink = func(ctx context.Context, state agentruntime.ContextState) error {
+					messages, err := json.Marshal(state.Messages)
+					if err != nil {
+						return fmt.Errorf("encode agent thread context: %w", err)
+					}
+					return threadStore.SaveThreadContext(ctx, agentrun.ThreadContext{
+						ConversationID: run.ConversationID,
+						Version:        state.Version,
+						LastStep:       state.LastStep,
+						LastRunID:      run.RunID,
+						Messages:       messages,
+						SummaryText:    state.SummaryText,
+					})
+				}
+			}
 		}
 
 		executionContext, stopRun := context.WithCancel(ctx)
+		executionContext = ops.WithTraceID(executionContext, request.TraceID)
 		defer stopRun()
 		keepStreamOpen := false
 		if request.ChildMode {
@@ -183,11 +264,14 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 				eventRunID = request.ParentRunPublicID
 			}
 			event := agentstream.Event{
-				ID:        fmt.Sprintf("%s-transport-%d", eventIDPrefix, transportEventNumber),
-				RunID:     eventRunID,
-				Type:      eventType,
-				Data:      value,
-				CreatedAt: time.Now().UTC(),
+				ID:          fmt.Sprintf("%s-transport-%d", eventIDPrefix, transportEventNumber),
+				RunID:       eventRunID,
+				Type:        eventType,
+				ToolCallID:  request.ToolCallID,
+				ExecutionID: request.ExecutionID,
+				TraceID:     request.TraceID,
+				Data:        value,
+				CreatedAt:   time.Now().UTC(),
 			}
 			if eventStore != nil {
 				if err := eventStore.Append(executionContext, run, event); err != nil {
@@ -283,6 +367,7 @@ func NewPersistentAgentExecutorWithCheckpoint(answerer agentservice.EventAnswere
 			return err
 		}
 		if resultWriter != nil {
+			response.ExecutionID = run.ExecutionID
 			data, marshalErr := json.Marshal(response)
 			if marshalErr != nil {
 				return fmt.Errorf("encode agent response: %w", marshalErr)
@@ -333,7 +418,10 @@ func wrapChildAgentEvent(run agentrun.Run, request agentservice.ChatRequest, eve
 		"child_run_id":     run.RunID,
 		"parent_run_id":    parentRunID,
 		"child_event_type": string(event.Type),
+		"phase":            "progress",
 		"child_step":       event.StepNumber,
+		"execution_id":     run.ExecutionID,
+		"trace_id":         request.TraceID,
 	}
 	if values, ok := event.Data.(map[string]any); ok {
 		for _, key := range []string{"tool_name", "result_summary", "failed"} {
@@ -343,12 +431,15 @@ func wrapChildAgentEvent(run agentrun.Run, request agentservice.ChatRequest, eve
 		}
 	}
 	return agent.Event{
-		Version:    agent.EventSchemaVersion,
-		ID:         fmt.Sprintf("%s-child-%s", parentRunID, event.ID),
-		RunID:      parentRunID,
-		Type:       agent.EventChildEvent,
-		StepNumber: event.StepNumber,
-		Data:       data,
-		CreatedAt:  event.CreatedAt,
+		Version:     agent.EventSchemaVersion,
+		ID:          fmt.Sprintf("%s-child-%s", parentRunID, event.ID),
+		RunID:       parentRunID,
+		Type:        agent.EventChildEvent,
+		ToolCallID:  request.ToolCallID,
+		ExecutionID: run.ExecutionID,
+		TraceID:     request.TraceID,
+		StepNumber:  event.StepNumber,
+		Data:        data,
+		CreatedAt:   event.CreatedAt,
 	}
 }

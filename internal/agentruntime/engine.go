@@ -14,29 +14,34 @@ import (
 	"github.com/bArtyom/n2sql-agent/internal/agent"
 	"github.com/bArtyom/n2sql-agent/internal/modelclient"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
+	"github.com/bArtyom/n2sql-agent/internal/ops"
 	"github.com/bArtyom/n2sql-agent/internal/retrieval"
+	"github.com/bArtyom/n2sql-agent/internal/retry"
 	"github.com/bArtyom/n2sql-agent/internal/security"
+	"github.com/bArtyom/n2sql-agent/internal/tcc"
 	"github.com/bArtyom/n2sql-agent/internal/usage"
 )
 
 var (
-	ErrInvalidEngine        = errors.New("invalid agent engine")
-	ErrInvalidContext       = errors.New("agent context is required")
-	ErrInvalidMessages      = errors.New("agent messages are required")
-	ErrInvalidMaxSteps      = errors.New("agent max steps must be positive")
-	ErrMaxStepsExceeded     = errors.New("agent max steps exceeded")
-	ErrEmptyFinalAnswer     = errors.New("agent final answer is empty")
-	ErrInvalidToolCall      = errors.New("invalid agent tool call")
-	ErrInvalidToolResult    = errors.New("invalid agent tool result")
-	ErrAgentWaitingChildren = errors.New("agent is waiting for child runs")
-	ErrRepeatedToolCall     = errors.New("repeated identical agent tool call")
-	ErrInvalidToolTimeout   = errors.New("agent tool timeout must not be negative")
-	ErrInvalidParallelLimit = errors.New("agent parallel tool limit must be positive")
+	ErrInvalidEngine         = errors.New("invalid agent engine")
+	ErrInvalidContext        = errors.New("agent context is required")
+	ErrInvalidMessages       = errors.New("agent messages are required")
+	ErrInvalidMaxSteps       = errors.New("agent max steps must be positive")
+	ErrMaxStepsExceeded      = errors.New("agent max steps exceeded")
+	ErrEmptyFinalAnswer      = errors.New("agent final answer is empty")
+	ErrInvalidToolCall       = errors.New("invalid agent tool call")
+	ErrInvalidToolResult     = errors.New("invalid agent tool result")
+	ErrAgentWaitingChildren  = errors.New("agent is waiting for child runs")
+	ErrRepeatedToolCall      = errors.New("repeated identical agent tool call")
+	ErrInvalidToolTimeout    = errors.New("agent tool timeout must not be negative")
+	ErrInvalidParallelLimit  = errors.New("agent parallel tool limit must be positive")
+	ErrTCCRequiresDurableRun = errors.New("tcc tool requires a durable agent run")
 )
 
 const (
 	maxModelCallRetries      = 2
-	modelRetryDelay          = 50 * time.Millisecond
+	modelRetryBaseDelay      = 100 * time.Millisecond
+	modelRetryMaxDelay       = 2 * time.Second
 	defaultToolTimeout       = 30 * time.Second
 	defaultParallelToolLimit = 4
 )
@@ -67,13 +72,24 @@ type Engine struct {
 	parallelToolLimit       int
 	resumeCheckpoints       []ResumeCheckpoint
 	resumeDecision          *ResumeDecision
+	resumeContext           *ContextState
 	checkpointSink          ToolCheckpointSink
 	decisionSink            DecisionCheckpointSink
+	contextSink             ContextCheckpointSink
+	finalContextSink        ContextCheckpointSink
+	tccCoordinator          *tcc.Coordinator
+	tccAgentRunID           int64
+	executionID             string
+	traceID                 string
 }
 
 // EngineOptions controls bounded loop behavior without changing the default
 // refusal semantics used by the regular Agent endpoint.
 type EngineOptions struct {
+	// ExecutionID identifies one concrete Worker execution attempt. TraceID is
+	// stable across the parent/child Agent tree.
+	ExecutionID string
+	TraceID     string
 	// ContinueAfterNoRelevant lets a caller such as a research Agent ask the
 	// model for another query after a search returns no relevant evidence.
 	ContinueAfterNoRelevant bool
@@ -97,8 +113,15 @@ type EngineOptions struct {
 	// matches the new model call exactly.
 	ResumeCheckpoints []ResumeCheckpoint
 	ResumeDecision    *ResumeDecision
+	ResumeContext     *ContextState
 	CheckpointSink    ToolCheckpointSink
 	DecisionSink      DecisionCheckpointSink
+	ContextSink       ContextCheckpointSink
+	// FinalContextSink receives the compacted thread state after a successful
+	// answer. Unlike ContextSink, it is not a per-run recovery snapshot.
+	FinalContextSink ContextCheckpointSink
+	TCCCoordinator   *tcc.Coordinator
+	TCCAgentRunID    int64
 }
 
 type ResumeCheckpoint struct {
@@ -138,9 +161,41 @@ type DecisionCheckpoint struct {
 
 type DecisionCheckpointSink func(context.Context, DecisionCheckpoint) error
 
+// TCCTool marks an approved side-effecting tool whose operation is split into
+// Try, Confirm, and Cancel participants. The returned operation IDs must be
+// stable for the same logical request because Workers may retry the call.
+type TCCTool interface {
+	TCCParticipants(context.Context, json.RawMessage) ([]tcc.ParticipantSpec, error)
+}
+
 // ApprovalGate is called immediately before a tool is executed. Returning
 // false rejects the tool call; returning an error aborts the run.
 type ApprovalGate func(context.Context, string, json.RawMessage) (bool, error)
+
+// ExecutionIdentity correlates a provider tool call, one concrete execution
+// attempt, and the complete parent/child trace.
+type ExecutionIdentity struct {
+	ToolCallID  string
+	ExecutionID string
+	TraceID     string
+}
+
+type executionIdentityContextKey struct{}
+
+func WithExecutionIdentity(ctx context.Context, identity ExecutionIdentity) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, executionIdentityContextKey{}, identity)
+}
+
+func ExecutionIdentityFromContext(ctx context.Context) ExecutionIdentity {
+	if ctx == nil {
+		return ExecutionIdentity{}
+	}
+	identity, _ := ctx.Value(executionIdentityContextKey{}).(ExecutionIdentity)
+	return identity
+}
 
 type approvalGateContextKey struct{}
 
@@ -164,9 +219,10 @@ func approvalGateFromContext(ctx context.Context) ApprovalGate {
 type EventSink func(agent.Event) error
 
 type eventEmitter struct {
-	runID  string
-	sink   EventSink
-	nextID int
+	runID    string
+	sink     EventSink
+	identity ExecutionIdentity
+	nextID   int
 }
 
 type Result struct {
@@ -211,8 +267,15 @@ func NewEngineWithOptions(chat modelruntime.ToolChatRunner, registry *agent.Tool
 		parallelToolLimit:       parallelToolLimit,
 		resumeCheckpoints:       options.ResumeCheckpoints,
 		resumeDecision:          options.ResumeDecision,
+		resumeContext:           options.ResumeContext,
 		checkpointSink:          options.CheckpointSink,
 		decisionSink:            options.DecisionSink,
+		contextSink:             options.ContextSink,
+		finalContextSink:        options.FinalContextSink,
+		tccCoordinator:          options.TCCCoordinator,
+		tccAgentRunID:           options.TCCAgentRunID,
+		executionID:             options.ExecutionID,
+		traceID:                 options.TraceID,
 	}, nil
 }
 
@@ -253,7 +316,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 	ctx = usage.WithRetrievalObserver(ctx, run)
 
 	result := Result{Run: run}
-	emitter := newEventEmitter(runID, sink)
+	emitter := newEventEmitter(runID, sink, ExecutionIdentity{ExecutionID: e.executionID, TraceID: e.traceID})
 	seenToolCalls := make(map[string]struct{})
 	loopWarnings := make(map[string]struct{})
 	var resumedDecision *modelclient.ChatResponse
@@ -266,11 +329,18 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 		return finishError(result, err)
 	}
 	conversation := append([]modelclient.ChatMessage(nil), messages...)
+	restoredContext := e.resumeContext != nil && len(e.resumeContext.Messages) > 0
+	if restoredContext {
+		contextState := restoreContextState(*e.resumeContext)
+		conversation = append([]modelclient.ChatMessage(nil), contextState.Messages...)
+	}
 	resumedMessages, resumedCheckpoints, resumeErr := e.resumeConversation(run)
 	if resumeErr != nil {
 		return finishErrorWithEvents(result, resumeErr, emitter)
 	}
-	conversation = append(conversation, resumedMessages...)
+	if !restoredContext {
+		conversation = append(conversation, resumedMessages...)
+	}
 	for _, checkpoint := range resumedCheckpoints {
 		if e.resumeDecision != nil && checkpoint.DecisionID == e.resumeDecision.DecisionID {
 			continue
@@ -292,7 +362,14 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 		if err := ctx.Err(); err != nil {
 			return finishErrorWithEvents(result, err, emitter)
 		}
-		conversation = compactConversationWithSummarizer(ctx, conversation, maxAgentConversationBytes, e.contextSummarizer)
+		contextState := compactContextState(ctx, ContextState{
+			Version:     1,
+			LastStep:    len(run.Steps()),
+			Messages:    conversation,
+			SummaryText: summaryTextFromMessages(conversation),
+		}, maxAgentConversationBytes, e.contextSummarizer)
+		conversation = contextState.Messages
+		e.saveContext(ctx, contextState)
 
 		var response modelclient.ChatResponse
 		usedResumedDecision := resumedDecision != nil
@@ -333,6 +410,8 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			if err := run.AddStep(agent.Step{Kind: agent.StepFinalAnswer, Status: agent.StepSucceeded}); err != nil {
 				return finishErrorWithEvents(result, err, emitter)
 			}
+			conversation = append(conversation, modelclient.ChatMessage{Role: "assistant", Content: safeMessage})
+			e.saveFinalContext(ctx, conversation, len(run.Steps()))
 			if err := emitter.emit(agent.EventMessageDelta, len(run.Steps()), map[string]any{
 				"content": safeMessage,
 			}); err != nil {
@@ -414,7 +493,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				}); err != nil {
 					return finishError(result, err)
 				}
-				return completeWithAnswer(result, emitter, "已检测到模型持续重复调用相同工具和参数，本轮已安全停止，避免无限循环。")
+				return e.completeWithAnswer(ctx, result, emitter, conversation, "已检测到模型持续重复调用相同工具和参数，本轮已安全停止，避免无限循环。")
 			}
 			seenToolCalls[callKey] = struct{}{}
 
@@ -464,7 +543,12 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 				toolResult = parallelResults[callIndex].result
 				err = parallelResults[callIndex].err
 			} else if !resumed {
-				toolResult, err = e.callTool(ctx, tool, arguments)
+				identityContext := WithExecutionIdentity(ctx, ExecutionIdentity{ToolCallID: toolCall.ID, ExecutionID: e.executionID, TraceID: e.traceID})
+				if tccTool, ok := tool.(TCCTool); ok {
+					toolResult, err = e.callTCC(identityContext, runID, len(run.Steps())+1, toolCall.Function.Name, arguments, tccTool)
+				} else {
+					toolResult, err = e.callTool(identityContext, tool, arguments)
+				}
 			}
 			if err != nil {
 				toolTimedOut := errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil
@@ -527,7 +611,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			if sources, ok := toolResult.Metadata["sources"]; ok {
 				toolFinishedData["sources"] = sources
 			}
-			for _, key := range []string{"child_run_id", "child_status", "child_steps", "child_events", "resume_available", "partial_result", "stop_reason"} {
+			for _, key := range []string{"child_run_id", "child_status", "child_steps", "child_events", "resume_available", "partial_result", "stop_reason", "execution_id", "trace_id", "tcc_transaction_id", "tcc_operation_ids", "tcc_state"} {
 				if value, ok := toolResult.Metadata[key]; ok {
 					toolFinishedData[key] = value
 				}
@@ -605,7 +689,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			// not send the placeholder back to the model: doing so can cause the
 			// model to call the same tool repeatedly while the task is running.
 			if pending, _ := toolResult.Metadata["pending"].(bool); pending {
-				return completeWithAnswer(result, emitter, toolResult.Content)
+				return e.completeWithAnswer(ctx, result, emitter, conversation, toolResult.Content)
 			}
 			if waiting, _ := toolResult.Metadata["waiting_children"].(bool); waiting {
 				return result, ErrAgentWaitingChildren
@@ -621,8 +705,10 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			})
 		}
 		if fallbackAnswer != "" && !hasRelevantToolResult && !e.continueAfterNoRelevant {
-			return completeWithAnswer(result, emitter, fallbackAnswer)
+			e.saveContext(ctx, ContextState{Version: 1, LastStep: len(run.Steps()), Messages: conversation, SummaryText: summaryTextFromMessages(conversation)})
+			return e.completeWithAnswer(ctx, result, emitter, conversation, fallbackAnswer)
 		}
+		e.saveContext(ctx, ContextState{Version: 1, LastStep: len(run.Steps()), Messages: conversation, SummaryText: summaryTextFromMessages(conversation)})
 	}
 
 	return finishErrorWithCategory(result, ErrMaxStepsExceeded, agent.FailureStepLimit, emitter)
@@ -698,7 +784,7 @@ func (e *Engine) precomputeReadOnlyToolCalls(ctx context.Context, calls []modelc
 			defer waitGroup.Done()
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
-			results[index].result, results[index].err = e.callTool(ctx, prepared[index].tool, prepared[index].args)
+			results[index].result, results[index].err = e.callTool(WithExecutionIdentity(ctx, ExecutionIdentity{ToolCallID: calls[index].ID, ExecutionID: e.executionID, TraceID: e.traceID}), prepared[index].tool, prepared[index].args)
 		}(index)
 	}
 	waitGroup.Wait()
@@ -714,6 +800,38 @@ func (e *Engine) callTool(ctx context.Context, tool agent.Tool, args json.RawMes
 	return tool.Call(toolContext, args)
 }
 
+func (e *Engine) callTCC(ctx context.Context, runID string, step int, toolName string, args json.RawMessage, tool TCCTool) (agent.ToolResult, error) {
+	if e.tccCoordinator == nil || e.tccAgentRunID <= 0 {
+		return agent.ToolResult{}, ErrTCCRequiresDurableRun
+	}
+	specs, err := tool.TCCParticipants(ctx, args)
+	if err != nil {
+		return agent.ToolResult{}, fmt.Errorf("build tcc participants: %w", err)
+	}
+	transactionID := fmt.Sprintf("%s:tcc:%d:%s", runID, step, toolArgumentsHash(toolName, args)[:16])
+	result, err := e.tccCoordinator.Execute(ctx, tcc.TransactionRequest{
+		TransactionID: transactionID,
+		AgentRunID:    e.tccAgentRunID,
+		ToolName:      toolName,
+		Arguments:     args,
+	}, specs)
+	if err != nil {
+		return agent.ToolResult{}, err
+	}
+	metadata := make(map[string]any, len(result.Metadata)+3)
+	for key, value := range result.Metadata {
+		metadata[key] = value
+	}
+	operationIDs := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		operationIDs = append(operationIDs, spec.OperationID)
+	}
+	metadata["tcc_transaction_id"] = transactionID
+	metadata["tcc_operation_ids"] = operationIDs
+	metadata["tcc_state"] = string(tcc.StateConfirmed)
+	return agent.ToolResult{Content: result.Content, Metadata: metadata}, nil
+}
+
 func (e *Engine) chatWithRetry(ctx context.Context, conversation []modelclient.ChatMessage, definitions []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
 	var response modelclient.ChatResponse
 	var err error
@@ -722,7 +840,7 @@ func (e *Engine) chatWithRetry(ctx context.Context, conversation []modelclient.C
 		if err == nil || !retryableModelError(ctx, err) || attempt == maxModelCallRetries {
 			return response, err
 		}
-		timer := time.NewTimer(modelRetryDelay)
+		timer := time.NewTimer(retry.ExponentialDelay(attempt+1, modelRetryBaseDelay, modelRetryMaxDelay))
 		select {
 		case <-ctx.Done():
 			if !timer.Stop() {
@@ -735,32 +853,23 @@ func (e *Engine) chatWithRetry(ctx context.Context, conversation []modelclient.C
 	return response, err
 }
 
+func (e *Engine) saveContext(ctx context.Context, state ContextState) {
+	if e == nil || e.contextSink == nil || len(state.Messages) == 0 {
+		return
+	}
+	if state.Version <= state.LastStep {
+		state.Version = state.LastStep + 1
+	}
+	// Context persistence is a recovery accelerator. A database hiccup must
+	// not turn a successful tool call into a failed Agent run.
+	_ = e.contextSink(ctx, state)
+}
+
 func retryableModelError(ctx context.Context, err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return false
 	}
-	message := strings.ToLower(err.Error())
-	for _, marker := range []string{
-		"timeout",
-		"connection reset",
-		"connection refused",
-		"broken pipe",
-		"temporary",
-		"unexpected eof",
-		"http 408",
-		"http 409",
-		"http 425",
-		"http 429",
-		"http 500",
-		"http 502",
-		"http 503",
-		"http 504",
-	} {
-		if strings.Contains(message, marker) {
-			return true
-		}
-	}
-	return false
+	return ops.IsRetryableFailure(err)
 }
 
 // compactConversation protects the model context during one Agent run. The
@@ -993,7 +1102,7 @@ func toolResultCheckpointable(result agent.ToolResult) bool {
 	return !ok || checkpointable
 }
 
-func completeWithAnswer(result Result, emitter *eventEmitter, answer string) (Result, error) {
+func (e *Engine) completeWithAnswer(ctx context.Context, result Result, emitter *eventEmitter, conversation []modelclient.ChatMessage, answer string) (Result, error) {
 	safeMessage := security.RedactText(answer)
 	if strings.TrimSpace(safeMessage) == "" {
 		return finishErrorWithCategory(result, ErrEmptyFinalAnswer, agent.FailureValidation, emitter)
@@ -1001,6 +1110,8 @@ func completeWithAnswer(result Result, emitter *eventEmitter, answer string) (Re
 	if err := result.Run.AddStep(agent.Step{Kind: agent.StepFinalAnswer, Status: agent.StepSucceeded}); err != nil {
 		return finishErrorWithEvents(result, err, emitter)
 	}
+	conversation = append(conversation, modelclient.ChatMessage{Role: "assistant", Content: safeMessage})
+	e.saveFinalContext(ctx, conversation, len(result.Run.Steps()))
 	if err := emitter.emit(agent.EventMessageDelta, len(result.Run.Steps()), map[string]any{
 		"content": safeMessage,
 	}); err != nil {
@@ -1017,6 +1128,22 @@ func completeWithAnswer(result Result, emitter *eventEmitter, answer string) (Re
 		return result, err
 	}
 	return result, nil
+}
+
+func (e *Engine) saveFinalContext(ctx context.Context, messages []modelclient.ChatMessage, lastStep int) {
+	if e == nil || e.finalContextSink == nil || len(messages) == 0 {
+		return
+	}
+	state := compactContextState(ctx, ContextState{
+		Version:  1,
+		LastStep: lastStep,
+		Messages: messages,
+	}, maxAgentConversationBytes, e.contextSummarizer)
+	// This callback is deliberately best effort. The answer has already been
+	// generated; a persistence outage must not turn a successful run into a
+	// visible failure. The run-level ContextSink remains the crash-recovery
+	// boundary for the current attempt.
+	_ = e.finalContextSink(ctx, state)
 }
 
 func markUntrustedToolResult(content string) (string, error) {
@@ -1050,8 +1177,8 @@ func toolFailureFeedback(toolName string, err error) string {
 	return fmt.Sprintf("工具 %q 执行失败：%s\n\n请分析这个错误，修正参数、改写查询或选择其他工具；不要重复无效调用。", toolName, safeError)
 }
 
-func newEventEmitter(runID string, sink EventSink) *eventEmitter {
-	return &eventEmitter{runID: runID, sink: sink}
+func newEventEmitter(runID string, sink EventSink, identity ExecutionIdentity) *eventEmitter {
+	return &eventEmitter{runID: runID, sink: sink, identity: identity}
 }
 
 func (e *eventEmitter) emit(eventType agent.EventType, stepNumber int, data any) error {
@@ -1064,6 +1191,9 @@ func (e *eventEmitter) emit(eventType agent.EventType, stepNumber int, data any)
 		return fmt.Errorf("create agent event: %w", err)
 	}
 	event.StepNumber = stepNumber
+	event.ToolCallID = e.identity.ToolCallID
+	event.ExecutionID = e.identity.ExecutionID
+	event.TraceID = e.identity.TraceID
 	if err := e.sink(event); err != nil {
 		return fmt.Errorf("deliver agent event: %w", err)
 	}

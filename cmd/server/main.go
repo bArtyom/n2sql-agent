@@ -215,7 +215,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	var agentEventStore agentrun.EventStore = agentrun.NewPostgresEventStore(db)
+	durableAgentEventStore := agentrun.NewPostgresEventStore(db)
+	var agentEventStore agentrun.EventStore = durableAgentEventStore
 	if cfg.AgentStreamRedisURL != "" {
 		redisEventStore, redisErr := agentrun.NewRedisEventStore(
 			cfg.AgentStreamRedisURL,
@@ -226,9 +227,12 @@ func main() {
 		if redisErr != nil {
 			log.Printf("agent stream Redis disabled, falling back to PostgreSQL event replay: %v", redisErr)
 		} else {
-			agentEventStore = redisEventStore
+			agentEventStore, err = agentrun.NewEventBridge(durableAgentEventStore, redisEventStore)
+			if err != nil {
+				log.Fatalf("configure agent event bridge: %v", err)
+			}
 			defer redisEventStore.Close()
-			log.Printf("agent stream Redis enabled: ttl=%s max_len=%d", cfg.AgentStreamTTL, cfg.AgentStreamMaxLen)
+			log.Printf("agent stream Redis enabled as transient SSE layer: ttl=%s max_len=%d; PostgreSQL remains the durable event journal", cfg.AgentStreamTTL, cfg.AgentStreamMaxLen)
 		}
 	}
 	searchService := retrieval.NewHybridServiceWithRerankerAndRewriterAndCache(

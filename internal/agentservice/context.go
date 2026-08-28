@@ -54,30 +54,40 @@ type ChatRequest struct {
 	Message string `json:"message"`
 	// RunID is assigned by the streaming transport when it needs a reconnectable
 	// run. It is intentionally not accepted from JSON clients.
-	RunID               string                              `json:"-"`
-	ParentRunDatabaseID int64                               `json:"-"`
-	TopK                int                                 `json:"top_k,omitempty"`
-	ChatModel           string                              `json:"chat_model,omitempty"`
-	ThinkingMode        string                              `json:"thinking_mode,omitempty"`
-	MaxCompletionTokens int                                 `json:"max_completion_tokens,omitempty"`
-	Attachments         []ChatAttachment                    `json:"attachments,omitempty"`
-	SimilarityThreshold float64                             `json:"similarity_threshold,omitempty"`
-	KeywordThreshold    float64                             `json:"keyword_threshold,omitempty"`
-	KnowledgePolicy     KnowledgePolicy                     `json:"knowledge_policy,omitempty"`
-	DocumentIDs         []int64                             `json:"document_ids,omitempty"`
-	TagIDs              []int64                             `json:"tag_ids,omitempty"`
-	FolderPath          *string                             `json:"folder_path,omitempty"`
-	FolderRecursive     bool                                `json:"folder_recursive,omitempty"`
-	QueryRewrite        bool                                `json:"query_rewrite,omitempty"`
-	History             []HistoryMessage                    `json:"history,omitempty"`
-	ConversationID      int64                               `json:"conversation_id,omitempty"`
-	CachedSummary       *CachedHistorySummary               `json:"-"`
+	RunID               string                `json:"-"`
+	ParentRunDatabaseID int64                 `json:"-"`
+	TopK                int                   `json:"top_k,omitempty"`
+	ChatModel           string                `json:"chat_model,omitempty"`
+	ThinkingMode        string                `json:"thinking_mode,omitempty"`
+	MaxCompletionTokens int                   `json:"max_completion_tokens,omitempty"`
+	Attachments         []ChatAttachment      `json:"attachments,omitempty"`
+	SimilarityThreshold float64               `json:"similarity_threshold,omitempty"`
+	KeywordThreshold    float64               `json:"keyword_threshold,omitempty"`
+	KnowledgePolicy     KnowledgePolicy       `json:"knowledge_policy,omitempty"`
+	DocumentIDs         []int64               `json:"document_ids,omitempty"`
+	TagIDs              []int64               `json:"tag_ids,omitempty"`
+	FolderPath          *string               `json:"folder_path,omitempty"`
+	FolderRecursive     bool                  `json:"folder_recursive,omitempty"`
+	QueryRewrite        bool                  `json:"query_rewrite,omitempty"`
+	History             []HistoryMessage      `json:"history,omitempty"`
+	ConversationID      int64                 `json:"conversation_id,omitempty"`
+	CachedSummary       *CachedHistorySummary `json:"-"`
+	// ThreadContext is the hidden DeerFlow-style durable Agent state loaded
+	// from the previous completed turn. It is separate from the visible
+	// user/assistant conversation history and never leaves this service.
+	ThreadContext       *agentruntime.ContextState          `json:"-"`
 	RecoveryCheckpoints []agentrun.ToolCheckpoint           `json:"-"`
 	RecoveryDecision    *agentruntime.ResumeDecision        `json:"-"`
+	RecoveryContext     *agentruntime.ContextState          `json:"-"`
 	CheckpointSink      agentruntime.ToolCheckpointSink     `json:"-"`
 	DecisionSink        agentruntime.DecisionCheckpointSink `json:"-"`
+	ContextSink         agentruntime.ContextCheckpointSink  `json:"-"`
+	FinalContextSink    agentruntime.ContextCheckpointSink  `json:"-"`
 	ChildMode           bool                                `json:"child_mode,omitempty"`
 	ParentRunPublicID   string                              `json:"parent_run_public_id,omitempty"`
+	ToolCallID          string                              `json:"-"`
+	ExecutionID         string                              `json:"-"`
+	TraceID             string                              `json:"-"`
 }
 
 type HistorySummaryStats struct {

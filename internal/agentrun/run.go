@@ -69,9 +69,11 @@ type Run struct {
 	LeaseUntil      *time.Time          `json:"lease_until,omitempty"`
 	HeartbeatAt     *time.Time          `json:"heartbeat_at,omitempty"`
 	LeaseToken      string              `json:"-"`
+	ExecutionID     string              `json:"execution_id,omitempty"`
 	UpdatedAt       time.Time           `json:"updated_at"`
 	Checkpoints     []ToolCheckpoint    `json:"-"`
 	Decision        *DecisionCheckpoint `json:"-"`
+	Context         *ContextCheckpoint  `json:"-"`
 }
 
 // Attempt is the durable lifecycle record for one Worker claim. It lets the
@@ -102,6 +104,8 @@ type ChildCreateInput struct {
 	RunID           string
 	ParentRunID     int64
 	KnowledgeBaseID int64
+	ToolCallID      string
+	TraceID         string
 	Request         json.RawMessage
 }
 
@@ -226,6 +230,48 @@ type ToolCheckpointCleaner interface {
 	CleanupTerminalToolCheckpoints(context.Context, time.Duration) (int64, error)
 }
 
+// ContextCheckpoint stores the latest compacted Agent context. It is a
+// replaceable recovery snapshot, not the conversation/audit log. Keeping one
+// row per run avoids turning every token or tool event into database writes.
+type ContextCheckpoint struct {
+	AgentRunID   int64
+	AttemptCount int
+	Version      int
+	LastStep     int
+	Messages     json.RawMessage
+	SummaryText  string
+}
+
+type ContextCheckpointStore interface {
+	SaveContextCheckpoint(context.Context, ContextCheckpoint) error
+	GetLatestContextCheckpoint(context.Context, int64) (*ContextCheckpoint, error)
+}
+
+// ThreadContext is the latest durable Agent state for one conversation. It is
+// the Go equivalent of DeerFlow's thread-level checkpointer: it survives a
+// successful run and is loaded as hidden model context on the next turn.
+// Raw tool exchanges may be present here, but they are never copied to the
+// ordinary conversation_messages table or exposed by the conversation API.
+type ThreadContext struct {
+	ConversationID int64
+	Version        int
+	LastStep       int
+	LastRunID      string
+	Messages       json.RawMessage
+	SummaryText    string
+}
+
+type ThreadContextStore interface {
+	SaveThreadContext(context.Context, ThreadContext) error
+	GetThreadContext(context.Context, int64) (*ThreadContext, error)
+	DeleteThreadContext(context.Context, int64) error
+}
+
+type ContextCheckpointCleaner interface {
+	DeleteContextCheckpoint(context.Context, int64) error
+	CleanupTerminalContextCheckpoints(context.Context, time.Duration) (int64, error)
+}
+
 type DecisionCheckpoint struct {
 	AgentRunID   int64
 	AttemptCount int
@@ -260,6 +306,14 @@ type PostgresStore struct {
 	db               *sql.DB
 	checkpointBlobs  *ToolResultFileStore
 	checkpointInline int
+}
+
+func (s *PostgresStore) PendingCount(ctx context.Context) (int64, error) {
+	var count int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_runs WHERE status = 'pending'`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count agent runs: %w", err)
+	}
+	return count, nil
 }
 
 func NewPostgresStore(db *sql.DB) *PostgresStore {
@@ -768,6 +822,145 @@ func (s *PostgresStore) SaveDecisionCheckpoint(ctx context.Context, checkpoint D
 		return fmt.Errorf("save agent decision checkpoint: %w", err)
 	}
 	return nil
+}
+
+func (s *PostgresStore) SaveContextCheckpoint(ctx context.Context, checkpoint ContextCheckpoint) error {
+	if checkpoint.AgentRunID <= 0 || checkpoint.AttemptCount <= 0 || checkpoint.Version <= 0 || checkpoint.LastStep < 0 ||
+		len(checkpoint.Messages) == 0 || !json.Valid(checkpoint.Messages) {
+		return ErrInvalidRun
+	}
+	var messages []json.RawMessage
+	if err := json.Unmarshal(checkpoint.Messages, &messages); err != nil {
+		return fmt.Errorf("validate agent context messages: %w", err)
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO agent_run_contexts
+			(agent_run_id, attempt_count, version, last_step, messages, summary_text)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (agent_run_id)
+		DO UPDATE SET attempt_count = EXCLUDED.attempt_count,
+		              version = EXCLUDED.version,
+		              last_step = EXCLUDED.last_step,
+		              messages = EXCLUDED.messages,
+		              summary_text = EXCLUDED.summary_text,
+		              updated_at = CURRENT_TIMESTAMP
+		WHERE EXCLUDED.attempt_count > agent_run_contexts.attempt_count
+		   OR (EXCLUDED.attempt_count = agent_run_contexts.attempt_count
+		       AND EXCLUDED.version >= agent_run_contexts.version)`,
+		checkpoint.AgentRunID, checkpoint.AttemptCount, checkpoint.Version, checkpoint.LastStep,
+		checkpoint.Messages, checkpoint.SummaryText)
+	if err != nil {
+		return fmt.Errorf("save agent context checkpoint: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) GetLatestContextCheckpoint(ctx context.Context, agentRunID int64) (*ContextCheckpoint, error) {
+	if agentRunID <= 0 {
+		return nil, ErrInvalidRun
+	}
+	var checkpoint ContextCheckpoint
+	err := s.db.QueryRowContext(ctx, `
+		SELECT agent_run_id, attempt_count, version, last_step, messages, summary_text
+		FROM agent_run_contexts
+		WHERE agent_run_id = $1`, agentRunID).Scan(
+		&checkpoint.AgentRunID, &checkpoint.AttemptCount, &checkpoint.Version,
+		&checkpoint.LastStep, &checkpoint.Messages, &checkpoint.SummaryText)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get agent context checkpoint: %w", err)
+	}
+	return &checkpoint, nil
+}
+
+func (s *PostgresStore) SaveThreadContext(ctx context.Context, checkpoint ThreadContext) error {
+	if checkpoint.ConversationID <= 0 || checkpoint.Version <= 0 || checkpoint.LastStep < 0 ||
+		strings.TrimSpace(checkpoint.LastRunID) == "" || len(checkpoint.Messages) == 0 || !json.Valid(checkpoint.Messages) {
+		return ErrInvalidRun
+	}
+	var messages []json.RawMessage
+	if err := json.Unmarshal(checkpoint.Messages, &messages); err != nil {
+		return fmt.Errorf("validate agent thread context messages: %w", err)
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO agent_thread_contexts
+			(conversation_id, version, last_step, last_run_id, messages, summary_text)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (conversation_id)
+		DO UPDATE SET version = EXCLUDED.version,
+		              last_step = EXCLUDED.last_step,
+		              last_run_id = EXCLUDED.last_run_id,
+		              messages = EXCLUDED.messages,
+		              summary_text = EXCLUDED.summary_text,
+		              updated_at = CURRENT_TIMESTAMP`,
+		checkpoint.ConversationID, checkpoint.Version, checkpoint.LastStep, checkpoint.LastRunID,
+		checkpoint.Messages, checkpoint.SummaryText)
+	if err != nil {
+		return fmt.Errorf("save agent thread context: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) GetThreadContext(ctx context.Context, conversationID int64) (*ThreadContext, error) {
+	if conversationID <= 0 {
+		return nil, ErrInvalidRun
+	}
+	var checkpoint ThreadContext
+	err := s.db.QueryRowContext(ctx, `
+		SELECT conversation_id, version, last_step, last_run_id, messages, summary_text
+		FROM agent_thread_contexts
+		WHERE conversation_id = $1`, conversationID).Scan(
+		&checkpoint.ConversationID, &checkpoint.Version, &checkpoint.LastStep,
+		&checkpoint.LastRunID, &checkpoint.Messages, &checkpoint.SummaryText)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get agent thread context: %w", err)
+	}
+	return &checkpoint, nil
+}
+
+func (s *PostgresStore) DeleteThreadContext(ctx context.Context, conversationID int64) error {
+	if conversationID <= 0 {
+		return ErrInvalidRun
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_thread_contexts WHERE conversation_id = $1`, conversationID); err != nil {
+		return fmt.Errorf("delete agent thread context: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeleteContextCheckpoint(ctx context.Context, agentRunID int64) error {
+	if agentRunID <= 0 {
+		return ErrInvalidRun
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_run_contexts WHERE agent_run_id = $1`, agentRunID); err != nil {
+		return fmt.Errorf("delete agent context checkpoint: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) CleanupTerminalContextCheckpoints(ctx context.Context, retention time.Duration) (int64, error) {
+	if retention <= 0 {
+		return 0, ErrInvalidRun
+	}
+	result, err := s.db.ExecContext(ctx, `
+		DELETE FROM agent_run_contexts AS saved
+		USING agent_runs AS run
+		WHERE saved.agent_run_id = run.id
+		  AND run.status IN ('succeeded', 'failed', 'timeout', 'canceled')
+		  AND run.updated_at < CURRENT_TIMESTAMP - ($1 * INTERVAL '1 second')`, retention.Seconds())
+	if err != nil {
+		return 0, fmt.Errorf("cleanup terminal agent context checkpoints: %w", err)
+	}
+	removed, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count cleaned agent context checkpoints: %w", err)
+	}
+	return removed, nil
 }
 
 func (s *PostgresStore) GetLatestDecisionCheckpoint(ctx context.Context, agentRunID int64) (*DecisionCheckpoint, error) {
