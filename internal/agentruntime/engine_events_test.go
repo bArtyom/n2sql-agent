@@ -17,6 +17,21 @@ import (
 
 type retrievalStatsTool struct{}
 
+type streamingChatStub struct{}
+
+func (streamingChatStub) ChatMessagesWithTools(context.Context, []modelclient.ChatMessage, []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+	return modelclient.ChatResponse{Message: "完整答案"}, nil
+}
+
+func (streamingChatStub) ChatMessagesWithToolsStream(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition, onDelta func(modelclient.ChatStreamDelta) error) (modelclient.ChatResponse, error) {
+	for _, content := range []string{"完整", "答", "案"} {
+		if err := onDelta(modelclient.ChatStreamDelta{Content: content}); err != nil {
+			return modelclient.ChatResponse{}, err
+		}
+	}
+	return modelclient.ChatResponse{Message: "完整答案"}, nil
+}
+
 func (retrievalStatsTool) Name() string                { return "knowledge_search" }
 func (retrievalStatsTool) Description() string         { return "搜索知识库" }
 func (retrievalStatsTool) Parameters() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
@@ -63,6 +78,73 @@ func TestEngineRunWithEventsEmitsDirectAnswerLifecycle(t *testing.T) {
 	for _, event := range events {
 		if event.RunID != "run-events" || event.ID == "" {
 			t.Fatalf("event identity = %#v", event)
+		}
+	}
+}
+
+func TestEngineStreamsToolCapableModelTextDeltas(t *testing.T) {
+	engine, err := agentruntime.NewEngine(streamingChatStub{}, agent.NewToolRegistry(), 1)
+	if err != nil {
+		t.Fatalf("NewEngine() error = %v", err)
+	}
+	var events []agent.Event
+	if _, err := engine.RunWithEvents(context.Background(), "run-streaming-model", []modelclient.ChatMessage{{Role: "user", Content: "问题"}}, func(event agent.Event) error {
+		events = append(events, event)
+		return nil
+	}); err != nil {
+		t.Fatalf("RunWithEvents() error = %v", err)
+	}
+	assertEventTypes(t, events, agent.EventRunStarted, agent.EventMessageDelta, agent.EventMessageDelta, agent.EventMessageDelta, agent.EventRunFinished)
+	for index, want := range []string{"完整", "答", "案"} {
+		data, ok := events[index+1].Data.(map[string]any)
+		if !ok || data["content"] != want {
+			t.Fatalf("message delta[%d] = %#v, want %q", index, events[index+1].Data, want)
+		}
+	}
+}
+
+func TestEngineStopsWhenRunModelBudgetIsExceeded(t *testing.T) {
+	chat := chatStub{call: func(context.Context, []modelclient.ChatMessage, []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		return modelclient.ChatResponse{ToolCalls: []modelclient.ToolCall{{
+			ID: "budget-call", Type: "function", Function: modelclient.ToolCallFunction{Name: "missing_tool", Arguments: `{}`},
+		}}}, nil
+	}}
+	engine, err := agentruntime.NewEngineWithOptions(chat, agent.NewToolRegistry(), 10, agentruntime.EngineOptions{
+		Budget: agent.RunBudget{MaxModelCalls: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := engine.Run(context.Background(), "run-budget", []modelclient.ChatMessage{{Role: "user", Content: "问题"}})
+	if !errors.Is(err, agentruntime.ErrRunBudgetExceeded) || result.Run.Stats().FailureCategory != agent.FailureStepLimit {
+		t.Fatalf("Run() = (%#v, %v), want budget failure with step-limit category", result.Run.Stats(), err)
+	}
+}
+
+func TestEngineEventsCarryExecutionAndTraceIdentity(t *testing.T) {
+	chat := chatStub{call: func(_ context.Context, _ []modelclient.ChatMessage, _ []agent.FunctionDefinition) (modelclient.ChatResponse, error) {
+		return modelclient.ChatResponse{Message: "最终答案"}, nil
+	}}
+	engine, err := agentruntime.NewEngineWithOptions(chat, agent.NewToolRegistry(), 1, agentruntime.EngineOptions{
+		ExecutionID: "exec-7",
+		TraceID:     "trace-7",
+	})
+	if err != nil {
+		t.Fatalf("NewEngineWithOptions() error = %v", err)
+	}
+	var events []agent.Event
+	if _, err := engine.RunWithEvents(context.Background(), "run-identity", []modelclient.ChatMessage{{Role: "user", Content: "问题"}}, func(event agent.Event) error {
+		events = append(events, event)
+		return nil
+	}); err != nil {
+		t.Fatalf("RunWithEvents() error = %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("RunWithEvents() emitted no events")
+	}
+	for _, event := range events {
+		if event.ExecutionID != "exec-7" || event.TraceID != "trace-7" {
+			t.Fatalf("event identity = %#v, want execution and trace IDs", event)
 		}
 	}
 }

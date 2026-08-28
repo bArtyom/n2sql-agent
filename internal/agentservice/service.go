@@ -41,6 +41,7 @@ var (
 	ErrInvalidMaxToolResultBytes = errors.New("agent max tool result bytes must be at least 2")
 	ErrInvalidMaxHistoryMessages = errors.New("agent max history messages must be positive")
 	ErrInvalidMaxHistoryBytes    = errors.New("agent max history bytes must be positive")
+	ErrInvalidRunBudget          = errors.New("agent run budget must not be negative")
 )
 
 type Answerer interface {
@@ -154,6 +155,14 @@ func (r selectedToolChatRunner) ChatMessagesWithTools(ctx context.Context, messa
 	return r.runner.ChatMessagesWithToolsForModel(ctx, r.model, messages, definitions)
 }
 
+func (r selectedToolChatRunner) ChatMessagesWithToolsStream(ctx context.Context, messages []modelclient.ChatMessage, definitions []agent.FunctionDefinition, onDelta func(modelclient.ChatStreamDelta) error) (modelclient.ChatResponse, error) {
+	streamer, ok := r.runner.(modelruntime.ToolChatRunnerStreamerWithModel)
+	if !ok {
+		return modelclient.ChatResponse{}, modelruntime.ErrStreamingUnavailable
+	}
+	return streamer.ChatMessagesWithToolsStreamForModel(ctx, r.model, messages, definitions, onDelta)
+}
+
 func NewService(chat modelruntime.ToolChatRunner, searcher retrieval.Searcher, maxSteps int, timeout time.Duration) (*Service, error) {
 	return NewServiceWithLimits(chat, searcher, maxSteps, timeout, agent.DefaultMaxToolResultBytes, agent.DefaultMaxHistoryMessages, agent.DefaultMaxHistoryBytes)
 }
@@ -256,6 +265,19 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 	}
 	if request.MaxCompletionTokens < 0 || request.MaxCompletionTokens > maxCompletionTokens {
 		return Response{}, ErrInvalidRequest
+	}
+	if request.MaxModelCalls < 0 || request.MaxToolCalls < 0 || request.MaxTotalTokens < 0 {
+		return Response{}, ErrInvalidRunBudget
+	}
+	budget := agent.RunBudget{MaxModelCalls: request.MaxModelCalls, MaxToolCalls: request.MaxToolCalls, MaxTotalTokens: request.MaxTotalTokens}
+	if budget.MaxModelCalls == 0 {
+		budget.MaxModelCalls = agent.DefaultMaxModelCalls
+	}
+	if budget.MaxToolCalls == 0 {
+		budget.MaxToolCalls = agent.DefaultMaxToolCalls
+	}
+	if budget.MaxTotalTokens == 0 {
+		budget.MaxTotalTokens = agent.DefaultMaxTotalTokens
 	}
 	if err := retrieval.ValidateKeywordThreshold(request.KeywordThreshold); err != nil {
 		return Response{}, ErrInvalidRequest
@@ -423,6 +445,7 @@ func (s *Service) answer(ctx context.Context, knowledgeBaseID int64, request Cha
 		CheckpointSink:    request.CheckpointSink,
 		TCCCoordinator:    s.tccCoordinator,
 		TCCAgentRunID:     request.ParentRunDatabaseID,
+		Budget:            budget,
 	})
 	if err != nil {
 		return Response{}, fmt.Errorf("create agent engine: %w", err)

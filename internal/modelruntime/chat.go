@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
@@ -55,6 +57,16 @@ type ChatRunner interface {
 
 type ToolChatRunner interface {
 	ChatMessagesWithTools(context.Context, []modelclient.ChatMessage, []agent.FunctionDefinition) (modelclient.ChatResponse, error)
+}
+
+type ToolChatRunnerStreamer interface {
+	ToolChatRunner
+	ChatMessagesWithToolsStream(context.Context, []modelclient.ChatMessage, []agent.FunctionDefinition, func(modelclient.ChatStreamDelta) error) (modelclient.ChatResponse, error)
+}
+
+type ToolChatRunnerStreamerWithModel interface {
+	ToolChatRunnerStreamer
+	ChatMessagesWithToolsStreamForModel(context.Context, string, []modelclient.ChatMessage, []agent.FunctionDefinition, func(modelclient.ChatStreamDelta) error) (modelclient.ChatResponse, error)
 }
 
 // ToolChatRunnerWithModel is the optional extension used by a session that
@@ -189,6 +201,103 @@ func (s *ChatService) ChatMessagesWithToolsForModel(ctx context.Context, request
 		lastErr = modelprovider.ErrNotFound
 	}
 	return modelclient.ChatResponse{}, &ChatCallError{Err: fmt.Errorf("complete chat with tools: %w", lastErr)}
+}
+
+func (s *ChatService) ChatMessagesWithToolsStream(ctx context.Context, messages []modelclient.ChatMessage, definitions []agent.FunctionDefinition, onDelta func(modelclient.ChatStreamDelta) error) (modelclient.ChatResponse, error) {
+	return s.ChatMessagesWithToolsStreamForModel(ctx, "", messages, definitions, onDelta)
+}
+
+func (s *ChatService) ChatMessagesWithToolsStreamForModel(ctx context.Context, requestedModel string, messages []modelclient.ChatMessage, definitions []agent.FunctionDefinition, onDelta func(modelclient.ChatStreamDelta) error) (modelclient.ChatResponse, error) {
+	if onDelta == nil {
+		return modelclient.ChatResponse{}, fmt.Errorf("tool chat stream delta callback is required")
+	}
+	streamer, ok := s.completer.(modelclient.ToolChatStreamer)
+	if !ok {
+		return modelclient.ChatResponse{}, ErrStreamingUnavailable
+	}
+	credentials, err := s.credentialsCandidates(ctx)
+	if err != nil {
+		return modelclient.ChatResponse{}, err
+	}
+	var lastErr error
+	for index, credential := range credentials {
+		model, resolveErr := credential.provider.ResolveChatModel(requestedModel)
+		if resolveErr != nil {
+			lastErr = resolveErr
+			continue
+		}
+		if !s.breaker.Allow(credential.provider.Name, capabilityChat) {
+			observeCircuitBreaker(ctx, credential.provider.Name, capabilityChat, usage.CircuitEventOpened)
+			lastErr = fmt.Errorf("provider %s: %w", credential.provider.Name, ops.ErrCircuitOpen)
+			continue
+		}
+		started := time.Now()
+		emitted := false
+		var message strings.Builder
+		var reasoning strings.Builder
+		calls := make(map[int]*modelclient.ToolCall)
+		var tokenUsage *modelclient.TokenUsage
+		streamErr := streamer.ChatStreamWithTools(ctx, credential.provider.BaseURL, credential.apiKey, modelclient.ChatRequest{
+			Model: model, Messages: messages, Tools: modelToolDefinitions(definitions),
+			ReasoningEffort: reasoningEffort(ctx), MaxCompletionTokens: maxCompletionTokens(ctx), Stream: true,
+		}, func(delta modelclient.ChatStreamDelta) error {
+			if delta.Usage != nil {
+				tokenUsage = delta.Usage
+			}
+			if delta.Content != "" {
+				emitted = true
+				message.WriteString(delta.Content)
+			}
+			if delta.ReasoningContent != "" {
+				emitted = true
+				reasoning.WriteString(delta.ReasoningContent)
+			}
+			if delta.ToolCallID != "" || delta.ToolName != "" || delta.ToolArguments != "" {
+				emitted = true
+				call := calls[delta.ToolCallIndex]
+				if call == nil {
+					call = &modelclient.ToolCall{Index: delta.ToolCallIndex, Type: "function"}
+					calls[delta.ToolCallIndex] = call
+				}
+				if delta.ToolCallID != "" {
+					call.ID = delta.ToolCallID
+				}
+				if delta.ToolName != "" {
+					call.Function.Name = delta.ToolName
+				}
+				call.Function.Arguments += delta.ToolArguments
+			}
+			return onDelta(delta)
+		})
+		response := modelclient.ChatResponse{Message: message.String(), ReasoningContent: reasoning.String(), Usage: tokenUsage}
+		indexes := make([]int, 0, len(calls))
+		for index := range calls {
+			indexes = append(indexes, index)
+		}
+		sort.Ints(indexes)
+		for _, callIndex := range indexes {
+			response.ToolCalls = append(response.ToolCalls, *calls[callIndex])
+		}
+		observeModelCall(ctx, usage.ModelKindChat, credential.provider.Name, model, started, response.Usage, streamErr)
+		if streamErr == nil {
+			if index > 0 {
+				observeCircuitBreaker(ctx, credential.provider.Name, capabilityChat, usage.CircuitEventFallback)
+			}
+			s.breaker.RecordSuccess(credential.provider.Name, capabilityChat)
+			return response, nil
+		}
+		lastErr = streamErr
+		// A partial streamed answer/tool call cannot be safely replayed through
+		// another provider because it would duplicate the visible prefix.
+		if emitted || errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) || !ops.IsRetryableFailure(streamErr) {
+			return modelclient.ChatResponse{}, &ChatCallError{Err: fmt.Errorf("stream chat with tools: %w", streamErr)}
+		}
+		s.breaker.RecordFailure(credential.provider.Name, capabilityChat)
+	}
+	if lastErr == nil {
+		lastErr = modelprovider.ErrNotFound
+	}
+	return modelclient.ChatResponse{}, &ChatCallError{Err: fmt.Errorf("stream chat with tools: %w", lastErr)}
 }
 
 func (s *ChatService) ValidateChatModel(ctx context.Context, requestedModel string) error {

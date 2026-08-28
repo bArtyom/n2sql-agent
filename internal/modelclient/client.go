@@ -28,8 +28,28 @@ type ConnectionChecker interface {
 	Check(context.Context, string, string) error
 }
 
+// HTTPStatusError preserves provider status codes for retry, alerting and
+// circuit-breaker decisions without exposing response bodies or credentials.
+type HTTPStatusError struct {
+	Operation  string
+	StatusCode int
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("%s endpoint returned HTTP %d", e.Operation, e.StatusCode)
+}
+
+func (e *HTTPStatusError) HTTPStatus() int { return e.StatusCode }
+
 type Embedder interface {
 	Embed(context.Context, string, string, EmbeddingRequest) (EmbeddingResponse, error)
+}
+
+// MultimodalEmbedder is the optional OpenAI-compatible contract used by the
+// image vector sidecar. Text and image inputs are sent as objects so the same
+// endpoint can encode either modality into one shared retrieval space.
+type MultimodalEmbedder interface {
+	EmbedMultimodal(context.Context, string, string, MultimodalEmbeddingRequest) (EmbeddingResponse, error)
 }
 
 type ChatCompleter interface {
@@ -38,6 +58,24 @@ type ChatCompleter interface {
 
 type ChatStreamer interface {
 	ChatStream(context.Context, string, string, ChatRequest, func(string) error) error
+}
+
+// ChatStreamDelta is the provider-neutral incremental envelope. Providers
+// may split a tool call's JSON arguments across several deltas; the Agent
+// runtime is responsible for buffering those fragments before execution.
+type ChatStreamDelta struct {
+	Content          string
+	ReasoningContent string
+	ToolCallIndex    int
+	ToolCallID       string
+	ToolName         string
+	ToolArguments    string
+	FinishReason     string
+	Usage            *TokenUsage
+}
+
+type ToolChatStreamer interface {
+	ChatStreamWithTools(context.Context, string, string, ChatRequest, func(ChatStreamDelta) error) error
 }
 
 type OCRer interface {
@@ -51,6 +89,16 @@ type Reranker interface {
 type EmbeddingRequest struct {
 	Model string   `json:"model"`
 	Input []string `json:"input"`
+}
+
+type MultimodalEmbeddingInput struct {
+	Text  string `json:"text,omitempty"`
+	Image string `json:"image,omitempty"`
+}
+
+type MultimodalEmbeddingRequest struct {
+	Model string                     `json:"model"`
+	Input []MultimodalEmbeddingInput `json:"input"`
 }
 
 type Embedding struct {
@@ -127,6 +175,39 @@ func (m ChatMessage) MarshalJSON() ([]byte, error) {
 	})
 }
 
+func (m *ChatMessage) UnmarshalJSON(data []byte) error {
+	if m == nil {
+		return fmt.Errorf("nil chat message")
+	}
+	var wire struct {
+		Role             string          `json:"role"`
+		Content          json.RawMessage `json:"content"`
+		ReasoningContent string          `json:"reasoning_content,omitempty"`
+		ToolCalls        []ToolCall      `json:"tool_calls,omitempty"`
+		ToolCallID       string          `json:"tool_call_id,omitempty"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*m = ChatMessage{
+		Role:             wire.Role,
+		ReasoningContent: wire.ReasoningContent,
+		ToolCalls:        wire.ToolCalls,
+		ToolCallID:       wire.ToolCallID,
+	}
+	content := bytes.TrimSpace(wire.Content)
+	if len(content) == 0 || bytes.Equal(content, []byte("null")) {
+		return nil
+	}
+	if content[0] == '"' {
+		return json.Unmarshal(content, &m.Content)
+	}
+	if content[0] == '[' {
+		return json.Unmarshal(content, &m.ContentParts)
+	}
+	return fmt.Errorf("chat message content must be string or content parts")
+}
+
 type ChatRequest struct {
 	Model               string           `json:"model"`
 	Messages            []ChatMessage    `json:"messages"`
@@ -157,6 +238,7 @@ type FunctionDefinition struct {
 }
 
 type ToolCall struct {
+	Index    int              `json:"index,omitempty"`
 	ID       string           `json:"id"`
 	Type     string           `json:"type"`
 	Function ToolCallFunction `json:"function"`
@@ -236,7 +318,7 @@ func (c *HTTPClient) Check(ctx context.Context, baseURL, apiKey string) error {
 	defer response.Body.Close()
 
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("models endpoint returned HTTP %d", response.StatusCode)
+		return &HTTPStatusError{Operation: "models", StatusCode: response.StatusCode}
 	}
 	return nil
 }
@@ -267,7 +349,7 @@ func (c *HTTPClient) Embed(ctx context.Context, baseURL, apiKey string, embeddin
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return EmbeddingResponse{}, fmt.Errorf("embeddings endpoint returned HTTP %d", response.StatusCode)
+		return EmbeddingResponse{}, &HTTPStatusError{Operation: "embeddings", StatusCode: response.StatusCode}
 	}
 
 	body, err = io.ReadAll(io.LimitReader(response.Body, maxEmbeddingResponseBytes+1))
@@ -311,6 +393,70 @@ func (c *HTTPClient) Embed(ctx context.Context, baseURL, apiKey string, embeddin
 	return result, nil
 }
 
+func (c *HTTPClient) EmbedMultimodal(ctx context.Context, baseURL, apiKey string, embeddingRequest MultimodalEmbeddingRequest) (EmbeddingResponse, error) {
+	if embeddingRequest.Model == "" || len(embeddingRequest.Input) == 0 {
+		return EmbeddingResponse{}, fmt.Errorf("multimodal embedding model and input are required")
+	}
+	endpoint, err := apiEndpoint(baseURL, "embeddings", c.allowedHosts)
+	if err != nil {
+		return EmbeddingResponse{}, err
+	}
+	body, err := json.Marshal(embeddingRequest)
+	if err != nil {
+		return EmbeddingResponse{}, fmt.Errorf("encode multimodal embedding request: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return EmbeddingResponse{}, fmt.Errorf("create multimodal embeddings request: %w", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+apiKey)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.client.Do(request)
+	if err != nil {
+		return EmbeddingResponse{}, fmt.Errorf("request multimodal embeddings endpoint: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return EmbeddingResponse{}, &HTTPStatusError{Operation: "multimodal embeddings", StatusCode: response.StatusCode}
+	}
+	body, err = io.ReadAll(io.LimitReader(response.Body, maxEmbeddingResponseBytes+1))
+	if err != nil {
+		return EmbeddingResponse{}, fmt.Errorf("read multimodal embeddings response: %w", err)
+	}
+	if len(body) > maxEmbeddingResponseBytes {
+		return EmbeddingResponse{}, fmt.Errorf("multimodal embeddings response is too large")
+	}
+	var payload struct {
+		Usage *TokenUsage `json:"usage"`
+		Data  []struct {
+			Index     int       `json:"index"`
+			Embedding []float32 `json:"embedding"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return EmbeddingResponse{}, fmt.Errorf("decode multimodal embeddings response: %w", err)
+	}
+	if len(payload.Data) != len(embeddingRequest.Input) {
+		return EmbeddingResponse{}, fmt.Errorf("multimodal embeddings response count = %d, want %d", len(payload.Data), len(embeddingRequest.Input))
+	}
+	result := EmbeddingResponse{Data: make([]Embedding, len(embeddingRequest.Input)), Usage: payload.Usage}
+	seenIndexes := make(map[int]struct{}, len(payload.Data))
+	for _, embedding := range payload.Data {
+		if embedding.Index < 0 || embedding.Index >= len(embeddingRequest.Input) {
+			return EmbeddingResponse{}, fmt.Errorf("multimodal embeddings response index %d is out of range", embedding.Index)
+		}
+		if _, seen := seenIndexes[embedding.Index]; seen {
+			return EmbeddingResponse{}, fmt.Errorf("multimodal embeddings response contains duplicate index %d", embedding.Index)
+		}
+		if len(embedding.Embedding) == 0 {
+			return EmbeddingResponse{}, fmt.Errorf("multimodal embeddings response vector at index %d is empty", embedding.Index)
+		}
+		seenIndexes[embedding.Index] = struct{}{}
+		result.Data[embedding.Index] = Embedding{Index: embedding.Index, Vector: embedding.Embedding}
+	}
+	return result, nil
+}
+
 // Rerank asks a rerank model to score the already-recalled candidate chunks.
 // The qwen3-rerank endpoint is OpenAI-compatible and returns candidate indexes
 // in descending relevance order.
@@ -346,7 +492,7 @@ func (c *HTTPClient) Rerank(ctx context.Context, baseURL, apiKey string, rerankR
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return RerankResponse{}, fmt.Errorf("rerank endpoint returned HTTP %d", response.StatusCode)
+		return RerankResponse{}, &HTTPStatusError{Operation: "rerank", StatusCode: response.StatusCode}
 	}
 	body, err = io.ReadAll(io.LimitReader(response.Body, maxRerankResponseBytes+1))
 	if err != nil {
@@ -404,7 +550,7 @@ func (c *HTTPClient) Chat(ctx context.Context, baseURL, apiKey string, chatReque
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return ChatResponse{}, fmt.Errorf("chat endpoint returned HTTP %d", response.StatusCode)
+		return ChatResponse{}, &HTTPStatusError{Operation: "chat", StatusCode: response.StatusCode}
 	}
 
 	body, err = io.ReadAll(io.LimitReader(response.Body, maxChatResponseBytes+1))
@@ -482,7 +628,7 @@ func (c *HTTPClient) OCR(ctx context.Context, baseURL, apiKey string, ocrRequest
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return OCRResponse{}, fmt.Errorf("OCR endpoint returned HTTP %d", response.StatusCode)
+		return OCRResponse{}, &HTTPStatusError{Operation: "OCR", StatusCode: response.StatusCode}
 	}
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxOCRResponseBytes+1))
 	if err != nil {
@@ -574,7 +720,7 @@ func (c *HTTPClient) ChatStream(ctx context.Context, baseURL, apiKey string, cha
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("chat stream endpoint returned HTTP %d", response.StatusCode)
+		return &HTTPStatusError{Operation: "chat stream", StatusCode: response.StatusCode}
 	}
 
 	scanner := bufio.NewScanner(response.Body)
@@ -646,6 +792,139 @@ func (c *HTTPClient) ChatStream(ctx context.Context, baseURL, apiKey string, cha
 	}
 	if !done {
 		return fmt.Errorf("chat stream ended before done event")
+	}
+	return nil
+}
+
+// ChatStreamWithTools streams an OpenAI-compatible response while preserving
+// text and fragmented tool-call fields. It deliberately does not execute or
+// assemble tools; that policy belongs to the Agent runtime.
+func (c *HTTPClient) ChatStreamWithTools(ctx context.Context, baseURL, apiKey string, chatRequest ChatRequest, onDelta func(ChatStreamDelta) error) error {
+	if err := validateChatRequest(chatRequest); err != nil {
+		return err
+	}
+	if onDelta == nil {
+		return fmt.Errorf("chat stream delta callback is required")
+	}
+	chatRequest.Stream = true
+	endpoint, err := apiEndpoint(baseURL, "chat/completions", c.allowedHosts)
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(chatRequest)
+	if err != nil {
+		return fmt.Errorf("encode tool chat stream request: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create tool chat stream request: %w", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+apiKey)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.client.Do(request)
+	if err != nil {
+		return fmt.Errorf("request tool chat stream endpoint: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return &HTTPStatusError{Operation: "tool chat stream", StatusCode: response.StatusCode}
+	}
+
+	scanner := bufio.NewScanner(response.Body)
+	scanner.Buffer(make([]byte, 4096), maxChatStreamBytes)
+	readBytes := 0
+	done := false
+	dataLines := make([]string, 0, 1)
+	processEvent := func() (bool, error) {
+		if len(dataLines) == 0 {
+			return false, nil
+		}
+		data := strings.TrimSpace(strings.Join(dataLines, "\n"))
+		dataLines = dataLines[:0]
+		if data == "[DONE]" {
+			return true, nil
+		}
+		var payload struct {
+			Usage   *TokenUsage `json:"usage"`
+			Choices []struct {
+				FinishReason *string     `json:"finish_reason"`
+				Delta        ChatMessage `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(data), &payload); err != nil {
+			return false, fmt.Errorf("decode tool chat stream event: %w", err)
+		}
+		if len(payload.Choices) == 0 {
+			return false, nil
+		}
+		choice := payload.Choices[0]
+		finishReason := ""
+		if choice.FinishReason != nil {
+			finishReason = *choice.FinishReason
+		}
+		if choice.Delta.Content != "" {
+			if err := onDelta(ChatStreamDelta{Content: choice.Delta.Content, FinishReason: finishReason, Usage: payload.Usage}); err != nil {
+				return false, fmt.Errorf("handle tool chat text delta: %w", err)
+			}
+		}
+		if choice.Delta.ReasoningContent != "" {
+			if err := onDelta(ChatStreamDelta{ReasoningContent: choice.Delta.ReasoningContent, FinishReason: finishReason, Usage: payload.Usage}); err != nil {
+				return false, fmt.Errorf("handle tool chat reasoning delta: %w", err)
+			}
+		}
+		for _, toolCall := range choice.Delta.ToolCalls {
+			if toolCall.ID == "" && toolCall.Function.Name == "" && toolCall.Function.Arguments == "" {
+				continue
+			}
+			if err := onDelta(ChatStreamDelta{
+				ToolCallIndex: toolCall.Index, ToolCallID: toolCall.ID,
+				ToolName: toolCall.Function.Name, ToolArguments: toolCall.Function.Arguments,
+				FinishReason: finishReason, Usage: payload.Usage,
+			}); err != nil {
+				return false, fmt.Errorf("handle tool chat call delta: %w", err)
+			}
+		}
+		return false, nil
+	}
+	for scanner.Scan() {
+		rawLine := scanner.Text()
+		readBytes += len(rawLine)
+		if readBytes > maxChatStreamBytes {
+			return fmt.Errorf("tool chat stream response is too large")
+		}
+		line := strings.TrimSuffix(rawLine, "\r")
+		if line == "" {
+			var processErr error
+			done, processErr = processEvent()
+			if processErr != nil {
+				return processErr
+			}
+			if done {
+				break
+			}
+			continue
+		}
+		if strings.HasPrefix(line, ":") || !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data:")
+		if strings.HasPrefix(data, " ") {
+			data = data[1:]
+		}
+		dataLines = append(dataLines, data)
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("read tool chat stream: %w", err)
+	}
+	if !done {
+		var processErr error
+		done, processErr = processEvent()
+		if processErr != nil {
+			return processErr
+		}
+	}
+	if !done {
+		return fmt.Errorf("tool chat stream ended before done event")
 	}
 	return nil
 }

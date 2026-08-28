@@ -18,6 +18,7 @@ const durableSummaryPrefix = "Agent 短记忆（较早工具结果摘要）：\n
 type CheckpointState struct {
 	Version          int                       `json:"version"`
 	LastStep         int                       `json:"last_step"`
+	CurrentNode      string                    `json:"current_node,omitempty"`
 	Messages         []modelclient.ChatMessage `json:"messages"`
 	SummaryText      string                    `json:"summary_text"`
 	PendingToolCalls []modelclient.ToolCall    `json:"pending_tool_calls,omitempty"`

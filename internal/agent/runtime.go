@@ -58,6 +58,20 @@ const (
 	FailureInternal   FailureCategory = "internal_failed"
 )
 
+// RunBudget bounds aggregate work across the entire ReAct run. Zero means
+// unlimited for that dimension; per-call provider limits remain separate.
+type RunBudget struct {
+	MaxModelCalls  int `json:"max_model_calls,omitempty"`
+	MaxToolCalls   int `json:"max_tool_calls,omitempty"`
+	MaxTotalTokens int `json:"max_total_tokens,omitempty"`
+}
+
+const (
+	DefaultMaxModelCalls  = 16
+	DefaultMaxToolCalls   = 32
+	DefaultMaxTotalTokens = 100000
+)
+
 // Step records one observable unit in an Agent run.
 type Step struct {
 	Number   int        `json:"number"`
@@ -313,6 +327,7 @@ func (r *AgentRun) ObserveRetrieval(observation usage.RetrievalObservation) {
 	r.retrieval.KeywordRejected += nonNegative(observation.KeywordRejected)
 	r.retrieval.SummaryCandidates += nonNegative(observation.SummaryCandidates)
 	r.retrieval.GraphCandidates += nonNegative(observation.GraphCandidates)
+	r.retrieval.ImageCandidates += nonNegative(observation.ImageCandidates)
 	r.retrieval.DeduplicatedCandidates += nonNegative(observation.DeduplicatedCandidates)
 	r.retrieval.RerankBefore += nonNegative(observation.RerankBefore)
 	r.retrieval.RerankAfter += nonNegative(observation.RerankAfter)

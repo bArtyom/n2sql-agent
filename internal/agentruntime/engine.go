@@ -37,6 +37,7 @@ var (
 	ErrInvalidToolTimeout    = errors.New("agent tool timeout must not be negative")
 	ErrInvalidParallelLimit  = errors.New("agent parallel tool limit must be positive")
 	ErrTCCRequiresDurableRun = errors.New("tcc tool requires a durable agent run")
+	ErrRunBudgetExceeded     = errors.New("agent run budget exceeded")
 )
 
 const (
@@ -77,6 +78,7 @@ type Engine struct {
 	tccAgentRunID           int64
 	executionID             string
 	traceID                 string
+	budget                  agent.RunBudget
 }
 
 // EngineOptions controls bounded loop behavior without changing the default
@@ -111,6 +113,7 @@ type EngineOptions struct {
 	CheckpointSink   CheckpointSink
 	TCCCoordinator   *tcc.Coordinator
 	TCCAgentRunID    int64
+	Budget           agent.RunBudget
 }
 
 // TCCTool marks an approved side-effecting tool whose operation is split into
@@ -225,6 +228,7 @@ func NewEngineWithOptions(chat modelruntime.ToolChatRunner, registry *agent.Tool
 		tccAgentRunID:           options.TCCAgentRunID,
 		executionID:             options.ExecutionID,
 		traceID:                 options.TraceID,
+		budget:                  options.Budget,
 	}, nil
 }
 
@@ -287,6 +291,7 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 		checkpointState := compactCheckpointState(ctx, CheckpointState{
 			Version:          1,
 			LastStep:         len(run.Steps()),
+			CurrentNode:      "model",
 			Messages:         conversation,
 			SummaryText:      summaryTextFromMessages(conversation),
 			PendingToolCalls: pendingToolCalls,
@@ -299,13 +304,41 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 
 		var response modelclient.ChatResponse
 		resumingPendingTools := len(pendingToolCalls) > 0
+		streamedMessage := false
+		streamedReasoning := false
 		if resumingPendingTools {
 			response.ToolCalls = append([]modelclient.ToolCall(nil), pendingToolCalls...)
 		} else {
+			if err := e.checkModelBudget(run); err != nil {
+				return finishErrorWithCategory(result, err, agent.FailureStepLimit, emitter)
+			}
 			if err := run.RecordModelCall(); err != nil {
 				return finishErrorWithEvents(result, err, emitter)
 			}
-			response, err = e.chatWithRetry(ctx, conversation, definitions)
+			if streamer, ok := e.chat.(modelruntime.ToolChatRunnerStreamer); ok {
+				response, err = e.chatWithRetryStream(ctx, conversation, definitions, streamer, func(delta modelclient.ChatStreamDelta) error {
+					if delta.ReasoningContent != "" {
+						streamedReasoning = true
+						return emitter.emit(agent.EventReasoningDelta, len(run.Steps())+1, map[string]any{
+							"content": boundedReasoningText(delta.ReasoningContent),
+						})
+					}
+					if delta.Content != "" {
+						streamedMessage = true
+						return emitter.emit(agent.EventMessageDelta, len(run.Steps())+1, map[string]any{
+							"content": security.RedactText(delta.Content),
+						})
+					}
+					return nil
+				})
+			} else {
+				response, err = e.chatWithRetry(ctx, conversation, definitions)
+			}
+			if errors.Is(err, modelruntime.ErrStreamingUnavailable) {
+				streamedMessage = false
+				streamedReasoning = false
+				response, err = e.chatWithRetry(ctx, conversation, definitions)
+			}
 			if err != nil {
 				if stepErr := run.AddStep(agent.Step{Kind: agent.StepModelDecision, Status: agent.StepFailed}); stepErr != nil {
 					return finishErrorWithEvents(result, stepErr, emitter)
@@ -316,14 +349,19 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 		if response.Usage != nil {
 			run.ObserveChatTokens(*response.Usage)
 		}
+		if err := e.checkTotalTokenBudget(run); err != nil {
+			return finishErrorWithCategory(result, err, agent.FailureStepLimit, emitter)
+		}
 		if err := run.AddStep(agent.Step{Kind: agent.StepModelDecision, Status: agent.StepSucceeded}); err != nil {
 			return finishErrorWithEvents(result, err, emitter)
 		}
-		if reasoning := boundedReasoningText(response.ReasoningContent); reasoning != "" {
-			if err := emitter.emit(agent.EventReasoningDelta, len(run.Steps()), map[string]any{
-				"content": reasoning,
-			}); err != nil {
-				return finishError(result, err)
+		if !streamedReasoning {
+			if reasoning := boundedReasoningText(response.ReasoningContent); reasoning != "" {
+				if err := emitter.emit(agent.EventReasoningDelta, len(run.Steps()), map[string]any{
+					"content": reasoning,
+				}); err != nil {
+					return finishError(result, err)
+				}
 			}
 		}
 
@@ -338,12 +376,14 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 			conversation = append(conversation, modelclient.ChatMessage{Role: "assistant", Content: safeMessage})
 			pendingToolCalls = nil
 			e.saveCheckpoint(ctx, CheckpointState{
-				Version: 1, LastStep: len(run.Steps()), Messages: conversation,
+				Version: 1, LastStep: len(run.Steps()), CurrentNode: "finish", Messages: conversation,
 			})
-			if err := emitter.emit(agent.EventMessageDelta, len(run.Steps()), map[string]any{
-				"content": safeMessage,
-			}); err != nil {
-				return finishError(result, err)
+			if !streamedMessage {
+				if err := emitter.emit(agent.EventMessageDelta, len(run.Steps()), map[string]any{
+					"content": safeMessage,
+				}); err != nil {
+					return finishError(result, err)
+				}
 			}
 			if err := run.Complete(safeMessage); err != nil {
 				return finishErrorWithEvents(result, err, emitter)
@@ -368,9 +408,12 @@ func (e *Engine) run(ctx context.Context, runID string, messages []modelclient.C
 		}
 		pendingToolCalls = append([]modelclient.ToolCall(nil), response.ToolCalls...)
 		e.saveCheckpoint(ctx, CheckpointState{
-			Version: 1, LastStep: len(run.Steps()), Messages: conversation,
+			Version: 1, LastStep: len(run.Steps()), CurrentNode: "tool", Messages: conversation,
 			PendingToolCalls: pendingToolCalls,
 		})
+		if err := e.checkToolBudget(run, len(response.ToolCalls)); err != nil {
+			return finishErrorWithCategory(result, err, agent.FailureStepLimit, emitter)
+		}
 		parallelResults, parallel := e.precomputeReadOnlyToolCalls(ctx, response.ToolCalls, seenToolCalls)
 		var fallbackAnswer string
 		hasRelevantToolResult := false
@@ -746,6 +789,27 @@ func (e *Engine) chatWithRetry(ctx context.Context, conversation []modelclient.C
 	return response, err
 }
 
+func (e *Engine) chatWithRetryStream(ctx context.Context, conversation []modelclient.ChatMessage, definitions []agent.FunctionDefinition, streamer modelruntime.ToolChatRunnerStreamer, onDelta func(modelclient.ChatStreamDelta) error) (modelclient.ChatResponse, error) {
+	var response modelclient.ChatResponse
+	var err error
+	for attempt := 0; attempt <= maxModelCallRetries; attempt++ {
+		response, err = streamer.ChatMessagesWithToolsStream(ctx, conversation, definitions, onDelta)
+		if err == nil || !retryableModelError(ctx, err) || attempt == maxModelCallRetries {
+			return response, err
+		}
+		timer := time.NewTimer(retry.ExponentialDelay(attempt+1, modelRetryBaseDelay, modelRetryMaxDelay))
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return modelclient.ChatResponse{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return response, err
+}
+
 func (e *Engine) saveCheckpoint(ctx context.Context, state CheckpointState) {
 	if e == nil || e.checkpointSink == nil || len(state.Messages) == 0 {
 		return
@@ -772,6 +836,7 @@ func (e *Engine) appendToolMessageCheckpoint(ctx context.Context, run *agent.Age
 	e.saveCheckpoint(ctx, CheckpointState{
 		Version:          1,
 		LastStep:         lastStep,
+		CurrentNode:      "model",
 		Messages:         *conversation,
 		PendingToolCalls: *pending,
 	})
@@ -782,6 +847,36 @@ func retryableModelError(ctx context.Context, err error) bool {
 		return false
 	}
 	return ops.IsRetryableFailure(err)
+}
+
+func (e *Engine) checkModelBudget(run *agent.AgentRun) error {
+	if e == nil || run == nil || e.budget.MaxModelCalls <= 0 {
+		return nil
+	}
+	if run.Stats().ModelCalls >= e.budget.MaxModelCalls {
+		return fmt.Errorf("%w: model calls reached %d", ErrRunBudgetExceeded, e.budget.MaxModelCalls)
+	}
+	return nil
+}
+
+func (e *Engine) checkToolBudget(run *agent.AgentRun, batchSize int) error {
+	if e == nil || run == nil || e.budget.MaxToolCalls <= 0 {
+		return nil
+	}
+	if batchSize < 1 || run.Stats().ToolCalls+batchSize > e.budget.MaxToolCalls {
+		return fmt.Errorf("%w: tool calls reached %d", ErrRunBudgetExceeded, e.budget.MaxToolCalls)
+	}
+	return nil
+}
+
+func (e *Engine) checkTotalTokenBudget(run *agent.AgentRun) error {
+	if e == nil || run == nil || e.budget.MaxTotalTokens <= 0 {
+		return nil
+	}
+	if run.Stats().TotalTokens > e.budget.MaxTotalTokens {
+		return fmt.Errorf("%w: total tokens reached %d", ErrRunBudgetExceeded, e.budget.MaxTotalTokens)
+	}
+	return nil
 }
 
 // compactConversation protects the model context during one Agent run. The

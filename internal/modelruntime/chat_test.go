@@ -20,6 +20,26 @@ type chatCompleterStub struct {
 	err     error
 }
 
+type toolStreamCompleter struct{}
+
+func (toolStreamCompleter) Chat(context.Context, string, string, modelclient.ChatRequest) (modelclient.ChatResponse, error) {
+	return modelclient.ChatResponse{}, nil
+}
+
+func (toolStreamCompleter) ChatStreamWithTools(_ context.Context, _ string, _ string, _ modelclient.ChatRequest, onDelta func(modelclient.ChatStreamDelta) error) error {
+	fragments := []modelclient.ChatStreamDelta{
+		{ToolCallIndex: 0, ToolCallID: "call-1", ToolName: "knowledge_search", ToolArguments: `{"query":"`},
+		{ToolCallIndex: 0, ToolArguments: "年假"},
+		{ToolCallIndex: 0, ToolArguments: `"}`},
+	}
+	for _, fragment := range fragments {
+		if err := onDelta(fragment); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type enabledProviderStoreStub struct {
 	current    modelprovider.Provider
 	enabled    []modelprovider.Provider
@@ -225,6 +245,22 @@ func TestChatServiceForwardsToolDefinitions(t *testing.T) {
 	}
 	if string(tool.Function.Parameters) != string(definitions[0].Parameters) {
 		t.Fatalf("parameters = %s, want %s", tool.Function.Parameters, definitions[0].Parameters)
+	}
+}
+
+func TestChatServiceAssemblesSplitToolCallArguments(t *testing.T) {
+	store := providerStoreStub{provider: modelprovider.Provider{
+		BaseURL: "https://api.example.com/v1", APIKeyEnvVar: "TEST_MODEL_PROVIDER_API_KEY", ChatModel: "test-chat-model",
+	}}
+	service := modelruntime.NewChatService(store, toolStreamCompleter{}, "TEST_MODEL_PROVIDER_API_KEY", func(string) (string, bool) {
+		return "test-secret", true
+	})
+	response, err := service.ChatMessagesWithToolsStream(context.Background(), []modelclient.ChatMessage{{Role: "user", Content: "查年假"}}, nil, func(modelclient.ChatStreamDelta) error { return nil })
+	if err != nil {
+		t.Fatalf("ChatMessagesWithToolsStream() error = %v", err)
+	}
+	if len(response.ToolCalls) != 1 || response.ToolCalls[0].Function.Name != "knowledge_search" || response.ToolCalls[0].Function.Arguments != `{"query":"年假"}` {
+		t.Fatalf("tool calls = %#v, want one assembled call", response.ToolCalls)
 	}
 }
 
