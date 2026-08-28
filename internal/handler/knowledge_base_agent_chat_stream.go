@@ -315,10 +315,10 @@ func NewAgentRunStreamWithStore(hub *agentstream.Hub, eventStore agentrun.EventS
 								}
 							}
 						}
-					} else if errors.Is(streamErr, agentstream.ErrEventGap) {
-						_ = writeAgentStreamGap(w, flusher, runID, lastEventID)
-						return
 					}
+					// Redis is only the short-lived transport window. If its
+					// cursor has expired, continue below and try the durable
+					// PostgreSQL journal before declaring a real replay gap.
 				}
 				storedEvents, storeErr := eventStore.List(r.Context(), runID, knowledgeBaseID)
 				if storeErr == nil && len(storedEvents) > 0 {
