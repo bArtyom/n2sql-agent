@@ -15,9 +15,11 @@ import (
 	"time"
 
 	"github.com/bArtyom/n2sql-agent/internal/agent"
+	"github.com/bArtyom/n2sql-agent/internal/agentrun"
 	"github.com/bArtyom/n2sql-agent/internal/agentservice"
 	"github.com/bArtyom/n2sql-agent/internal/conversation"
 	"github.com/bArtyom/n2sql-agent/internal/document"
+	"github.com/bArtyom/n2sql-agent/internal/documentextractor"
 	"github.com/bArtyom/n2sql-agent/internal/metrics"
 	"github.com/bArtyom/n2sql-agent/internal/modelprovider"
 	"github.com/bArtyom/n2sql-agent/internal/modelruntime"
@@ -175,6 +177,7 @@ func idempotencyRequestHash(knowledgeBaseID int64, request agentservice.ChatRequ
 		ConversationID      int64                         `json:"conversation_id"`
 		Message             string                        `json:"message"`
 		ChatModel           string                        `json:"chat_model"`
+		MultitaskStrategy   string                        `json:"multitask_strategy"`
 		ThinkingMode        string                        `json:"thinking_mode"`
 		MaxCompletionTokens int                           `json:"max_completion_tokens"`
 		Attachments         []agentservice.ChatAttachment `json:"attachments"`
@@ -186,7 +189,7 @@ func idempotencyRequestHash(knowledgeBaseID int64, request agentservice.ChatRequ
 		FolderPath          *string                       `json:"folder_path"`
 		FolderRecursive     bool                          `json:"folder_recursive"`
 		QueryRewrite        bool                          `json:"query_rewrite"`
-	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message, ChatModel: request.ChatModel, ThinkingMode: request.ThinkingMode, MaxCompletionTokens: request.MaxCompletionTokens, Attachments: request.Attachments, TopK: request.TopK, Threshold: request.SimilarityThreshold, KeywordThreshold: request.KeywordThreshold, DocumentIDs: request.DocumentIDs, TagIDs: request.TagIDs, FolderPath: request.FolderPath, FolderRecursive: request.FolderRecursive, QueryRewrite: request.QueryRewrite})
+	}{KnowledgeBaseID: knowledgeBaseID, ConversationID: request.ConversationID, Message: request.Message, ChatModel: request.ChatModel, MultitaskStrategy: request.MultitaskStrategy, ThinkingMode: request.ThinkingMode, MaxCompletionTokens: request.MaxCompletionTokens, Attachments: request.Attachments, TopK: request.TopK, Threshold: request.SimilarityThreshold, KeywordThreshold: request.KeywordThreshold, DocumentIDs: request.DocumentIDs, TagIDs: request.TagIDs, FolderPath: request.FolderPath, FolderRecursive: request.FolderRecursive, QueryRewrite: request.QueryRewrite})
 	if err != nil {
 		return "", err
 	}
@@ -228,6 +231,12 @@ func decodeKnowledgeBaseAgentChatRequest(w http.ResponseWriter, r *http.Request,
 	if request.ThinkingMode != "" {
 		request.ThinkingMode = thinkingMode
 	}
+	multitaskStrategy, err := agentrun.NormalizeMultitaskStrategy(request.MultitaskStrategy)
+	if err != nil {
+		http.Error(w, `{"error":"invalid multitask strategy"}`, http.StatusBadRequest)
+		return 0, agentservice.ChatRequest{}, false
+	}
+	request.MultitaskStrategy = string(multitaskStrategy)
 	if err := agentservice.ValidateAttachments(request.Attachments); err != nil {
 		if errors.Is(err, agentservice.ErrAttachmentTooLarge) {
 			http.Error(w, `{"error":"chat attachment is too large"}`, http.StatusRequestEntityTooLarge)
@@ -449,6 +458,7 @@ func conversationMetadataFromAgentResponse(response agentservice.Response) conve
 			parentContent, _ := truncateMetadataText(source.ParentContent, persistedSourceContentBytes)
 			metadata.Sources = append(metadata.Sources, conversation.SourceReference{
 				DocumentID:       source.DocumentID,
+				SourceKey:        sourceReferenceKey(source),
 				OriginalFilename: source.OriginalFilename,
 				AssetURL:         source.AssetURL,
 				AssetURLs:        append([]string(nil), source.AssetURLs...),
@@ -466,6 +476,7 @@ func conversationMetadataFromAgentResponse(response agentservice.Response) conve
 				HeadingScore:     source.HeadingScore,
 				FusionScore:      source.FusionScore,
 				RerankScore:      source.RerankScore,
+				Layout:           boundedLayout(source.Layout),
 			})
 		}
 	}
@@ -516,6 +527,13 @@ func conversationMetadataFromAgentResponse(response agentservice.Response) conve
 		metadata.AgentTrace = trace
 	}
 	return metadata
+}
+
+func boundedLayout(layout []documentextractor.PDFLayoutBlock) []documentextractor.PDFLayoutBlock {
+	if len(layout) > 64 {
+		layout = layout[:64]
+	}
+	return append([]documentextractor.PDFLayoutBlock(nil), layout...)
 }
 
 func boundedTraceSourceKeys(keys []string, sources []retrieval.Result) []string {

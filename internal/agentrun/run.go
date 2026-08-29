@@ -16,6 +16,16 @@ import (
 
 type Status string
 
+// MultitaskStrategy controls what a new root Run does when its conversation
+// already has another active root Run.
+type MultitaskStrategy string
+
+const (
+	MultitaskReject    MultitaskStrategy = "reject"
+	MultitaskRollback  MultitaskStrategy = "rollback"
+	MultitaskInterrupt MultitaskStrategy = "interrupt"
+)
+
 const (
 	StatusPending         Status = "pending"
 	StatusRunning         Status = "running"
@@ -26,6 +36,7 @@ const (
 	StatusFailed          Status = "failed"
 	StatusTimeout         Status = "timeout"
 	StatusCanceled        Status = "canceled"
+	StatusInterrupted     Status = "interrupted"
 )
 
 type Kind string
@@ -36,19 +47,33 @@ const (
 )
 
 var (
-	ErrNoRun              = errors.New("no pending agent run")
-	ErrRunNotFound        = errors.New("agent run not found")
-	ErrInvalidRun         = errors.New("invalid agent run")
-	ErrLeaseLost          = errors.New("agent run lease lost")
-	ErrCheckpointConflict = errors.New("agent checkpoint ownership or version conflict")
-	ErrApprovalNotFound   = errors.New("agent approval not found")
+	ErrNoRun                    = errors.New("no pending agent run")
+	ErrRunNotFound              = errors.New("agent run not found")
+	ErrInvalidRun               = errors.New("invalid agent run")
+	ErrLeaseLost                = errors.New("agent run lease lost")
+	ErrCheckpointConflict       = errors.New("agent checkpoint ownership or version conflict")
+	ErrApprovalNotFound         = errors.New("agent approval not found")
+	ErrInvalidMultitaskStrategy = errors.New("invalid multitask strategy")
 )
 
 const defaultLeaseDuration = 5 * time.Minute
 const maxAgentRunAttempts = 3
 
 func IsTerminalStatus(status Status) bool {
-	return status == StatusSucceeded || status == StatusFailed || status == StatusTimeout || status == StatusCanceled
+	return status == StatusSucceeded || status == StatusFailed || status == StatusTimeout || status == StatusCanceled || status == StatusInterrupted
+}
+
+func NormalizeMultitaskStrategy(value string) (MultitaskStrategy, error) {
+	strategy := MultitaskStrategy(strings.ToLower(strings.TrimSpace(value)))
+	if strategy == "" {
+		return MultitaskReject, nil
+	}
+	switch strategy {
+	case MultitaskReject, MultitaskRollback, MultitaskInterrupt:
+		return strategy, nil
+	default:
+		return "", ErrInvalidMultitaskStrategy
+	}
 }
 
 func shouldRetryExpiredRun(attemptCount int) bool {
@@ -101,6 +126,43 @@ type CreateInput struct {
 	ParentRunID     int64
 	RunKind         Kind
 	Request         json.RawMessage
+}
+
+// AdmissionInput is the atomic root-Run admission request. Child Runs must
+// continue using their dedicated lifecycle methods and never enter this guard.
+type AdmissionInput struct {
+	Create   CreateInput
+	Strategy MultitaskStrategy
+}
+
+// AdmissionResult contains the newly admitted Run and, for rollback or
+// interrupt, the Run tree that was replaced in the same database transaction.
+type AdmissionResult struct {
+	Run              Run
+	ReplacedRun      *Run
+	ReplacedChildIDs []string
+}
+
+// ActiveRunConflict is returned when reject is selected and a conversation
+// already has an active root Run. Keeping the Run metadata in the typed error
+// lets the HTTP layer return a useful conflict response without another query.
+type ActiveRunConflict struct {
+	ActiveRun Run
+	Requested MultitaskStrategy
+}
+
+func (e *ActiveRunConflict) Error() string {
+	if e == nil {
+		return "conversation already has an active agent run"
+	}
+	return fmt.Sprintf("conversation %d already has active agent run %s (%s)", e.ActiveRun.ConversationID, e.ActiveRun.RunID, e.ActiveRun.Status)
+}
+
+// MultitaskAdmitter atomically admits a root Run according to a conversation
+// multitask policy. PostgresStore implements the durable version; lightweight
+// adapters may keep using Store.Create when they do not support this feature.
+type MultitaskAdmitter interface {
+	Admit(context.Context, AdmissionInput) (AdmissionResult, error)
 }
 
 type ChildCreateInput struct {

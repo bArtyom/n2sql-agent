@@ -64,6 +64,32 @@ func TestPersistentAgentRunSubmissionReturnsRunIDWithoutExecuting(t *testing.T) 
 	}
 }
 
+func TestPersistentAgentRunSubmissionPersistsNormalizedMultitaskStrategy(t *testing.T) {
+	store := &agentRunStoreStub{}
+	hub := agentstream.NewHub()
+	endpoint := handler.NewPersistentAgentRunSubmission(64*1024, store, nil, hub)
+	request := httptest.NewRequest(http.MethodPost, "/api/knowledge-bases/7/agent-chat/stream", strings.NewReader(`{"message":"问题","multitask_strategy":" INTERRUPT "}`))
+	request.SetPathValue("id", "7")
+	response := httptest.NewRecorder()
+
+	endpoint.ServeHTTP(response, request)
+
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusAccepted, response.Body.String())
+	}
+	var snapshot struct {
+		Request struct {
+			MultitaskStrategy string `json:"multitask_strategy"`
+		} `json:"request"`
+	}
+	if err := json.Unmarshal(store.created.Request, &snapshot); err != nil {
+		t.Fatalf("decode persisted request: %v", err)
+	}
+	if snapshot.Request.MultitaskStrategy != "interrupt" {
+		t.Fatalf("persisted multitask strategy = %q, want interrupt", snapshot.Request.MultitaskStrategy)
+	}
+}
+
 type waitingChildrenAnswerer struct{}
 
 func (waitingChildrenAnswerer) AnswerWithEvents(context.Context, int64, agentservice.ChatRequest, agentruntime.EventSink) (agentservice.Response, error) {

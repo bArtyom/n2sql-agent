@@ -57,6 +57,7 @@ type ChatRequest struct {
 	ParentRunDatabaseID int64                 `json:"-"`
 	TopK                int                   `json:"top_k,omitempty"`
 	ChatModel           string                `json:"chat_model,omitempty"`
+	MultitaskStrategy   string                `json:"multitask_strategy,omitempty"`
 	ThinkingMode        string                `json:"thinking_mode,omitempty"`
 	MaxCompletionTokens int                   `json:"max_completion_tokens,omitempty"`
 	MaxModelCalls       int                   `json:"max_model_calls,omitempty"`
