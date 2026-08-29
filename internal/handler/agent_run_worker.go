@@ -65,35 +65,88 @@ func NewPersistentAgentRunSubmission(maxHistoryBytes int, store agentrun.Store, 
 			writeKnowledgeBaseAgentChatError(w, fmt.Errorf("start agent stream: %w", err))
 			return
 		}
+		finishNewHubRun := true
+		defer func() {
+			if finishNewHubRun {
+				_ = hub.Finish(runID)
+			}
+		}()
 		snapshot, err := json.Marshal(persistedAgentRequest{
 			Request:        request,
 			IdempotencyKey: idempotencyKey,
 			RequestHash:    requestHash,
 		})
 		if err != nil {
-			_ = hub.Finish(runID)
 			writeKnowledgeBaseAgentChatError(w, fmt.Errorf("encode agent request snapshot: %w", err))
 			return
 		}
-		if _, err := store.Create(r.Context(), agentrun.CreateInput{
-			RunID:           runID,
-			KnowledgeBaseID: knowledgeBaseID,
-			ConversationID:  request.ConversationID,
-			Request:         snapshot,
-		}); err != nil {
-			_ = hub.Finish(runID)
+		admission, err := admitPersistentAgentRun(r.Context(), store, agentrun.AdmissionInput{
+			Create: agentrun.CreateInput{
+				RunID:           runID,
+				KnowledgeBaseID: knowledgeBaseID,
+				ConversationID:  request.ConversationID,
+				RunKind:         agentrun.KindRoot,
+				Request:         snapshot,
+			},
+			Strategy: agentrun.MultitaskStrategy(request.MultitaskStrategy),
+		})
+		if err != nil {
+			var conflict *agentrun.ActiveRunConflict
+			if errors.As(err, &conflict) {
+				writeActiveRunConflict(w, conflict)
+				return
+			}
 			writeKnowledgeBaseAgentChatError(w, fmt.Errorf("create agent run: %w", err))
 			return
 		}
+		if admission.Run.RunID != "" && admission.Run.RunID != runID {
+			writeKnowledgeBaseAgentChatError(w, fmt.Errorf("admitted agent run ID %q does not match requested ID %q", admission.Run.RunID, runID))
+			return
+		}
+		cancelReplacedAgentRun(hub, knowledgeBaseID, admission)
+		finishNewHubRun = false
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Agent-Run-ID", runID)
 		w.WriteHeader(http.StatusAccepted)
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		payload := map[string]any{
 			"run_id":     runID,
 			"status":     agentrun.StatusPending,
 			"stream_url": fmt.Sprintf("/api/knowledge-bases/%d/agent-runs/%s/stream", knowledgeBaseID, runID),
-		})
+		}
+		if admission.ReplacedRun != nil {
+			payload["replaced_run_id"] = admission.ReplacedRun.RunID
+			payload["replaced_status"] = admission.ReplacedRun.Status
+		}
+		_ = json.NewEncoder(w).Encode(payload)
 	})
+}
+
+func admitPersistentAgentRun(ctx context.Context, store agentrun.Store, input agentrun.AdmissionInput) (agentrun.AdmissionResult, error) {
+	if store == nil {
+		return agentrun.AdmissionResult{}, agentrun.ErrInvalidRun
+	}
+	if admitter, ok := store.(agentrun.MultitaskAdmitter); ok {
+		return admitter.Admit(ctx, input)
+	}
+	run, err := store.Create(ctx, input.Create)
+	if err != nil {
+		return agentrun.AdmissionResult{}, err
+	}
+	return agentrun.AdmissionResult{Run: run}, nil
+}
+
+func cancelReplacedAgentRun(hub *agentstream.Hub, knowledgeBaseID int64, admission agentrun.AdmissionResult) {
+	if hub == nil || admission.ReplacedRun == nil {
+		return
+	}
+	if err := hub.Cancel(admission.ReplacedRun.RunID, knowledgeBaseID); err != nil && !errors.Is(err, agentstream.ErrRunNotFound) {
+		slog.Warn("cancel replaced agent run failed", "run_id", admission.ReplacedRun.RunID, "error", err)
+	}
+	for _, childID := range admission.ReplacedChildIDs {
+		if err := hub.Cancel(childID, knowledgeBaseID); err != nil && !errors.Is(err, agentstream.ErrRunNotFound) {
+			slog.Warn("cancel replaced child agent run failed", "run_id", childID, "parent_run_id", admission.ReplacedRun.RunID, "error", err)
+		}
+	}
 }
 
 // NewPersistentAgentExecutor adapts the Agent service to the durable Worker.

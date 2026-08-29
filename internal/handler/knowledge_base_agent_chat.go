@@ -312,10 +312,27 @@ func writeKnowledgeBaseAgentChatError(w http.ResponseWriter, err error) {
 	http.Error(w, `{"error":`+strconv.Quote(message)+`}`, status)
 }
 
+func writeActiveRunConflict(w http.ResponseWriter, conflict *agentrun.ActiveRunConflict) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]any{
+			"code":               "conversation_run_active",
+			"message":            "当前会话已有任务正在执行",
+			"active_run_id":      conflict.ActiveRun.RunID,
+			"active_status":      conflict.ActiveRun.Status,
+			"requested_strategy": conflict.Requested,
+			"conversation_id":    conflict.ActiveRun.ConversationID,
+		},
+	})
+}
+
 func knowledgeBaseAgentChatError(err error) (string, int) {
 	switch {
 	case errors.Is(err, agentservice.ErrInvalidRequest):
 		return "invalid agent chat request", http.StatusBadRequest
+	case errors.Is(err, agentrun.ErrInvalidMultitaskStrategy):
+		return "invalid multitask strategy", http.StatusBadRequest
 	case errors.Is(err, retrieval.ErrInvalidDocumentIDs):
 		return "invalid agent chat document filter", http.StatusBadRequest
 	case errors.Is(err, retrieval.ErrInvalidTagIDs):
