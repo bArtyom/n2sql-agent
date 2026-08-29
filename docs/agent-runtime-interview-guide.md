@@ -4,26 +4,28 @@
 
 ## 1. 一分钟介绍
 
-这是一个面向文档知识库的 Agent + RAG 问答系统。用户提交问题后，HTTP 层只负责校验请求、创建 `agent_run` 并返回 `run_id`，真正的 ReAct 执行交给后台 Worker。Worker 使用数据库队列领取任务，通过模型的 Function Calling 决定是否调用知识库检索、文档读取或其他安全工具；工具结果作为不可信观察反馈给模型，模型再决定继续调用工具还是生成答案。
+这是一个面向文档知识库的 Agent + RAG 问答系统。用户先创建或选择一个 `conversation_id` 作为多轮会话，再在这个会话下提交问题；每个问题都会创建一个独立的 `agent_run`，用 `run_id` 标识这一轮执行。HTTP 层只负责校验请求、创建 `agent_run` 并返回 `run_id`，真正的 ReAct 执行交给后台 Worker。Worker 使用数据库队列领取任务，通过模型的 Function Calling 决定是否调用知识库检索、文档读取或其他安全工具；工具结果作为不可信观察反馈给模型，模型再决定继续调用工具还是生成答案。
 
 运行过程具有流式事件、统一 checkpoint、租约续期、Worker 接管、工具失败自修正、审批中断、子 Agent、运行预算和错误分类。PostgreSQL 保存需要恢复和审计的事实，Redis/Hub 只负责低延迟事件传输和短期回放。最终普通会话只保存用户问题和最终助手回答，内部工具过程保存在 Agent Run 的运行轨迹和统一 checkpoint 中。
 
 面试时可以概括为：
 
-> “我的 Agent 是一个数据库驱动的异步 ReAct Runtime。提交请求后先创建 pending Run，Worker 用 `FOR UPDATE SKIP LOCKED` 领取并获得租约；Engine 通过 Function Calling 在 ModelNode 和 ToolNode 之间循环。每个模型决策、工具结果和中断边界写入一个版本化 checkpoint，事件同时进入持久化事件日志和 Redis/Hub，由 SSE 用游标续传。Worker 崩溃后，新的 Worker 通过租约回收和 checkpoint fencing 接管，从 pending tool call 或当前节点继续。普通工具失败会把错误反馈给模型重试，副作用工具必须审批并遵守幂等边界。”
+> “我的 Agent 是一个数据库驱动的异步 ReAct Runtime。用户在一个 `conversation_id` 下提交问题，每条问题创建一个 `run_id` 对应的 pending Run；Worker 用 `FOR UPDATE SKIP LOCKED` 领取并获得租约。Engine 通过 Function Calling 在 ModelNode 和 ToolNode 之间循环。每个模型决策、工具结果和中断边界写入一个版本化 checkpoint，事件同时进入持久化事件日志和 Redis/Hub，由 SSE 用游标续传。Worker 崩溃后，新的 Worker 通过租约回收和 checkpoint fencing 接管，从 pending tool call 或当前节点继续。普通工具失败会把错误反馈给模型重试，副作用工具必须审批并遵守幂等边界。”
 
 ## 2. 总体架构
 
 ```text
 浏览器
-  │ POST /agent-chat/stream
+  │ 先创建/选择 conversation_id
+  │ POST /agent-chat/stream {conversation_id, message}
   ▼
 HTTP Handler
   ├─ 校验知识库范围、模型、附件、幂等键
-  ├─ INSERT agent_runs(status=pending, request snapshot)
+  ├─ INSERT agent_runs(status=pending, conversation_id, request snapshot)
   └─ 202 {run_id, stream_url}
 
 浏览器 ── GET /agent-runs/{run_id}/stream ──► SSE Handler
+           （只订阅这一轮 Run；会话关系由 run_id → agent_runs.conversation_id 解析）
                                                │
                                                ├─ Redis Stream / Hub：实时事件、短期回放
                                                └─ PostgreSQL event journal：可靠补发
@@ -41,8 +43,8 @@ HTTP Handler
           ├─ Checkpoint：一个统一可恢复状态
           └─ Events：run/tool/reasoning/message/child/interrupt
               │
-              ├─ agent_runs.response：最终结果
-              ├─ conversation_messages：用户问题 + 最终回答
+              ├─ agent_runs.response：这一轮 Run 的最终结果
+              ├─ conversation_messages：同一个 conversation_id 下的用户问题 + 最终回答
               └─ agent_checkpoints：恢复所需隐藏状态
 ```
 
@@ -56,6 +58,32 @@ HTTP Handler
 | PostgreSQL | Run、Attempt、Checkpoint、最终答案、事件日志 | 不承担低延迟广播 |
 | Redis/Hub | 实时事件、短期 replay、订阅者广播 | 不是最终状态事实来源 |
 | SSE Handler | 把事件按游标发给浏览器 | 不决定 Agent 下一步 |
+
+### 2.1 `conversation_id`、`run_id` 和 `execution_id` 的关系
+
+这三个 ID 处在不同层级，不能互相替代：
+
+| ID | 表示什么 | 生命周期 | 例子 |
+| --- | --- | --- | --- |
+| `conversation_id` | 一整段多轮会话，也就是用户在界面里看到的一张会话卡片 | 从创建会话开始，直到会话被删除 | `42` |
+| `run_id` | 会话中的一轮 Agent 执行，通常对应用户提交的一条问题 | 这一轮从 `pending` 到终态；Worker 重试时仍然不变 | `run-101` |
+| `execution_id` | 某个 `run_id` 被某次 Worker 领取执行的尝试 | 每次重新领取都会生成新的值 | `run-101-attempt-2-...` |
+| `agent_runs.id` | PostgreSQL 内部主键 | 数据库内部使用，不作为前端公开运行标识 | `101` |
+
+例如：
+
+```text
+conversations
+  id=42  title="员工手册问答"
+
+agent_runs
+  id=101  run_id=run-101  conversation_id=42  message="年假怎么计算？"
+  id=102  run_id=run-102  conversation_id=42  message="试用期也适用吗？"
+```
+
+两条 Run 属于同一个多轮会话，但各自有独立的 SSE 事件、状态、租约和 checkpoint。`run-101` 如果因 Worker 崩溃被接管，仍然是 `run-101`；只会更换 `execution_id` 和租约，不会创建新的会话，也不会变成 `run-102`。
+
+当前事件信封以 `run_id` 作为实时订阅范围，通常不在每一条事件中重复携带 `conversation_id`。需要知道会话归属时，SSE Handler 或状态接口通过 `agent_runs.run_id → agent_runs.conversation_id` 查询；像 `conversation_saved` 这类会话收口事件则会显式带上 `conversation_id`。这样事件游标只需要处理当前 Run，不会把同一会话的多轮事件混在一个流里。
 
 ## 3. 与 DeerFlow 思路对应的十个能力
 
@@ -87,7 +115,7 @@ SSE Handler 的处理顺序是：
 
 ### 3.3 一个统一 checkpoint
 
-逻辑上每个 Run/Thread 只有一个 `AgentState`，当前实现通过 `agent_checkpoints` 表保存它。它不是“上下文 checkpoint 一张表 + 工具 checkpoint 另一张表”，而是一份完整快照，里面可以同时有：
+逻辑上每个 Run/Thread 只有一个 `AgentState`，当前实现通过 `agent_checkpoints` 表保存它。这里的 Thread 就是由 `conversation_id` 标识的多轮会话；当前正在执行的轮次则由 `agent_run_id`/`run_id` 标识。它不是“上下文 checkpoint 一张表 + 工具 checkpoint 另一张表”，而是一份完整快照，里面可以同时有：
 
 ```json
 {
@@ -104,6 +132,18 @@ SSE Handler 的处理顺序是：
   ]
 }
 ```
+
+`conversation_id` 通常保存在 checkpoint 表的关系字段中，而不是重复塞进 `state` JSON：
+
+```text
+agent_checkpoints
+  agent_run_id=101
+  conversation_id=42
+  checkpoint_id="run-101-unified"
+  state={current_node:"tool", pending_tool_calls:[...]}
+```
+
+因此，Worker 接管当前 Run 时按 `agent_run_id` 读取；新一轮 Run 没有自己的恢复 checkpoint 时，才可以按 `conversation_id` 找到该会话最近的线程 checkpoint。两种读取场景都不会把不同会话的状态混在一起。
 
 保存边界包括：
 
@@ -261,21 +301,37 @@ type Provider interface {
 
 ## 4. 一次完整对话示例
 
-问题：用户问“请总结《员工手册》里的年假规定”。
+问题：用户在会话 `conversation_id=42` 中问“请总结《员工手册》里的年假规定”。
+
+如果是新会话，前端先创建一条 `conversations` 记录并得到 `conversation_id=42`；如果是已有会话，则直接复用这个 ID。它代表整段多轮对话，不会随着每个问题变化。
 
 ### 第一步：提交
 
-HTTP Handler 校验用户的知识库权限、消息、模型和附件，生成 `run_id=run-101`，写入：
+HTTP Handler 接收 `conversation_id=42`，校验用户的知识库权限、消息、模型和附件，生成本轮 `run_id=run-101`，写入：
+
+```http
+POST /api/knowledge-bases/7/agent-chat/stream
+Content-Type: application/json
+
+{"conversation_id":42,"message":"请总结《员工手册》里的年假规定"}
+```
 
 ```text
+conversations
+  conversation_id=42
+  knowledge_base_id=7
+  title="员工手册问答"
+
 agent_runs
+  id=101
   run_id=run-101
+  conversation_id=42
   status=pending
   attempt_count=0
   request={消息、知识库范围、模型、预算}
 ```
 
-返回 `202`，浏览器随后连接 `/agent-runs/run-101/stream`。
+返回 `202` 和 `run_id=run-101`，浏览器随后连接 `/agent-runs/run-101/stream`。SSE 连接跟踪的是本轮 `run_id`；它属于哪个多轮会话，由 `agent_runs.conversation_id=42` 关联。
 
 ### 第二步：领取和租约
 
@@ -287,9 +343,10 @@ attempt_count=1
 lease_token=lease-a
 lease_until=未来 5 分钟
 execution_id=run-101-attempt-1-...
+conversation_id=42
 ```
 
-另一个用户的 Run 可以被 Worker B 同时领取。当前 Worker 还启动心跳，定期用同一个 `lease_token` 续租；续租失败就取消执行 context。
+另一个用户的 Run 可以被 Worker B 同时领取。当前 Worker 还启动心跳，定期用同一个 `lease_token` 续租；续租失败就取消执行 context。注意，`conversation_id=42` 只是说明这轮 Run 属于哪段会话，不是 Worker 领取任务的唯一键；Worker 领取和恢复使用 `run_id`/数据库主键。
 
 ### 第三步：第一次模型决策
 
@@ -335,11 +392,44 @@ agent_runs.response
   {answer, sources, stats, trace, execution_id}
 
 conversation_messages
-  user: “请总结《员工手册》里的年假规定”
-  assistant: “根据员工手册，……”
+  conversation_id=42  role=user       content=“请总结《员工手册》里的年假规定”
+  conversation_id=42  role=assistant   content=“根据员工手册，……”
 ```
 
-普通会话表不保存每一个 tool call。`agent_run_events` 保存可审计的事件日志，`agent_checkpoints` 保存最后的隐藏运行状态。Run 标记 `succeeded`，释放租约，Hub/Redis 流结束。
+普通会话表不保存每一个 tool call。`agent_run_events` 保存可审计的事件日志，`agent_checkpoints` 保存最后的隐藏运行状态；这两者都能通过 `agent_run_id` 找到本轮，并通过 `conversation_id=42` 找到所属会话。Run 标记 `succeeded`，释放租约，Hub/Redis 流结束。
+
+### 第七步：同一个会话的下一轮
+
+用户继续在原来的会话中提问：
+
+```http
+POST /api/knowledge-bases/7/agent-chat/stream
+Content-Type: application/json
+
+{"conversation_id":42,"message":"那试用期员工也适用吗？"}
+```
+
+这次不会复用 `run-101`，而是创建新的 Run：
+
+```text
+agent_runs
+  id=102
+  run_id=run-102
+  conversation_id=42
+  status=pending
+```
+
+Worker 执行 `run-102` 时，按照 `conversation_id=42` 读取该会话已经完成的用户消息和助手回答，并把当前问题追加到本轮上下文。如果需要恢复的是 `run-102` 自己的中断或崩溃，则优先读取 `agent_run_id=102` 的 checkpoint；只有新一轮没有自己的恢复状态时，才使用该会话最近的线程级 checkpoint 作为隐藏运行上下文。完成后，新的 user/assistant 交换仍然写入 `conversation_id=42`，因此一段会话可以包含多个 Run。
+
+```text
+conversation_messages（conversation_id=42）
+  1  user      请总结《员工手册》里的年假规定
+  2  assistant 根据员工手册，……
+  3  user      那试用期员工也适用吗？
+  4  assistant 试用期员工……
+```
+
+上一轮的内部 `tool_called`、`tool_finished` 事件不会变成这张普通聊天表中的消息；它们仍通过上一轮的 `run_id=run-101` 关联到运行事件和 checkpoint。这样既能保留多轮对话语义，又不会把不同轮次的实时 SSE 事件混成一条流。
 
 ## 5. Worker 崩溃、重试和恢复示例
 
@@ -347,6 +437,8 @@ conversation_messages
 
 ```json
 {
+  "run_id": "run-101",
+  "conversation_id": 42,
   "version": 4,
   "current_node": "model",
   "messages": [
@@ -358,12 +450,14 @@ conversation_messages
 }
 ```
 
+上面 JSON 为了便于理解把两个关联 ID 一起展示；实际实现中，`run_id` 和 `conversation_id` 主要由 `agent_runs`/`agent_checkpoints` 的列保存，`state` JSON 重点保存可恢复的 Agent 状态。
+
 Worker A 在下一次模型请求前崩溃：
 
 1. 心跳停止，`lease_until` 到期；
 2. 回收逻辑 `RequeueExpired` 把 `running` 改为 `pending/requeued`，增加下一次尝试记录；
 3. Worker B 用新的 `lease_token=lease-b` 领取；
-4. B 读取 `agent_runs`、同一个 `agent_checkpoints` 的最新有效版本和请求快照；
+4. B 读取 `agent_runs` 中的 `conversation_id=42`、同一个 `agent_checkpoints` 的最新有效版本和请求快照；
 5. 因为 `pending_tool_calls` 为空，B 不重复知识库检索，直接将已有工具结果送进模型继续决策；
 6. B 写 checkpoint 时携带 `lease-b` 和期望版本 4。旧 A 如果延迟回来写入，会被 `ErrCheckpointConflict` 拒绝。
 
@@ -381,11 +475,11 @@ Worker A 在下一次模型请求前崩溃：
 
 | 表/字段 | 保存内容 | 用途 |
 | --- | --- | --- |
-| `agent_runs` | request snapshot、状态、attempt、租约、错误、stop reason、最终 response | Worker 领取、状态查询、最终答案恢复 |
+| `agent_runs` | `run_id`、`conversation_id`、request snapshot、状态、attempt、租约、错误、stop reason、最终 response | Worker 领取、按会话关联各轮 Run、状态查询、最终答案恢复 |
 | `agent_run_attempts` | 每次 Worker 尝试的开始/结束、错误和状态 | 解释重试和崩溃恢复 |
-| `agent_checkpoints` | 一个统一 AgentState 的版本快照 | Worker 接管、pending tool、审批和上下文恢复 |
+| `agent_checkpoints` | 一个统一 AgentState 的版本快照，以及所属 `agent_run_id`/`conversation_id` | Worker 接管当前 Run、按会话加载线程状态、pending tool、审批和上下文恢复 |
 | `agent_run_events` | 版本化事件和 durable seq | Redis gap 后补发、审计和调试 |
-| `conversation_messages` | 用户消息和最终助手回答 | 多轮对话历史 |
+| `conversation_messages` | `conversation_id` 下的用户消息和最终助手回答 | 多轮对话历史；同一个会话通过这个 ID 串起多个问题和回答 |
 | memory 表 | 用户级长期记忆/偏好 | 新对话注入或按需检索 |
 
 ### Redis/Hub：短期事件层
@@ -476,7 +570,15 @@ Redis 适合实时事件和短期回放，但 TTL、内存容量和故障策略�
 
 ### checkpoint 和普通聊天历史有什么区别？
 
-普通聊天历史面向用户，只有用户问题和最终助手回答；checkpoint 面向运行时，包含当前轮尚未结束的工具调用、观察、压缩摘要、当前节点和中断信息。Run 结束后 checkpoint 仍可以作为该 Thread 的隐藏恢复状态，但不会原样展示给用户。
+`conversation_id` 标识多轮会话，普通聊天历史面向用户，查询这个 ID 得到该会话中的用户问题和最终助手回答；`run_id` 标识其中某一轮执行，checkpoint 面向运行时，包含该 Run 尚未结束的工具调用、观察、压缩摘要、当前节点和中断信息。Run 结束后 checkpoint 仍可以作为该 `conversation_id` 对应 Thread 的隐藏恢复状态，但不会原样展示给用户。
+
+### `conversation_id` 和 `run_id` 有什么区别？
+
+`conversation_id` 是会话级 ID，表示用户在界面中打开的整段多轮对话；`run_id` 是执行级 ID，表示这段会话中的某一轮 Agent 任务。比如会话 `42` 先问“年假怎么计算”，创建 `run-101`；随后再问“试用期适用吗”，同一个会话 `42` 会创建新的 `run-102`。如果 `run-101` 的 Worker 崩溃，Worker B 接管的仍是 `run-101`，不会创建 `run-102`；只有用户真正发起下一条问题时才创建新的 Run。`execution_id` 则进一步标识某个 Run 的第几次 Worker 尝试。
+
+面试时可以这样回答：
+
+> “我把会话和执行分开建模。`conversation_id` 串起一段多轮聊天，负责关联会话标题、普通消息和线程级上下文；`run_id` 表示其中一轮异步 Agent 执行，负责状态、SSE、租约和 checkpoint。一个 conversation 可以有多个 run，同一个 run 发生 Worker 重试时 run_id 不变，只更换 execution_id 和 lease token。”
 
 ### Worker 崩溃后怎样避免旧 Worker 覆盖新状态？
 
