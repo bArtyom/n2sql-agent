@@ -300,7 +300,7 @@ npm run dev
 
 前端默认运行在 `http://localhost:5173`，并将后端请求代理到 `http://localhost:8080`。
 
-问答台可以切换“标准 Agent”和“协作研究”。标准 Agent 会写入当前会话，并兼容支持 `reasoning_content` 的模型：可以选择快速/标准/深度思考级别（映射为 OpenAI-compatible `reasoning_effort`），模型返回深度思考时，回答前会显示默认折叠的思考卡片；思考内容只保留在当前页面，不写入会话历史。标准 Agent 还支持本轮 PNG/JPEG/WEBP 图片和 TXT/Markdown 文本附件，附件只发送给当前模型请求，不自动写入知识库。协作研究会展示 Researcher 的检索轨迹与引用，但结果只保留在当前页面，不写入会话历史。
+问答台只保留标准 Agent 对话。标准 Agent 会写入当前会话，并兼容支持 `reasoning_content` 的模型：可以选择快速/标准/深度思考级别（映射为 OpenAI-compatible `reasoning_effort`），模型返回深度思考时，回答前会显示默认折叠的思考卡片；思考内容只保留在当前页面，不写入会话历史。标准 Agent 还支持本轮 PNG/JPEG/WEBP 图片和 TXT/Markdown 文本附件，附件只发送给当前模型请求，不自动写入知识库。需要协作研究时，由 Agent 在对话中按需创建 child Run，不再使用固定的独立研究模式。
 
 知识库中的图片和扫描页会保留原图资源，同时生成独立的 `image_ocr` / `image_caption` 检索块；原图存于上传资源文件，不把 Base64 或二进制写入 Chunk。OCR 结果默认使用已配置的 `OCR_MODEL`，如需为图片生成额外视觉描述，可配置 `IMAGE_CAPTION_PROMPT`，留空则不会增加第二次视觉模型调用。检索命中图片块时，结果会带 `imageInfo` 和原图资源 URL。
 
@@ -312,7 +312,42 @@ npm run dev
 GET /api/knowledge-bases/{id}/agent-runs/{runID}/stream
 ```
 
-服务端会先重放已产生的事件，再推送后续事件；前端按事件 ID 去重，因此不会重新调用模型。当前事件只在本进程内保留最多 128 个运行、每个运行最多 512 个事件、默认 10 分钟；服务重启或多实例部署不会共享这段短期缓存。
+服务端会先重放已产生的事件，再推送后续事件；前端按事件 ID 去重，因此不会重新调用模型。配置 `AGENT_STREAM_REDIS_URL` 时，Redis Stream 提供跨进程的短期回放和实时尾部；未配置时使用进程内 Hub。两种情况下 PostgreSQL 事件日志仍是 durable replay 和审计来源，最终答案与运行状态保存在 PostgreSQL；Redis/Hub 只保留最多 128 个运行、每个运行最多 512 个事件、默认 10 分钟的传输窗口。
+
+### 同一会话的多任务策略（DeerFlow 风格）
+
+一个 `conversation_id` 表示长期多轮会话，一个 `run_id` 表示其中一次问题执行。一次会话默认只允许一个活跃的根 Run；同一会话后续问题可以通过 `multitask_strategy` 选择冲突处理方式：
+
+| 策略 | 行为 | 适用场景 |
+| --- | --- | --- |
+| `reject`（默认） | 返回 `409 conversation_run_active`，保留当前 Run | 防止误提交和重复执行 |
+| `rollback` | 在数据库事务中取消当前 Run 树，再创建新的 pending Run | 用户明确要放弃当前回答并重新提问 |
+| `interrupt` | 在数据库事务中把当前 Run 树标记为 `interrupted`，发布 `run_interrupted`，再创建新的 pending Run | 用户希望当前回答立即让位给新问题 |
+
+请求示例：
+
+```sh
+curl -X POST http://localhost:8080/api/knowledge-bases/1/agent-chat/stream \
+  -H 'Content-Type: application/json' \
+  -d '{"conversation_id":42,"message":"换个问题：试用期员工是否适用？","multitask_strategy":"interrupt"}'
+```
+
+如果同一会话已有 `run-101` 正在执行，`reject` 会返回类似：
+
+```json
+{
+  "error": {
+    "code": "conversation_run_active",
+    "message": "当前会话已有任务正在执行",
+    "active_run_id": "run-101",
+    "active_status": "running",
+    "requested_strategy": "reject",
+    "conversation_id": 42
+  }
+}
+```
+
+`rollback` 和 `interrupt` 不删除旧 Run：旧 Run 及其 attempt、事件和 checkpoint 仍可用于审计；新的 Run 只从最近一次成功的会话 checkpoint 继续，不会把被替换 Run 的半成品状态当成新问题上下文。旧 Worker 通过数据库租约 fencing 失去写入资格，当前进程内的 Hub 也会取消它；因此“替换一次执行”和“创建下一轮执行”是两个清晰的 `run_id`。
 
 ## WeKnora 风格 RAG 评测
 
@@ -333,28 +368,6 @@ curl http://localhost:8080/api/knowledge-bases/1/evaluations/12
 ```
 
 请求中的 `passage_chunk_ids` 用于把数据集的 corpus `pid` 映射到当前知识库的稳定 Chunk 引用，例如 `{"10":"3:5"}`。没有映射就无法将 qrels 与真实检索结果比较。
-
-## 最小 Multi-Agent 协作
-
-`POST /api/knowledge-bases/{id}/multi-agent-chat` 提供一个非流式的进程内协作示例：`Supervisor` 先让受最大步数限制的只读 `Researcher` 根据证据自主决定是否继续检索，再把带引用的研究资料交给无工具的 `Answerer` 生成最终回答。Researcher 只允许访问当前知识库的 `knowledge_search` 工具，并会阻止重复查询。
-
-```sh
-curl -X POST http://localhost:8080/api/knowledge-bases/1/multi-agent-chat \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"这份资料如何启动服务？","topK":5}'
-```
-
-需要观察研究轮次时使用 SSE：
-
-```sh
-curl -N -X POST http://localhost:8080/api/knowledge-bases/1/multi-agent-chat/stream \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"这份资料如何启动服务？","topK":5}'
-```
-
-事件包括 `research_tool_called`、`research_tool_finished`、`research_summary`、`answerer_finished` 和 `run_finished`；原有非流式接口保持不变。
-
-响应中的 `steps` 会标记 `researcher` 和 `answerer` 的执行状态。资料不足时会直接返回拒答，不再额外调用回答模型。该入口暂不保存会话，但已提供独立 SSE 路由；同时不引入 SQL/schema、Redis 或 A2A。已有的 `/agent-chat` 和 `/agent-chat/stream` 仍是带会话的主问答入口。
 
 ## 最小 MCP 只读适配
 
@@ -384,27 +397,6 @@ curl -X POST http://localhost:8080/api/knowledge-bases/1/mcp \
 ```
 
 Go 侧的最小客户端位于 `internal/mcp`，可用于把同一个只读工具接入后续 Agent 编排；当前没有把 API Key 或模型调用移到浏览器。
-
-## 最小 A2A HTTP 适配
-
-当前提供一个项目内的最小 Agent-to-Agent HTTP 入口，用于让其他 Agent 以任务方式调用本项目的 Multi-Agent Supervisor。它不是完整的官方 A2A 实现，暂不提供分布式队列、认证或推送流；任务使用 PostgreSQL 持久化。
-
-```text
-GET  /.well-known/agent.json   查看 Agent Card
-POST /api/a2a/tasks            创建任务
-GET  /api/a2a/tasks/{id}       查询任务状态
-GET  /api/a2a/tasks/{id}/result 获取完成结果
-```
-
-创建任务示例：
-
-```sh
-curl -X POST http://localhost:8080/api/a2a/tasks \
-  -H 'Content-Type: application/json' \
-  -d '{"knowledge_base_id":1,"message":"这份资料如何启动服务？","top_k":5}'
-```
-
-任务会经历 `submitted → working → completed`，失败时进入 `failed`。服务启动时使用 PostgreSQL 保存任务，后台 A2A Runner 负责领取、执行和定期清理过期终态任务；任务结果在服务重启后仍可查询。默认保留 7 天，可通过 `A2A_TASK_RETENTION` 和 `A2A_CLEANUP_INTERVAL` 调整。已有 `/metrics` 会记录 `a2a_tasks_submitted_total`、`a2a_tasks_started_total`、`a2a_tasks_completed_total`、`a2a_tasks_failed_total` 和总耗时。内存 Store 仅用于单元测试和本地简化示例。
 
 Go pprof 诊断接口默认关闭。需要本机排查性能时，可在 `.env` 设置 `PPROF_ADDRESS=127.0.0.1:6060`，然后访问 `http://127.0.0.1:6060/debug/pprof/`。不要将该端口暴露到公网。
 

@@ -19,6 +19,17 @@ func TestNewEventKeepsWireEnvelopeMinimal(t *testing.T) {
 	}
 }
 
+func TestIsTerminalEventIncludesInterrupted(t *testing.T) {
+	for _, eventType := range []EventType{EventRunFinished, EventRunFailed, EventRunCanceled, EventRunInterrupted} {
+		if !IsTerminalEvent(eventType) {
+			t.Fatalf("IsTerminalEvent(%q) = false, want true", eventType)
+		}
+	}
+	if IsTerminalEvent(EventToolFinished) {
+		t.Fatal("tool_finished must not be a terminal run event")
+	}
+}
+
 func containsJSONField(payload []byte, field string) bool {
 	var values map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &values); err != nil {

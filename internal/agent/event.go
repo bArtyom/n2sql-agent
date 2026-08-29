@@ -88,6 +88,18 @@ func EventCategory(eventType EventType) string {
 	}
 }
 
+// IsTerminalEvent reports whether an event closes the current Agent run.
+// Keeping this in the event contract prevents each transport from drifting
+// when a new terminal lifecycle event is added.
+func IsTerminalEvent(eventType EventType) bool {
+	switch eventType {
+	case EventRunFinished, EventRunFailed, EventRunCanceled, EventRunInterrupted:
+		return true
+	default:
+		return false
+	}
+}
+
 func validEventType(eventType EventType) bool {
 	switch eventType {
 	case EventRunStarted,

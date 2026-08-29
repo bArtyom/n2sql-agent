@@ -719,7 +719,7 @@ func withHistorySummaryStats(sink agentruntime.EventSink, stats HistorySummarySt
 	}
 	return func(event agent.Event) error {
 		switch event.Type {
-		case agent.EventRunFinished, agent.EventRunFailed, agent.EventRunCanceled:
+		case agent.EventRunFinished, agent.EventRunFailed, agent.EventRunCanceled, agent.EventRunInterrupted:
 			if data, ok := event.Data.(map[string]any); ok {
 				data["history_summary"] = stats
 			}

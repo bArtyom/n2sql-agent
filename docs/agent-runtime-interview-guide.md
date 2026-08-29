@@ -580,6 +580,20 @@ Redis 适合实时事件和短期回放，但 TTL、内存容量和故障策略�
 
 > “我把会话和执行分开建模。`conversation_id` 串起一段多轮聊天，负责关联会话标题、普通消息和线程级上下文；`run_id` 表示其中一轮异步 Agent 执行，负责状态、SSE、租约和 checkpoint。一个 conversation 可以有多个 run，同一个 run 发生 Worker 重试时 run_id 不变，只更换 execution_id 和 lease token。”
 
+### 同一个会话同时提交两个问题时怎么处理？
+
+我在提交根 Run 时按 `conversation_id` 做原子准入，默认只允许一个活跃 Run。请求可以选择 DeerFlow 风格的三种策略：
+
+- `reject`：发现 `pending`、`running`、`waiting_children` 或 `waiting_approval` 的根 Run 时返回 `409`，不创建第二个 Run；
+- `rollback`：事务内把当前 Run 及其未完成子 Run 标记为 `canceled`，记录 `stop_reason=multitask_rollback`，然后创建新的 `pending` Run；
+- `interrupt`：事务内把当前 Run 树标记为 `interrupted`，发布 `run_interrupted` 控制事件，再创建新的 `pending` Run。
+
+实现上使用 PostgreSQL 事务锁住会话，并用部分唯一索引约束活跃根 Run。这样即使两个 HTTP 请求同时到达，也不可能绕过业务代码创建两个活跃根 Run。旧 Run 不会物理删除，事件、attempt 和 checkpoint 保留用于审计；新 Run 只读取最近的成功线程 checkpoint，不继承被回滚/中断 Run 的半成品状态。Worker 通过 lease token fencing 失去旧 Run 的写权限，SSE 则收到 `run_canceled` 或 `run_interrupted` 后结束旧 Run 的流。
+
+面试时可以这样回答：
+
+> “我把长期会话和一次执行分开。`conversation_id` 负责串起历史，`run_id` 负责绑定本轮状态、SSE、租约和 checkpoint。一个会话默认只允许一个活跃根 Run；新请求可以 reject、rollback 或 interrupt。准入在 PostgreSQL 事务中完成，并用部分唯一索引兜底。替换旧 Run 时保留审计记录，但新 Run 只从最近成功 checkpoint 恢复，旧 Worker 通过 lease token fencing 不能继续覆盖状态。”
+
 ### Worker 崩溃后怎样避免旧 Worker 覆盖新状态？
 
 领取时生成新 `lease_token`，写 checkpoint、续租、成功和失败状态时都必须匹配 token；checkpoint 还比较 `expected_version`。旧 Worker 的写入会得到 lease/version conflict。

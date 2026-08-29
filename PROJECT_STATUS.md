@@ -23,7 +23,7 @@
 
 - GraphRAG 第一版已接入：`graph_extract` 异步任务从文本 Chunk 抽取实体/关系，Neo4j 保存实体、关系和 Chunk 引用；查询侧抽取问题实体做一跳召回，并与向量/关键词候选统一融合、Rerank、上下文扩展和引用。Neo4j 通过 `NEO4J_ENABLE` 可选开启，未配置或调用失败时回退原 Hybrid RAG。当前待补已有文档回填、删除/重索引清理和真实 Neo4j 冒烟评测。
 
-- 最新提交：`0aab837 fix: fence agent worker leases`；Agent/RAG 主线最近完成 Worker 租约 fencing，避免旧 Worker 在任务被接管后继续续租或覆盖新 Worker 的终态。
+- Agent/RAG 主线最近完成 Worker 租约 fencing，并完成 DeerFlow 风格的会话多 Run 准入策略；旧 Worker 不能继续续租或覆盖被替换 Run 的终态。具体提交以 `git log --oneline` 为准。
 - 当前工作区正在收口 DeerFlow/LangGraph 风格的统一 Agent checkpoint；README.md 保留用户本地启动记录改动，不参与本切片提交。
 - 第一阶段知识库问答底座已完成：知识库、文档上传和 Worker、Markdown/TXT/PDF 提取、OCR 最小骨架、父子 chunk、embedding、混合检索、Rerank、引用和普通 RAG/SSE。
 - Agent Runtime 最小闭环已完成：Tool Registry、Function Calling、受限 ReAct、最大步数/超时/取消、工具失败安全降级、SSE 事件、上下文摘要、会话历史、幂等和运行摘要。
@@ -37,6 +37,7 @@
 - Agent SSE gap 恢复增强：事件过期后先查询 Run 状态；若仍为 `running`，前端不再携带过期的 `Last-Event-ID`，而是重新订阅 Redis 当前尾部继续接收后续事件；终态任务仍从 PostgreSQL 恢复最终答案，避免慢前端把长任务误判为失败。
 - Agent Worker 租约 fencing 已补齐：`agent_runs` 增加 `lease_token`，每次领取任务生成新令牌；续租、成功、失败和取消都必须匹配当前令牌，旧 Worker 即使延迟恢复也不能续租或覆盖新 Worker 的终态。租约过期回收和终态更新会清空令牌。
 - Agent Worker 租约丢失主动停止已补齐：心跳续租失败后立即取消本次执行上下文，旧 Worker 不再继续调用模型或工具；数据库 token fencing 继续作为最终写入保护。
+- DeerFlow 风格会话多任务策略已接入：同一 `conversation_id` 的活跃根 Run 默认 `reject`；也支持事务内替换旧 Run 树的 `rollback` 和 `interrupt`。替换会保留旧 Run、attempt、事件与 checkpoint，创建新的 pending Run，并向旧 Hub/SSE 发布对应终态事件；子 Run 不参与会话级唯一约束。
 - Agent Worker 已区分取消原因：用户取消仍进入 `canceled`；心跳导致的 `ErrLeaseLost` 不写终态，保留运行记录等待租约回收后由下一个 Worker 接管，避免把故障恢复误判成用户主动停止。
 - Agent Worker 已增加最大接管次数：租约过期的 Run 最多尝试 3 次；超过次数后进入 `failed` 并记录 `worker lease expired: maximum attempts reached`，避免故障任务无限循环。
 - Agent Run 已采用 DeerFlow 风格的失败状态：`agent_runs.status` 区分 `succeeded`、`failed`、`timeout`、`canceled`，`stop_reason` 保存有限的停止原因，`error_message` 保存可读错误；运行时仍可在内存中使用细粒度 `FailureCategory`，但不对外持久化。
@@ -69,8 +70,8 @@
 - 会话体验四连切片：①自动标题——首轮问答后若仍是默认标题，用问题摘要（30 字截断）重命名，不覆盖用户已命名；②追问"换一批"——生成建议后按钮变为换一批，接口无状态直接再次调用；③会话更多菜单——"⋯"菜单（置顶/改名/清空消息/复制 Markdown/删除），清空走 `DELETE /conversations/{id}/messages`（事务删消息/摘要/幂等键，保留会话），复制为纯前端拼 Markdown；④正文内引用标记——提示词要求模型输出 `<kb doc_id pos/>`，前端渲染成可点击引用 pill（事件委托打开原文抽屉），流式显示"〔引用〕"，模型不输出标签时行为不变（来源卡片照旧）。
 - 可靠性三连切片：①断流续传——未完成的标准 Agent 运行持久化到 localStorage，刷新后重建占位消息并重连 Hub 重放（后端复用已有 `GET /agent-runs/{runID}/stream`，零新增接口）；②历史消息游标分页——`GET /conversations/{id}/messages` 支持 `before_id`+`limit`（默认 50/上限 200）返回 `{messages, has_more}`，前端滚动到顶部加载更早并保持视口；③实时检索进度——普通 RAG 流式新增 `retrieval_started`/`retrieval_finished` 阶段事件，Agent 轨迹头部流式中显示"正在检索知识库…/搜索完成 · N 条引用"实时徽标。
 - 最新工具结果类型化渲染：`document_list`/`document_info` 工具返回有界结构化 metadata（`documents`/`document_info`），engine 在 `tool_finished` 事件透传；前端展开工具轨迹时 document_list 渲染为表格（文档/类型/大小/状态）、document_info 渲染为键值卡片；工具完成 label 按工具名区分（知识库检索完成/查看文档列表完成等）。
-- 最新会话内模型切换切片：Provider 增加服务端聊天模型 allowlist，会话保存 `chat_model`；`PATCH /conversations/{id}` 和 Agent 请求支持选择模型，运行时只接受已配置模型；前端设置抽屉可维护可选聊天模型列表，会话顶部选择器会保存并恢复当前模型。Embedding、Rerank、协作研究和 A2A 未改变。
-- 最新深度思考展示切片：解析 OpenAI-compatible `reasoning_content`，标准 Agent 在 SSE 中发出有界、脱敏的 `reasoning_delta`；前端显示默认折叠的“深度思考”卡片，内容只保留在当前页面，不写入会话历史。协作研究模式不受影响。
+- 最新会话内模型切换切片：Provider 增加服务端聊天模型 allowlist，会话保存 `chat_model`；`PATCH /conversations/{id}` 和 Agent 请求支持选择模型，运行时只接受已配置模型；前端设置抽屉可维护可选聊天模型列表，会话顶部选择器会保存并恢复当前模型。Embedding 和 Rerank 未改变。
+- 最新深度思考展示切片：解析 OpenAI-compatible `reasoning_content`，标准 Agent 在 SSE 中发出有界、脱敏的 `reasoning_delta`；前端显示默认折叠的“深度思考”卡片，内容只保留在当前页面，不写入会话历史。
 - 最新可控思考与聊天附件切片：标准 Agent 支持 `fast/standard/deep` 思考级别，显式映射为 `reasoning_effort`；输入区支持 PNG/JPEG/WEBP 图片和 TXT/Markdown 文本附件，服务端做数量、大小、base64、UTF-8 和图片签名校验，附件只参与当前一轮模型请求，不写入历史或知识库。
 - 最新会话搜索切片：`GET /api/knowledge-bases/{id}/conversations?q=...&limit=...` 搜索当前知识库内会话标题和消息内容；服务端沿用管理员隔离并限制查询长度/返回条数，前端会话栏提供 250ms 防抖搜索和无结果提示。
 - 当前会话搜索范围：暂时只保留会话标题搜索，使用标题索引；历史消息跨会话搜索先搁置，避免当前版本引入较慢的消息查询链路。

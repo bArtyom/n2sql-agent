@@ -52,6 +52,12 @@ func TestActiveRunConflictCarriesRunMetadata(t *testing.T) {
 	}
 }
 
+func TestInterruptedIsTerminal(t *testing.T) {
+	if !IsTerminalStatus(StatusInterrupted) {
+		t.Fatal("interrupted status must be terminal")
+	}
+}
+
 func TestMultitaskAdmitterContractIsUsable(t *testing.T) {
 	var _ MultitaskAdmitter = multitaskAdmitterStub{}
 	result, err := (multitaskAdmitterStub{}).Admit(context.Background(), AdmissionInput{

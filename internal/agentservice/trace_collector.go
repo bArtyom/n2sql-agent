@@ -84,7 +84,7 @@ func (c *traceCollector) observe(event agent.Event) {
 		c.events[index].Status = traceToolStatus(failed)
 		c.events[index].ResultSummary = boundedTraceText(traceResultSummary(data))
 		c.events[index].SourceKeys = traceSourceKeys(data)
-	case agent.EventRunFailed, agent.EventRunCanceled:
+	case agent.EventRunFailed, agent.EventRunCanceled, agent.EventRunInterrupted:
 		for index := len(c.events) - 1; index >= 0; index-- {
 			if c.events[index].Status == "running" {
 				c.events[index].Status = "failed"

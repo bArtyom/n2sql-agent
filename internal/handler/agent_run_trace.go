@@ -65,7 +65,7 @@ func safeAgentRunEvents(events []agentstream.Event) []safeAgentRunEvent {
 	for _, event := range events {
 		item := safeAgentRunEvent{ID: event.ID, Type: event.Type, Step: event.StepNumber, CreatedAt: event.CreatedAt}
 		switch event.Type {
-		case string(agent.EventRunStarted), string(agent.EventRunFinished), string(agent.EventRunFailed), string(agent.EventRunCanceled):
+		case string(agent.EventRunStarted), string(agent.EventRunFinished), string(agent.EventRunFailed), string(agent.EventRunCanceled), string(agent.EventRunInterrupted):
 			// Lifecycle type and timing are enough for the diagnostic timeline.
 		case string(agent.EventToolCalled), string(agent.EventToolFinished), string(agent.EventChildEvent):
 			item.Summary = safeToolEventSummary(event)

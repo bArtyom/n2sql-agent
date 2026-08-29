@@ -141,7 +141,7 @@ func (s *RedisEventStore) SubscribeFrom(ctx context.Context, runID string, knowl
 		return snapshot, closedEventChannel(), func() {}, true, nil
 	}
 	for _, event := range snapshot {
-		if event.Type == string(agent.EventRunFinished) || event.Type == string(agent.EventRunFailed) || event.Type == string(agent.EventRunCanceled) {
+		if agent.IsTerminalEvent(agent.EventType(event.Type)) {
 			return snapshot, closedEventChannel(), func() {}, true, nil
 		}
 	}
@@ -177,7 +177,7 @@ func (s *RedisEventStore) SubscribeFrom(ctx context.Context, runID string, knowl
 					case <-streamCtx.Done():
 						return
 					}
-					if event.Type == string(agent.EventRunFinished) || event.Type == string(agent.EventRunFailed) || event.Type == string(agent.EventRunCanceled) {
+					if agent.IsTerminalEvent(agent.EventType(event.Type)) {
 						return
 					}
 				}
@@ -188,7 +188,7 @@ func (s *RedisEventStore) SubscribeFrom(ctx context.Context, runID string, knowl
 }
 
 func isTerminalAgentEvent(eventType string) bool {
-	return eventType == string(agent.EventRunFinished) || eventType == string(agent.EventRunFailed) || eventType == string(agent.EventRunCanceled)
+	return agent.IsTerminalEvent(agent.EventType(eventType))
 }
 
 func decodeRedisEvents(entries []redis.XMessage, runID string) []agentstream.Event {

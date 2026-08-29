@@ -455,7 +455,7 @@ func setAgentSSEHeaders(w http.ResponseWriter) {
 }
 
 func isTerminalStreamEvent(eventType string) bool {
-	return eventType == string(agent.EventRunFinished) || eventType == string(agent.EventRunFailed) || eventType == string(agent.EventRunCanceled)
+	return agent.IsTerminalEvent(agent.EventType(eventType))
 }
 
 func hasTerminalStreamEvent(events []agentstream.Event) bool {
@@ -486,6 +486,7 @@ func writeAgentSSEEvent(w http.ResponseWriter, flusher http.Flusher, eventType s
 		string(agent.EventRunFinished),
 		string(agent.EventRunFailed),
 		string(agent.EventRunCanceled),
+		string(agent.EventRunInterrupted),
 		string(agent.EventChildEvent):
 	default:
 		return fmt.Errorf("invalid agent SSE event type %q", eventType)

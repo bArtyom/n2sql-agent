@@ -515,6 +515,13 @@ func (s *PostgresStore) Admit(ctx context.Context, input AdmissionInput) (Admiss
 		if replaceErr != nil {
 			return AdmissionResult{}, replaceErr
 		}
+		if strategy == MultitaskInterrupt {
+			active.Status = StatusInterrupted
+			active.StopReason = StopReasonMultitaskInterrupt
+		} else {
+			active.Status = StatusCanceled
+			active.StopReason = StopReasonMultitaskRollback
+		}
 		result.ReplacedRun = &active
 		result.ReplacedChildIDs = childIDs
 	}
