@@ -426,3 +426,56 @@ func TestRunnerLeavesRunReclaimableWhenLeaseIsLost(t *testing.T) {
 		t.Fatalf("status = %s, want running for later lease recovery", store.status)
 	}
 }
+
+type staleCompletionStore struct {
+	runStoreStub
+}
+
+func (*staleCompletionStore) MarkSucceeded(context.Context, int64, string) error {
+	return ErrLeaseLost
+}
+
+func TestRunnerDoesNotPublishFinishedEventAfterExternalCancellation(t *testing.T) {
+	store := &staleCompletionStore{runStoreStub: runStoreStub{
+		run:    Run{ID: 11, RunID: "run-replaced", LeaseToken: "lease-old"},
+		status: StatusPending,
+	}}
+	started := make(chan struct{})
+	var events []agent.Event
+	runner, err := NewRunnerWithEventSink(store, ExecutorFunc(func(ctx context.Context, _ Run, sink EventSink) error {
+		close(started)
+		<-ctx.Done()
+		_ = sink(agent.Event{Type: agent.EventRunFinished})
+		return nil
+	}), func(Run) func(agent.Event) error {
+		return func(event agent.Event) error {
+			events = append(events, event)
+			return nil
+		}
+	})
+	if err != nil {
+		t.Fatalf("NewRunnerWithEventSink() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, runErr := runner.RunOnce(ctx)
+		done <- runErr
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("runner did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runner did not finish after cancellation")
+	}
+	for _, event := range events {
+		if event.Type == agent.EventRunFinished {
+			t.Fatalf("stale run published finished event: %#v", events)
+		}
+	}
+}

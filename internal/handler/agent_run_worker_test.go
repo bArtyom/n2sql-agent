@@ -191,6 +191,14 @@ func TestPersistentAgentRunSubmissionInterruptReturnsReplacementMetadata(t *test
 	if response.Code != http.StatusAccepted || !strings.Contains(response.Body.String(), `"replaced_status":"interrupted"`) {
 		t.Fatalf("status=%d body=%s, want interrupted replacement metadata", response.Code, response.Body.String())
 	}
+	snapshot, _, cancel, _, err := hub.Subscribe("run-201", 7, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	if len(snapshot) == 0 || snapshot[len(snapshot)-1].Type != "run_interrupted" {
+		t.Fatalf("replaced run events = %#v, want run_interrupted", snapshot)
+	}
 }
 
 type waitingChildrenAnswerer struct{}

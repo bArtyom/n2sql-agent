@@ -219,7 +219,7 @@ func New(dependencies Dependencies) http.Handler {
 			streamBridge = agentrun.NewHubStreamBridge(hub)
 		}
 		if dependencies.AgentRuns != nil && dependencies.AgentRunExecutor != nil {
-			mux.Handle("POST /api/knowledge-bases/{id}/agent-chat/stream", handler.NewPersistentAgentRunSubmission(dependencies.AgentMaxHistoryBytes, dependencies.AgentRuns, dependencies.Conversations, hub))
+			mux.Handle("POST /api/knowledge-bases/{id}/agent-chat/stream", handler.NewPersistentAgentRunSubmissionWithEventStore(dependencies.AgentMaxHistoryBytes, dependencies.AgentRuns, dependencies.Conversations, hub, dependencies.AgentEventStore))
 		} else {
 			mux.Handle("POST /api/knowledge-bases/{id}/agent-chat/stream", handler.NewKnowledgeBaseAgentChatStreamWithHub(dependencies.AgentStreamingAnswers, dependencies.Conversations, dependencies.AgentMaxHistoryBytes, registry, hub))
 		}

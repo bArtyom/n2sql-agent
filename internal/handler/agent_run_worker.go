@@ -34,6 +34,13 @@ type persistedAgentRequest struct {
 // pending run, and returns immediately. The caller then opens the separate SSE
 // stream endpoint with the returned run_id.
 func NewPersistentAgentRunSubmission(maxHistoryBytes int, store agentrun.Store, conversations *conversation.Service, hub *agentstream.Hub) http.Handler {
+	return NewPersistentAgentRunSubmissionWithEventStore(maxHistoryBytes, store, conversations, hub, nil)
+}
+
+// NewPersistentAgentRunSubmissionWithEventStore is the production constructor
+// for the async Agent endpoint. The optional durable event store receives the
+// replacement control event before the old in-process Hub is canceled.
+func NewPersistentAgentRunSubmissionWithEventStore(maxHistoryBytes int, store agentrun.Store, conversations *conversation.Service, hub *agentstream.Hub, eventStore agentrun.EventStore) http.Handler {
 	if maxHistoryBytes <= 0 {
 		maxHistoryBytes = agent.DefaultMaxHistoryBytes
 	}
@@ -103,7 +110,7 @@ func NewPersistentAgentRunSubmission(maxHistoryBytes int, store agentrun.Store, 
 			writeKnowledgeBaseAgentChatError(w, fmt.Errorf("admitted agent run ID %q does not match requested ID %q", admission.Run.RunID, runID))
 			return
 		}
-		cancelReplacedAgentRun(hub, knowledgeBaseID, admission)
+		cancelReplacedAgentRun(r.Context(), hub, eventStore, knowledgeBaseID, admission)
 		finishNewHubRun = false
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Agent-Run-ID", runID)
@@ -135,16 +142,54 @@ func admitPersistentAgentRun(ctx context.Context, store agentrun.Store, input ag
 	return agentrun.AdmissionResult{Run: run}, nil
 }
 
-func cancelReplacedAgentRun(hub *agentstream.Hub, knowledgeBaseID int64, admission agentrun.AdmissionResult) {
-	if hub == nil || admission.ReplacedRun == nil {
+func cancelReplacedAgentRun(ctx context.Context, hub *agentstream.Hub, eventStore agentrun.EventStore, knowledgeBaseID int64, admission agentrun.AdmissionResult) {
+	if admission.ReplacedRun == nil {
 		return
 	}
-	if err := hub.Cancel(admission.ReplacedRun.RunID, knowledgeBaseID); err != nil && !errors.Is(err, agentstream.ErrRunNotFound) {
-		slog.Warn("cancel replaced agent run failed", "run_id", admission.ReplacedRun.RunID, "error", err)
+	oldRun := admission.ReplacedRun
+	eventType := agent.EventRunCanceled
+	if oldRun.Status == agentrun.StatusInterrupted {
+		eventType = agent.EventRunInterrupted
+	}
+	event, err := agent.NewEvent(
+		fmt.Sprintf("%s-replaced-by-%s", oldRun.RunID, admission.Run.RunID),
+		oldRun.RunID,
+		eventType,
+		map[string]any{
+			"reason":             oldRun.StopReason,
+			"replaced_by_run_id": admission.Run.RunID,
+			"status":             oldRun.Status,
+		},
+	)
+	if err == nil {
+		if eventStore != nil {
+			if appendErr := eventStore.Append(ctx, *oldRun, agentstream.Event{
+				Version:   agentstream.EventSchemaVersion,
+				ID:        event.ID,
+				RunID:     event.RunID,
+				Type:      string(event.Type),
+				Category:  event.Category,
+				Data:      event.Data,
+				CreatedAt: event.CreatedAt,
+			}); appendErr != nil {
+				slog.WarnContext(ctx, "persist_replaced_agent_run_event_failed", "run_id", oldRun.RunID, "error", appendErr)
+			}
+		}
+		if hub != nil {
+			if publishErr := hub.PublishAgent(event); publishErr != nil && !errors.Is(publishErr, agentstream.ErrRunNotFound) {
+				slog.WarnContext(ctx, "publish_replaced_agent_run_event_failed", "run_id", oldRun.RunID, "error", publishErr)
+			}
+		}
+	}
+	if hub == nil {
+		return
+	}
+	if err := hub.Cancel(oldRun.RunID, knowledgeBaseID); err != nil && !errors.Is(err, agentstream.ErrRunNotFound) {
+		slog.WarnContext(ctx, "cancel replaced agent run failed", "run_id", oldRun.RunID, "error", err)
 	}
 	for _, childID := range admission.ReplacedChildIDs {
 		if err := hub.Cancel(childID, knowledgeBaseID); err != nil && !errors.Is(err, agentstream.ErrRunNotFound) {
-			slog.Warn("cancel replaced child agent run failed", "run_id", childID, "parent_run_id", admission.ReplacedRun.RunID, "error", err)
+			slog.WarnContext(ctx, "cancel replaced child agent run failed", "run_id", childID, "parent_run_id", oldRun.RunID, "error", err)
 		}
 	}
 }

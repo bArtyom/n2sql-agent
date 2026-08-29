@@ -25,6 +25,7 @@ const (
 	EventRunFinished      EventType = "run_finished"
 	EventRunFailed        EventType = "run_failed"
 	EventRunCanceled      EventType = "run_canceled"
+	EventRunInterrupted   EventType = "run_interrupted"
 	EventChildEvent       EventType = "child_event"
 	EventChildResult      EventType = "child_result"
 	EventLoopDetected     EventType = "loop_detected"
@@ -80,7 +81,7 @@ func EventCategory(eventType EventType) string {
 	case EventApprovalRequired, EventApprovalResolved, EventApprovalExpired,
 		EventLoopDetected, EventSkillLoaded, EventChildEvent, EventChildResult:
 		return "control"
-	case EventRunStarted, EventStepStarted, EventRunFinished, EventRunFailed, EventRunCanceled:
+	case EventRunStarted, EventStepStarted, EventRunFinished, EventRunFailed, EventRunCanceled, EventRunInterrupted:
 		return "lifecycle"
 	default:
 		return "unknown"
@@ -101,6 +102,7 @@ func validEventType(eventType EventType) bool {
 		EventRunFinished,
 		EventRunFailed,
 		EventRunCanceled,
+		EventRunInterrupted,
 		EventChildEvent,
 		EventChildResult,
 		EventLoopDetected:

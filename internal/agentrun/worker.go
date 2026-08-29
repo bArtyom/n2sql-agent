@@ -100,6 +100,16 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 		executionContext, stopChildTimeout = context.WithTimeout(executionContext, r.childTimeout)
 		defer stopChildTimeout()
 	}
+	rawSink := sink
+	sink = func(event agent.Event) error {
+		if executionContext.Err() != nil && event.Type != agent.EventRunCanceled && event.Type != agent.EventRunInterrupted {
+			if cause := context.Cause(executionContext); cause != nil {
+				return cause
+			}
+			return context.Canceled
+		}
+		return rawSink(event)
+	}
 	go r.renewLease(executionContext, run, stopHeartbeat)
 	err = r.executor.Execute(executionContext, run, sink)
 	if err == nil {
