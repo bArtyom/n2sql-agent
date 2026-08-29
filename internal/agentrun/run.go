@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bArtyom/n2sql-agent/internal/agentruntime"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type Status string
@@ -198,14 +199,16 @@ type Store interface {
 }
 
 const (
-	StopReasonModelError      = "model_error"
-	StopReasonToolError       = "tool_error"
-	StopReasonTimeout         = "timeout"
-	StopReasonCanceled        = "canceled"
-	StopReasonStepLimit       = "step_limit"
-	StopReasonValidationError = "validation_error"
-	StopReasonInternalError   = "internal_error"
-	StopReasonOrphanRecovered = "orphan_recovered"
+	StopReasonModelError         = "model_error"
+	StopReasonToolError          = "tool_error"
+	StopReasonTimeout            = "timeout"
+	StopReasonCanceled           = "canceled"
+	StopReasonStepLimit          = "step_limit"
+	StopReasonValidationError    = "validation_error"
+	StopReasonInternalError      = "internal_error"
+	StopReasonOrphanRecovered    = "orphan_recovered"
+	StopReasonMultitaskRollback  = "multitask_rollback"
+	StopReasonMultitaskInterrupt = "multitask_interrupt"
 )
 
 // StoppedError carries a bounded lifecycle reason across the executor/Worker
@@ -317,6 +320,8 @@ type PostgresStore struct {
 	checkpointBlobs  *ToolResultFileStore
 	checkpointInline int
 }
+
+var _ MultitaskAdmitter = (*PostgresStore)(nil)
 
 func (s *PostgresStore) PendingCount(ctx context.Context) (int64, error) {
 	var count int64
@@ -433,7 +438,7 @@ func (s *PostgresStore) CancelTree(ctx context.Context, runID string, knowledgeB
 			lease_until = NULL, heartbeat_at = NULL, lease_token = NULL,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id IN (SELECT id FROM run_tree)
-		  AND status NOT IN ('succeeded', 'failed', 'timeout', 'canceled')`, rootID); err != nil {
+		  AND status NOT IN ('succeeded', 'failed', 'timeout', 'canceled', 'interrupted')`, rootID); err != nil {
 		return nil, fmt.Errorf("cancel agent run tree: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -461,6 +466,221 @@ func (s *PostgresStore) Create(ctx context.Context, input CreateInput) (Run, err
 		return Run{}, fmt.Errorf("create agent run: %w", err)
 	}
 	return run, nil
+}
+
+// Admit atomically applies the conversation-level multitask policy and
+// inserts a new root Run. The advisory transaction lock serializes the
+// no-existing-row case; the partial unique index remains the database-level
+// invariant that protects callers which race with older insertion paths.
+func (s *PostgresStore) Admit(ctx context.Context, input AdmissionInput) (AdmissionResult, error) {
+	if s == nil || s.db == nil {
+		return AdmissionResult{}, ErrInvalidRun
+	}
+	strategy, err := NormalizeMultitaskStrategy(string(input.Strategy))
+	if err != nil {
+		return AdmissionResult{}, err
+	}
+	create := input.Create
+	create.RunKind = runKind(create.RunKind)
+	if create.RunKind != KindRoot || create.RunID == "" || create.KnowledgeBaseID <= 0 || create.ConversationID < 0 || len(create.Request) == 0 || !json.Valid(create.Request) {
+		return AdmissionResult{}, ErrInvalidRun
+	}
+	if create.ConversationID == 0 {
+		run, err := s.Create(ctx, create)
+		if err != nil {
+			return AdmissionResult{}, err
+		}
+		return AdmissionResult{Run: run}, nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AdmissionResult{}, fmt.Errorf("begin admit agent run: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, create.ConversationID); err != nil {
+		return AdmissionResult{}, fmt.Errorf("lock conversation agent runs: %w", err)
+	}
+
+	active, err := scanActiveRootRun(ctx, tx, create.ConversationID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return AdmissionResult{}, fmt.Errorf("find active conversation agent run: %w", err)
+	}
+	result := AdmissionResult{}
+	if err == nil {
+		if strategy == MultitaskReject {
+			return AdmissionResult{}, &ActiveRunConflict{ActiveRun: active, Requested: strategy}
+		}
+		childIDs, replaceErr := replaceActiveRunTree(ctx, tx, active.ID, strategy)
+		if replaceErr != nil {
+			return AdmissionResult{}, replaceErr
+		}
+		result.ReplacedRun = &active
+		result.ReplacedChildIDs = childIDs
+	}
+
+	newRun, err := insertPendingRootRun(ctx, tx, create)
+	if err != nil {
+		if isActiveConversationUniqueViolation(err) {
+			_ = tx.Rollback()
+			active, lookupErr := s.findActiveRootRun(ctx, create.ConversationID)
+			if lookupErr == nil {
+				return AdmissionResult{}, &ActiveRunConflict{ActiveRun: active, Requested: strategy}
+			}
+		}
+		return AdmissionResult{}, fmt.Errorf("create admitted agent run: %w", err)
+	}
+	result.Run = newRun
+	if err := tx.Commit(); err != nil {
+		return AdmissionResult{}, fmt.Errorf("commit admitted agent run: %w", err)
+	}
+	return result, nil
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanRun(row rowScanner, run *Run) error {
+	return row.Scan(
+		&run.ID, &run.RunID, &run.KnowledgeBaseID, &run.ConversationID, &run.ParentRunID, &run.RunKind,
+		&run.Request, &run.Response, &run.Status, &run.AttemptCount, &run.ErrorMessage, &run.StopReason,
+		&run.CreatedAt, &run.StartedAt, &run.FinishedAt, &run.LeaseUntil, &run.HeartbeatAt, &run.LeaseToken,
+		&run.UpdatedAt,
+	)
+}
+
+func scanActiveRootRun(ctx context.Context, tx *sql.Tx, conversationID int64) (Run, error) {
+	var run Run
+	err := scanRun(tx.QueryRowContext(ctx, `
+		SELECT id, run_id, knowledge_base_id, COALESCE(conversation_id, 0), COALESCE(parent_run_id, 0), run_kind,
+			request, response, status, attempt_count, COALESCE(error_message, ''), COALESCE(stop_reason, ''),
+			created_at, started_at, finished_at, lease_until, heartbeat_at, lease_token, updated_at
+		FROM agent_runs
+		WHERE conversation_id = $1
+		  AND run_kind = 'root'
+		  AND status IN ('pending', 'running', 'waiting_children', 'waiting_approval')
+		ORDER BY created_at, id
+		LIMIT 1
+		FOR UPDATE`, conversationID), &run)
+	return run, err
+}
+
+func (s *PostgresStore) findActiveRootRun(ctx context.Context, conversationID int64) (Run, error) {
+	var run Run
+	err := scanRun(s.db.QueryRowContext(ctx, `
+		SELECT id, run_id, knowledge_base_id, COALESCE(conversation_id, 0), COALESCE(parent_run_id, 0), run_kind,
+			request, response, status, attempt_count, COALESCE(error_message, ''), COALESCE(stop_reason, ''),
+			created_at, started_at, finished_at, lease_until, heartbeat_at, lease_token, updated_at
+		FROM agent_runs
+		WHERE conversation_id = $1
+		  AND run_kind = 'root'
+		  AND status IN ('pending', 'running', 'waiting_children', 'waiting_approval')
+		ORDER BY created_at, id
+		LIMIT 1`, conversationID), &run)
+	return run, err
+}
+
+func insertPendingRootRun(ctx context.Context, tx *sql.Tx, input CreateInput) (Run, error) {
+	var run Run
+	err := scanRun(tx.QueryRowContext(ctx, `
+		INSERT INTO agent_runs (run_id, knowledge_base_id, conversation_id, parent_run_id, run_kind, request, status)
+		VALUES ($1, $2, NULLIF($3, 0), NULLIF($4, 0), 'root', $5, 'pending')
+		RETURNING id, run_id, knowledge_base_id, COALESCE(conversation_id, 0), COALESCE(parent_run_id, 0), run_kind,
+			request, response, status, attempt_count, COALESCE(error_message, ''), COALESCE(stop_reason, ''),
+			created_at, started_at, finished_at, lease_until, heartbeat_at, lease_token, updated_at`,
+		input.RunID, input.KnowledgeBaseID, input.ConversationID, input.ParentRunID, input.Request), &run)
+	return run, err
+}
+
+func replaceActiveRunTree(ctx context.Context, tx *sql.Tx, rootID int64, strategy MultitaskStrategy) ([]string, error) {
+	if rootID <= 0 {
+		return nil, ErrInvalidRun
+	}
+	replacementStatus := string(StatusCanceled)
+	replacementAttemptStatus := "canceled"
+	stopReason := StopReasonMultitaskRollback
+	if strategy == MultitaskInterrupt {
+		replacementStatus = string(StatusInterrupted)
+		replacementAttemptStatus = "interrupted"
+		stopReason = StopReasonMultitaskInterrupt
+	}
+	rows, err := tx.QueryContext(ctx, `
+		WITH RECURSIVE run_tree AS (
+			SELECT id, run_id, status
+			FROM agent_runs
+			WHERE id = $1
+			UNION ALL
+			SELECT child.id, child.run_id, child.status
+			FROM agent_runs child
+			JOIN run_tree parent ON child.parent_run_id = parent.id
+		)
+		SELECT run_id
+		FROM run_tree
+		WHERE id <> $1
+		  AND status IN ('pending', 'running', 'waiting_children', 'waiting_approval')
+		ORDER BY run_id`, rootID)
+	if err != nil {
+		return nil, fmt.Errorf("list replaced child runs: %w", err)
+	}
+	var childIDs []string
+	for rows.Next() {
+		var childID string
+		if err := rows.Scan(&childID); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan replaced child run: %w", err)
+		}
+		childIDs = append(childIDs, childID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("iterate replaced child runs: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close replaced child runs: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		WITH RECURSIVE run_tree AS (
+			SELECT id FROM agent_runs WHERE id = $1
+			UNION ALL
+			SELECT child.id
+			FROM agent_runs child
+			JOIN run_tree parent ON child.parent_run_id = parent.id
+		)
+		UPDATE agent_runs
+		SET status = $2, error_message = NULL, stop_reason = $3,
+			finished_at = CURRENT_TIMESTAMP, lease_until = NULL, heartbeat_at = NULL,
+			lease_token = NULL, updated_at = CURRENT_TIMESTAMP
+		WHERE id IN (SELECT id FROM run_tree)
+		  AND status NOT IN ('succeeded', 'failed', 'timeout', 'canceled', 'interrupted')`,
+		rootID, replacementStatus, stopReason); err != nil {
+		return nil, fmt.Errorf("replace active agent run tree: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		WITH RECURSIVE run_tree AS (
+			SELECT id FROM agent_runs WHERE id = $1
+			UNION ALL
+			SELECT child.id
+			FROM agent_runs child
+			JOIN run_tree parent ON child.parent_run_id = parent.id
+		)
+		UPDATE agent_run_attempts AS attempt
+		SET status = $2, error_message = NULL, stop_reason = $3,
+			finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		FROM agent_runs AS run
+		WHERE run.id IN (SELECT id FROM run_tree)
+		  AND attempt.agent_run_id = run.id
+		  AND attempt.attempt_count = run.attempt_count
+		  AND attempt.status NOT IN ('succeeded', 'failed', 'timeout', 'canceled', 'interrupted')`,
+		rootID, replacementAttemptStatus, stopReason); err != nil {
+		return nil, fmt.Errorf("replace active agent run attempts: %w", err)
+	}
+	return childIDs, nil
+}
+
+func isActiveConversationUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "agent_runs_active_root_conversation_idx"
 }
 
 func runKind(kind Kind) Kind {
@@ -1340,7 +1560,7 @@ func (s *PostgresStore) ResumeParentIfChildrenTerminal(ctx context.Context, pare
 		SELECT EXISTS (
 			SELECT 1 FROM agent_runs
 			WHERE parent_run_id = $1
-			  AND status NOT IN ('succeeded', 'failed', 'timeout', 'canceled')
+			  AND status NOT IN ('succeeded', 'failed', 'timeout', 'canceled', 'interrupted')
 		)`, parentID).Scan(&unfinished); err != nil {
 		return false, fmt.Errorf("check child agent runs: %w", err)
 	}

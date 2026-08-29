@@ -3,6 +3,8 @@ package agentrun
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -62,6 +64,52 @@ func TestMultitaskAdmitterContractIsUsable(t *testing.T) {
 	if result.Run.RunID != "run-1" {
 		t.Fatalf("admission result = %#v", result)
 	}
+}
+
+func TestMultitaskMigrationAddsActiveConversationGuard(t *testing.T) {
+	up := readMultitaskMigration(t, "000081_add_agent_run_multitask_strategy.up.sql")
+	for _, fragment := range []string{
+		"agent_runs_status_check",
+		"agent_run_attempts_status_check",
+		"interrupted",
+		"agent_runs_active_root_conversation_idx",
+		"status IN ('pending', 'running', 'waiting_children', 'waiting_approval')",
+		"run_kind = 'root'",
+	} {
+		if !containsSQL(up, fragment) {
+			t.Fatalf("multitask migration missing %q", fragment)
+		}
+	}
+
+	down := readMultitaskMigration(t, "000081_add_agent_run_multitask_strategy.down.sql")
+	if !containsSQL(down, "DROP INDEX IF EXISTS agent_runs_active_root_conversation_idx") {
+		t.Fatalf("down migration does not remove active conversation index")
+	}
+}
+
+func readMultitaskMigration(t *testing.T, name string) string {
+	t.Helper()
+	path := filepath.Join("..", "database", "migrations", "sql", name)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read migration %s: %v", name, err)
+	}
+	return string(data)
+}
+
+func containsSQL(value, fragment string) bool {
+	return len(value) >= len(fragment) &&
+		string([]byte(value)[0:len(value)]) != "" &&
+		contains(value, fragment)
+}
+
+func contains(value, fragment string) bool {
+	for start := 0; start+len(fragment) <= len(value); start++ {
+		if value[start:start+len(fragment)] == fragment {
+			return true
+		}
+	}
+	return false
 }
 
 type multitaskAdmitterStub struct{}
